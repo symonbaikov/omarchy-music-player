@@ -10,15 +10,24 @@ Commands (every result is one JSON object per line on stdout):
   playlists [--browser B] [--max-age S]
   tracks <playlist-id> [--browser B] [--max-age S]
   play <playlist-id> [--index N] [--shuffle 0|1] [--browser B]
-       [--playback-cookies 0|1] [--volume V]
+       [--playback-cookies 0|1] [--volume V] [--repeat off|all|one]
+  radio <video-id> [--mode replace|keep|append] [--browser B] [--title T]
+        [--playback-cookies 0|1] [--volume V] [--repeat off|all|one]
   stop
   paths
 
 `playlists` and `tracks` first print the cached copy (marked "stale" when
 it is older than --max-age) and then, if it was stale or missing, fetch a
 fresh copy and print that too.
+
+`radio` uses YouTube Music's own recommendations: the endless "radio" mix
+(RDAMVM<video-id>) that YouTube Music builds for a song, personalized when
+cookies are used. replace starts it as a new queue; keep lets the playing
+song continue and replaces what comes after it; append (autoplay) adds
+tracks not yet in the queue to its end.
 """
 
+import fcntl
 import json
 import os
 import random
@@ -37,6 +46,7 @@ SOCKET_PATH = os.path.join(RUNTIME_DIR, "mpv.sock")
 SESSION_PATH = os.path.join(RUNTIME_DIR, "session.json")
 QUEUE_PATH = os.path.join(RUNTIME_DIR, "queue.m3u")
 PID_PATH = os.path.join(RUNTIME_DIR, "mpv.pid")
+LOCK_PATH = os.path.join(RUNTIME_DIR, "session.lock")
 MPV_LOG = os.path.join(CACHE_DIR, "mpv.log")
 
 # Bounds on everything that comes back from the network.
@@ -53,6 +63,15 @@ VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 BROWSER_RE = re.compile(r"^(none|brave|chrome|chromium|edge|firefox|opera|vivaldi|whale)(\+[A-Za-z0-9_-]{1,32})?(:[A-Za-z0-9 _.()/~+-]{1,200})?$")
 
 LIKED_MUSIC = {"id": "LM", "title": "Liked Music", "count": None}
+# YouTube Music's "My Supermix": one fixed list id that YouTube fills from
+# the signed-in account's listening (a regional mix without cookies).
+SUPERMIX = {"id": "RDTMAK5uy_kset8DisdE7LSD4TNjEVvrKRTmG7a56sY", "title": "My Supermix", "count": None}
+PINNED = [LIKED_MUSIC, SUPERMIX]
+
+# Mixes ("RD..." lists) are effectively endless: read only their head.
+RADIO_LIMIT = 50
+MIX_LIMIT = 100
+AUTOPLAY_ADD = 25
 
 # Library listings yt-dlp understands, tried in order. YouTube Music
 # playlists are ordinary YouTube playlists, so the YouTube feed lists them.
@@ -122,12 +141,15 @@ def cookie_args(browser):
     return [] if browser == "none" else ["--cookies-from-browser", cookie_spec(browser)]
 
 
-def run_ytdlp(url, browser):
+def run_ytdlp(url, browser, limit=None):
     cmd = [
         "yt-dlp", "--ignore-config", "--flat-playlist", "--dump-single-json",
         "--no-warnings", "--no-progress", "--socket-timeout", "20",
-        *cookie_args(browser), "--", url,
+        *cookie_args(browser),
     ]
+    if limit:
+        cmd += ["--playlist-items", f":{int(limit)}"]
+    cmd += ["--", url]
     try:
         proc = subprocess.run(cmd, capture_output=True, timeout=FETCH_TIMEOUT, stdin=subprocess.DEVNULL)
     except FileNotFoundError:
@@ -166,7 +188,7 @@ def fetch_playlists(browser):
         except RuntimeError as exc:
             last_error = exc
             continue
-        items, seen = [], {"LM"}
+        items, seen = [], {p["id"] for p in PINNED}
         for entry in data.get("entries") or []:
             if not isinstance(entry, dict):
                 continue
@@ -182,8 +204,15 @@ def fetch_playlists(browser):
             })
             if len(items) >= MAX_PLAYLISTS:
                 break
-        return [dict(LIKED_MUSIC)] + items
+        return with_pinned(items)
     raise last_error or RuntimeError("Could not read the library")
+
+
+def with_pinned(items):
+    """Liked Music and My Supermix first, also for caches written before
+    Supermix was pinned."""
+    pinned_ids = {p["id"] for p in PINNED}
+    return [dict(p) for p in PINNED] + [p for p in items if isinstance(p, dict) and p.get("id") not in pinned_ids]
 
 
 def artist_of(entry):
@@ -196,8 +225,24 @@ def artist_of(entry):
     return ""
 
 
+def radio_id(video_id):
+    return f"RDAMVM{video_id}"
+
+
+def list_source(playlist_id):
+    """URL and item limit for a list id. A song radio is read through a watch
+    URL seeded with the song: yt-dlp can't open RDAMVM ids as playlists."""
+    if playlist_id.startswith("RDAMVM") and VIDEO_ID_RE.match(playlist_id[6:]):
+        seed = playlist_id[6:]
+        return f"https://music.youtube.com/watch?v={seed}&list={playlist_id}", RADIO_LIMIT
+    if playlist_id.startswith("RD"):
+        return f"https://music.youtube.com/playlist?list={playlist_id}", MIX_LIMIT
+    return f"https://music.youtube.com/playlist?list={playlist_id}", None
+
+
 def fetch_tracks(playlist_id, browser):
-    data = run_ytdlp(f"https://music.youtube.com/playlist?list={playlist_id}", browser)
+    url, limit = list_source(playlist_id)
+    data = run_ytdlp(url, browser, limit)
     items = []
     for entry in data.get("entries") or []:
         if not isinstance(entry, dict):
@@ -220,13 +265,15 @@ def fetch_tracks(playlist_id, browser):
     return {"title": clean_text(data.get("title")), "items": items}
 
 
-def cached_then_fresh(kind, cache_path, max_age, fetch, extra=None):
+def cached_then_fresh(kind, cache_path, max_age, fetch, extra=None, items_filter=None):
     extra = extra or {}
     cached = read_json(cache_path)
     fresh_enough = False
     if isinstance(cached, dict) and isinstance(cached.get("items"), list):
         age = time.time() - float(cached.get("fetchedAt") or 0)
         fresh_enough = max_age < 0 or age <= max_age
+        if items_filter:
+            cached["items"] = items_filter(cached["items"])
         emit({"type": kind, "stale": not fresh_enough, **extra, **cached})
     elif max_age < 0:
         emit({"type": kind, "stale": True, "items": [], **extra})
@@ -246,7 +293,7 @@ def cmd_playlists(args):
     browser = check_browser(opt(args, "--browser", "none"))
     max_age = int(opt(args, "--max-age", "3600"))
     cache = os.path.join(CACHE_DIR, f"playlists-{re.sub(r'[^A-Za-z0-9_.+-]', '_', browser)}.json")
-    cached_then_fresh("playlists", cache, max_age, lambda: {"items": fetch_playlists(browser)})
+    cached_then_fresh("playlists", cache, max_age, lambda: {"items": fetch_playlists(browser)}, items_filter=with_pinned)
 
 
 def cmd_tracks(args):
@@ -268,6 +315,50 @@ def mpv_request(command, timeout=1.0):
             return True
     except OSError:
         return False
+
+
+def mpv_batch(commands, timeout=3.0):
+    """Send several commands on one connection and wait for every reply, so
+    mpv has applied them all before we return. Returns the replies."""
+    replies = {}
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(timeout)
+            sock.connect(SOCKET_PATH)
+            payload = "".join(json.dumps({"command": c, "request_id": i + 1}) + "\n" for i, c in enumerate(commands))
+            sock.sendall(payload.encode())
+            buf = b""
+            deadline = time.time() + timeout
+            while len(replies) < len(commands) and time.time() < deadline:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    try:
+                        msg = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(msg, dict) and "request_id" in msg and "event" not in msg:
+                        replies[msg["request_id"]] = msg
+    except OSError:
+        return None
+    return [replies.get(i + 1) for i in range(len(commands))]
+
+
+class SessionLock:
+    """Serializes queue changes: every monitor's bar runs its own widget, and
+    two of them could otherwise extend the same queue at once."""
+
+    def __enter__(self):
+        self.fh = open(LOCK_PATH, "w")
+        fcntl.flock(self.fh, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        fcntl.flock(self.fh, fcntl.LOCK_UN)
+        self.fh.close()
 
 
 def our_mpv_pid():
@@ -311,37 +402,47 @@ def cmd_stop(_args):
     emit({"type": "stopped"})
 
 
-def cmd_play(args):
-    if not args:
-        fail("play needs a playlist id")
-    playlist_id = check_playlist_id(args[0])
+def player_options(args):
     browser = check_browser(opt(args, "--browser", "none"))
-    index = max(0, int(opt(args, "--index", "0")))
-    shuffle = opt(args, "--shuffle", "0") == "1"
-    playback_cookies = opt(args, "--playback-cookies", "0") == "1"
-    volume = min(100, max(0, int(opt(args, "--volume", "60"))))
+    repeat = opt(args, "--repeat", "off")
+    if repeat not in ("off", "all", "one"):
+        fail("--repeat must be off, all or one")
+    return {
+        "browser": browser,
+        "playback_cookies": opt(args, "--playback-cookies", "0") == "1",
+        "volume": min(100, max(0, int(opt(args, "--volume", "60")))),
+        "repeat": repeat,
+    }
 
-    cached = read_json(os.path.join(CACHE_DIR, "tracks", f"{playlist_id}.json"))
-    if not isinstance(cached, dict) or not cached.get("items"):
-        try:
-            cached = fetch_tracks(playlist_id, browser)
-        except RuntimeError as exc:
-            fail(str(exc))
-        cached["fetchedAt"] = int(time.time())
-        write_json_atomic(os.path.join(CACHE_DIR, "tracks", f"{playlist_id}.json"), cached)
-    tracks = [t for t in cached["items"] if isinstance(t, dict) and VIDEO_ID_RE.match(str(t.get("id", "")))]
-    if not tracks:
-        fail("This playlist has no playable tracks")
-    index = min(index, len(tracks) - 1)
 
-    if shuffle:
-        first = tracks[index]
-        rest = tracks[:index] + tracks[index + 1:]
-        random.shuffle(rest)
-        order, start = [first] + rest, 0
-    else:
-        order, start = tracks, index
+def load_tracks(playlist_id, browser, max_age=None):
+    """Tracks for a list from the cache (any age when max_age is None),
+    fetching and caching them when missing or too old."""
+    path = os.path.join(CACHE_DIR, "tracks", f"{playlist_id}.json")
+    cached = read_json(path)
+    if isinstance(cached, dict) and cached.get("items"):
+        age = time.time() - float(cached.get("fetchedAt") or 0)
+        if max_age is None or age <= max_age:
+            return cached
+    try:
+        cached = fetch_tracks(playlist_id, browser)
+    except RuntimeError as exc:
+        fail(str(exc))
+    cached["fetchedAt"] = int(time.time())
+    write_json_atomic(path, cached)
+    return cached
 
+
+def playable(items):
+    return [t for t in items or [] if isinstance(t, dict) and VIDEO_ID_RE.match(str(t.get("id", "")))]
+
+
+def track_url(track):
+    return f"https://music.youtube.com/watch?v={track['id']}"
+
+
+def start_player(playlist_id, title, order, start, options, autoplay=False):
+    """Replace any running player with a new one playing `order`."""
     stop_player()
 
     with open(QUEUE_PATH, "w", encoding="utf-8") as fh:
@@ -349,26 +450,31 @@ def cmd_play(args):
         for t in order:
             label = clean_text(f"{t.get('artist')} - {t.get('title')}" if t.get("artist") else t.get("title"))
             fh.write(f"#EXTINF:{t.get('duration') or -1},{label}\n")
-            fh.write(f"https://music.youtube.com/watch?v={t['id']}\n")
+            fh.write(track_url(t) + "\n")
 
     write_json_atomic(SESSION_PATH, {
         "playlistId": playlist_id,
-        "playlistTitle": clean_text(opt(args, "--title", "")) or cached.get("title") or "",
-        "shuffle": shuffle,
+        "playlistTitle": title,
+        "shuffle": options.get("shuffle", False),
+        "autoplay": autoplay,
         "tracks": order,
         "startedAt": int(time.time()),
     })
 
+    repeat = options["repeat"]
     cmd = [
         "mpv", "--no-video", "--force-window=no", "--no-terminal", "--idle=no",
         "--audio-display=no", "--audio-client-name=YouTube Music",
         f"--input-ipc-server={SOCKET_PATH}",
         "--ytdl-format=bestaudio/best", "--prefetch-playlist=yes",
-        f"--volume={volume}", f"--playlist-start={start}",
+        f"--volume={options['volume']}", f"--playlist-start={start}",
+        # Repeat one loops the current track; repeat all wraps the queue.
+        f"--loop-file={'inf' if repeat == 'one' else 'no'}",
+        f"--loop-playlist={'inf' if repeat == 'all' else 'no'}",
         "--msg-level=all=warn", f"--log-file={MPV_LOG}",
     ]
-    if playback_cookies and browser != "none":
-        cmd.append(f"--ytdl-raw-options-append=cookies-from-browser={cookie_spec(browser)}")
+    if options["playback_cookies"] and options["browser"] != "none":
+        cmd.append(f"--ytdl-raw-options-append=cookies-from-browser={cookie_spec(options['browser'])}")
     cmd.append(f"--playlist={QUEUE_PATH}")
 
     with open(os.devnull, "rb") as devnull_in, open(os.devnull, "wb") as devnull_out:
@@ -385,6 +491,101 @@ def cmd_play(args):
             return
         time.sleep(0.05)
     fail("mpv did not open its control socket")
+
+
+def cmd_play(args):
+    if not args:
+        fail("play needs a playlist id")
+    playlist_id = check_playlist_id(args[0])
+    options = player_options(args)
+    index = max(0, int(opt(args, "--index", "0")))
+    shuffle = opt(args, "--shuffle", "0") == "1"
+
+    cached = load_tracks(playlist_id, options["browser"])
+    tracks = playable(cached.get("items"))
+    if not tracks:
+        fail("This playlist has no playable tracks")
+    index = min(index, len(tracks) - 1)
+
+    if shuffle:
+        first = tracks[index]
+        rest = tracks[:index] + tracks[index + 1:]
+        random.shuffle(rest)
+        order, start = [first] + rest, 0
+    else:
+        order, start = tracks, index
+
+    options["shuffle"] = shuffle
+    title = clean_text(opt(args, "--title", "")) or cached.get("title") or ""
+    start_player(playlist_id, title, order, start, options)
+
+
+def player_running():
+    return our_mpv_pid() is not None and os.path.exists(SOCKET_PATH)
+
+
+def cmd_radio(args):
+    if not args or not VIDEO_ID_RE.match(args[0]):
+        fail("radio needs a video id")
+    seed = args[0]
+    mode = opt(args, "--mode", "replace")
+    if mode not in ("replace", "keep", "append"):
+        fail("--mode must be replace, keep or append")
+    options = player_options(args)
+    list_id = radio_id(seed)
+
+    with SessionLock():
+        session = read_json(SESSION_PATH)
+        queue = playable(session.get("tracks")) if isinstance(session, dict) else []
+
+        # Autoplay: extend only while the seed is still the last queued song.
+        # This keeps it idempotent when several bars ask at once.
+        if mode == "append":
+            if not player_running() or not queue or queue[-1]["id"] != seed:
+                emit({"type": "radio", "mode": mode, "added": 0})
+                return
+            if len(queue) >= MAX_TRACKS:
+                emit({"type": "radio", "mode": mode, "added": 0})
+                return
+
+        mix = playable(load_tracks(list_id, options["browser"], max_age=3600).get("items"))
+        if not mix:
+            fail("YouTube Music has no radio for this song")
+        title = clean_text(opt(args, "--title", "")) or "Radio"
+
+        if mode == "keep" and not player_running():
+            mode = "replace"
+        if mode == "replace":
+            start_player(list_id, title, mix, 0, options)
+            return
+
+        if mode == "keep":
+            # The playing song continues; everything after it becomes the radio.
+            replies = mpv_batch([["get_property", "playlist-pos"]]) or [None]
+            pos = replies[0].get("data") if isinstance(replies[0], dict) else None
+            current = queue[pos] if isinstance(pos, int) and 0 <= pos < len(queue) else mix[0]
+            upcoming = [t for t in mix if t["id"] != current["id"]]
+            write_json_atomic(SESSION_PATH, {
+                "playlistId": list_id,
+                "playlistTitle": title,
+                "shuffle": False,
+                "autoplay": False,
+                "tracks": [current] + upcoming,
+                "startedAt": int(time.time()),
+            })
+            mpv_batch([["playlist-clear"]] + [["loadfile", track_url(t), "append"] for t in upcoming])
+            emit({"type": "radio", "mode": mode, "added": len(upcoming)})
+            return
+
+        # append
+        seen = {t["id"] for t in queue}
+        new = [t for t in mix if t["id"] not in seen][:AUTOPLAY_ADD]
+        if new:
+            session["tracks"] = queue + new
+            session["autoplay"] = True
+            write_json_atomic(SESSION_PATH, session)
+            mpv_batch([["loadfile", track_url(t), "append"] for t in new])
+        emit({"type": "radio", "mode": mode, "added": len(new)})
 
 
 def cmd_paths(_args):
@@ -408,6 +609,7 @@ def main():
         "playlists": cmd_playlists,
         "tracks": cmd_tracks,
         "play": cmd_play,
+        "radio": cmd_radio,
         "stop": cmd_stop,
         "paths": cmd_paths,
     }

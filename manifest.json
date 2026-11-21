@@ -2,18 +2,20 @@
   "schemaVersion": 1,
   "id": "io.github.symonbaikov.ytmusic-mpv",
   "name": "YouTube Music (mpv)",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "author": "Symon Baikov",
   "license": "MIT",
   "homepage": "https://github.com/symonbaikov/omarchy-ytmusic-mpv",
   "repository": "https://github.com/symonbaikov/omarchy-ytmusic-mpv",
-  "description": "Browse your YouTube Music playlists from the bar and play them through a headless mpv. No browser window needed: yt-dlp reads your saved login cookies from disk.",
+  "description": "Your YouTube Music in the Omarchy bar without a browser: playlists, My Supermix, song radio and autoplay recommendations, cover art and Apple Music-style repeat, played through a headless mpv. yt-dlp reads your saved login cookies from disk.",
   "keywords": [
-    "music",
-    "youtube",
     "mpv",
-    "yt-dlp",
-    "playlists"
+    "music",
+    "playlists",
+    "radio",
+    "recommendations",
+    "youtube",
+    "yt-dlp"
   ],
   "kinds": [
     "bar-widget"
@@ -31,7 +33,10 @@
       "browser": "chromium",
       "playbackCookies": "Off",
       "showTitle": "On",
-      "defaultVolume": 60
+      "defaultVolume": 60,
+      "showCovers": "On",
+      "repeat": "off",
+      "autoplay": "On"
     },
     "schema": [
       {
@@ -70,6 +75,40 @@
         "max": 100,
         "step": 5,
         "defaultValue": 60
+      },
+      {
+        "key": "showCovers",
+        "type": "enum",
+        "label": "Show cover art",
+        "options": [
+          "On",
+          "Off"
+        ],
+        "defaultValue": "On",
+        "description": "Cover art is YouTube's own track thumbnail, loaded from i.ytimg.com."
+      },
+      {
+        "key": "repeat",
+        "type": "enum",
+        "label": "Repeat",
+        "options": [
+          "off",
+          "all",
+          "one"
+        ],
+        "defaultValue": "off",
+        "description": "Off, repeat the playlist, or repeat one song. The repeat button in the panel cycles and saves this."
+      },
+      {
+        "key": "autoplay",
+        "type": "enum",
+        "label": "Autoplay recommendations",
+        "options": [
+          "On",
+          "Off"
+        ],
+        "defaultValue": "On",
+        "description": "When the queue runs out (repeat off), keep playing songs YouTube Music recommends for the last one."
       }
     ]
   }

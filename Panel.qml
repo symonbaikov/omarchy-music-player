@@ -24,6 +24,8 @@ Panel {
   readonly property bool playbackCookies: setting("playbackCookies", "Off") === "On"
   readonly property bool showTitle: setting("showTitle", "On") !== "Off"
   readonly property int defaultVolume: Math.max(0, Math.min(100, Number(setting("defaultVolume", 60)) || 0))
+  readonly property bool showCovers: setting("showCovers", "On") !== "Off"
+  readonly property bool autoplayEnabled: setting("autoplay", "On") !== "Off"
 
   // ---- look ----------------------------------------------------------------
   readonly property color fg: bar ? bar.foreground : Commons.Color.foreground
@@ -56,6 +58,18 @@ Panel {
   property var session: null
   property bool starting: false
   property string playError: ""
+  // Repeat mode: the user's choice (saved in the widget's settings, so it
+  // survives restarts like Apple Music's), kept in step with mpv's
+  // loop-file / loop-playlist while a player is running.
+  property string repeatMode: Model.normalizeRepeat(setting("repeat", "off"))
+  property var loopFileRaw: false
+  property var loopPlaylistRaw: false
+  // Video id whose 1280px cover 404'd; the hero then uses the 320px one.
+  property string largeCoverFailedFor: ""
+  // Recommendations: the song whose radio autoplay last asked for, so each
+  // last-song triggers it once.
+  property string autoplayRequested: ""
+  readonly property bool radioBusy: radioProc.running
 
   readonly property bool connected: mpvSocket.connected
   readonly property bool playing: connected && !paused
@@ -64,12 +78,23 @@ Panel {
   readonly property string nowTitle: currentTrack ? currentTrack.title : Model.cleanText(mediaTitle)
   readonly property string nowArtist: currentTrack ? currentTrack.artist : ""
   readonly property string barLabel: showTitle && connected && !barVertical && nowTitle !== "" ? Model.truncate(nowTitle, 28) : ""
+  // Non-empty when autoplay should extend the queue from this song now.
+  readonly property string autoplayDueSeed: Model.autoplaySeed({
+    enabled: autoplayEnabled, connected: connected, repeat: repeatMode,
+    pos: playlistPos, count: playlistCount,
+    trackId: currentTrack ? currentTrack.id : "", requested: autoplayRequested
+  })
+  onAutoplayDueSeedChanged: if (autoplayDueSeed !== "") runAutoplay(autoplayDueSeed)
+  readonly property string nowCoverUrl: showCovers && currentTrack
+    ? Model.coverUrl(currentTrack.id, largeCoverFailedFor === currentTrack.id ? "small" : "large") : ""
 
   Commons.Translations { id: strings; directory: Qt.resolvedUrl("i18n") }
 
   function playlistTitle(p) {
     if (!p) return ""
-    return p.id === "LM" ? strings.t("list.likedMusic") : p.title
+    if (p.id === "LM") return strings.t("list.likedMusic")
+    if (p.id === Model.SUPERMIX_ID) return strings.t("list.supermix")
+    return p.title
   }
 
   // ---- helper processes ----------------------------------------------------
@@ -111,10 +136,17 @@ Panel {
     } else if (msg.type === "playing") {
       starting = false
       attachAll()
+    } else if (msg.type === "radio") {
+      // The queue changed under a running player: every bar re-reads it.
+      reloadSessionAll()
     } else if (msg.type === "error") {
       if (source === "playlists") { playlistsError = msg.message; playlistsLoading = false }
       else if (source === "tracks") { tracksError = msg.message; tracksLoading = false }
-      else { playError = msg.message; starting = false }
+      else {
+        playError = msg.message
+        starting = false
+        if (source === "radio") tracksLoading = false
+      }
     }
   }
 
@@ -166,6 +198,19 @@ Panel {
     command: root.helper(["stop"])
   }
 
+  Process {
+    id: radioProc
+    property string listId: ""
+    stdout: SplitParser { onRead: function(line) { root.handleHelperLine(line, "radio") } }
+    onExited: function(exitCode) {
+      root.starting = false
+      // The radio's list is cached now: show it if it's the open view.
+      if (exitCode === 0 && root.openPlaylist && root.openPlaylist.id === listId) root.loadTracks(false)
+      // Autoplay may have come due while this was busy.
+      if (root.autoplayDueSeed !== "") root.runAutoplay(root.autoplayDueSeed)
+    }
+  }
+
   FileView {
     id: sessionFile
     path: root.sessionPath
@@ -212,6 +257,18 @@ Panel {
     if (!mpvSocket.connected) mpvSocket.connected = true
   }
 
+  function reloadSession() { sessionFile.reload() }
+
+  function reloadSessionAll() {
+    var peers = bar && typeof bar.moduleWidgets === "function" ? bar.moduleWidgets(moduleName) : []
+    var sawSelf = false
+    for (var i = 0; i < peers.length; i++) {
+      if (peers[i] === root) sawSelf = true
+      if (peers[i] && typeof peers[i].reloadSession === "function") peers[i].reloadSession()
+    }
+    if (!sawSelf) reloadSession()
+  }
+
   function attachAll() {
     var peers = bar && typeof bar.moduleWidgets === "function" ? bar.moduleWidgets(moduleName) : []
     var sawSelf = false
@@ -246,8 +303,20 @@ Panel {
       playlistPos = typeof data === "number" ? data : -1
       position = 0
       break
-    case "playlist-count": playlistCount = typeof data === "number" ? data : 0; break
+    case "playlist-count":
+      playlistCount = typeof data === "number" ? data : 0
+      // A radio or autoplay changed the queue (possibly from another bar).
+      sessionFile.reload()
+      break
     case "volume": if (typeof data === "number") volume = data; break
+    case "loop-file":
+      loopFileRaw = data
+      repeatMode = Model.repeatFromMpv(loopFileRaw, loopPlaylistRaw)
+      break
+    case "loop-playlist":
+      loopPlaylistRaw = data
+      repeatMode = Model.repeatFromMpv(loopFileRaw, loopPlaylistRaw)
+      break
     }
   }
 
@@ -282,9 +351,73 @@ Panel {
       "--browser", browser,
       "--playback-cookies", playbackCookies ? "1" : "0",
       "--volume", String(startVolume),
+      "--repeat", repeatMode,
       "--title", playlistTitle(openPlaylist)
     ])
     playProc.running = true
+  }
+
+  function radioArgs(videoId, mode, title) {
+    return helper([
+      "radio", videoId, "--mode", mode,
+      "--browser", browser,
+      "--playback-cookies", playbackCookies ? "1" : "0",
+      "--volume", String(Math.round(volume)),
+      "--repeat", repeatMode,
+      "--title", title
+    ])
+  }
+
+  // "Start radio", like YouTube Music: a queue of songs YouTube recommends
+  // for `track`. For the song that's playing, it keeps playing and the radio
+  // follows it; for any other song, the radio starts with that song.
+  function startRadio(track) {
+    var listId = track ? Model.radioListId(track.id) : ""
+    if (listId === "" || radioProc.running) return
+    var keep = connected && currentTrack !== null && currentTrack.id === track.id
+    var title = strings.t("list.radioTitle").arg(track.title)
+    playError = ""
+    if (!keep) {
+      starting = true
+      mpvSocket.connected = false
+    }
+    // Show the radio's list as the open view, like YouTube Music's "Up next".
+    openPlaylist = { id: listId, title: title, count: null }
+    tracks = []
+    cursorIndex = -1
+    view = "tracks"
+    tracksLoading = true
+    radioProc.listId = listId
+    radioProc.command = radioArgs(track.id, keep ? "keep" : "replace", title)
+    radioProc.running = true
+  }
+
+  function runAutoplay(seed) {
+    if (radioProc.running) return
+    autoplayRequested = seed
+    radioProc.listId = ""
+    radioProc.command = radioArgs(seed, "append", session ? session.playlistTitle : "")
+    radioProc.running = true
+  }
+
+  function cursorOrCurrentTrack() {
+    if (view === "tracks" && cursorIndex >= 0 && cursorIndex < tracks.length) return tracks[cursorIndex]
+    return currentTrack
+  }
+
+  // Off -> repeat all -> repeat one -> off. Works with nothing playing too:
+  // the next playback starts in the chosen mode.
+  function cycleRepeat() {
+    var mode = Model.nextRepeat(repeatMode)
+    repeatMode = mode
+    var cmds = Model.repeatCommands(mode)
+    for (var i = 0; i < cmds.length; i++) send(cmds[i])
+    // Remember it in this widget's own shell.json entry.
+    var shell = bar ? bar.shell : null
+    if (shell && typeof shell.updateEntryInline === "function") {
+      settings = Object.assign({}, settings, { repeat: mode })
+      shell.updateEntryInline(moduleName, settings)
+    }
   }
 
   function togglePause() { send(["cycle", "pause"]) }
@@ -346,7 +479,10 @@ Panel {
     if (!connected || !session || !openPlaylist || session.playlistId !== openPlaylist.id || !currentTrack) return false
     var t = tracks[index]
     if (!t) return false
-    return session.shuffle ? t.id === currentTrack.id : index === playlistPos && t.id === currentTrack.id
+    // Shuffled queues and radios (whose queue may start with a song that
+    // isn't first in the list) match by id.
+    return session.shuffle || Model.isMix(session.playlistId)
+      ? t.id === currentTrack.id : index === playlistPos && t.id === currentTrack.id
   }
 
   // ---- keyboard ------------------------------------------------------------
@@ -367,6 +503,8 @@ Panel {
     case "n": next(); break
     case "b": previous(); break
     case "r": refreshList(); break
+    case "R": cycleRepeat(); break
+    case "m": startRadio(cursorOrCurrentTrack()); break
     case "s": if (view === "tracks") play(Math.floor(Math.random() * Math.max(1, tracks.length)), true); break
     case "+": case "=": setVolume(volume + 5); break
     case "-": setVolume(volume - 5); break
@@ -386,6 +524,8 @@ Panel {
     function next(): void { root.next() }
     function previous(): void { root.previous() }
     function stop(): void { root.stop() }
+    function cycleRepeat(): void { root.cycleRepeat() }
+    function startRadio(): void { root.startRadio(root.currentTrack) }
   }
 
   onOpenedChanged: {
@@ -460,15 +600,41 @@ Panel {
         // ---------- now playing ----------
         Item {
           width: parent.width
-          implicitHeight: Math.max(nowIcon.implicitHeight, nowLabels.implicitHeight)
+          implicitHeight: Math.max(nowIcon.height, nowLabels.implicitHeight)
 
-          PlainText {
+          // Cover art, like the built-in media widget: the image sits inside
+          // a bordered tile and is decoded at the size it is drawn.
+          BorderSurface {
             id: nowIcon
-            text: root.connected && root.paused ? Model.GLYPH.pause : Model.GLYPH.music
-            font.pixelSize: Style.font.display
-            elide: Text.ElideNone
             anchors.left: parent.left
             anchors.verticalCenter: parent.verticalCenter
+            width: Style.space(72)
+            height: Style.space(72)
+            radius: Style.spacing.labelGap
+            color: Style.normalFillFor(root.fg, Commons.Color.accent)
+            borderSpec: Border.controlSpec("normal", root.fg, Commons.Color.accent)
+
+            SizedImage {
+              id: nowCover
+              anchors.fill: parent
+              anchors.margins: Style.space(2)
+              crop: true
+              url: root.nowCoverUrl
+              visible: url != "" && status === Image.Ready
+              onStatusChanged: {
+                // maxresdefault is missing for some uploads: use the 320px one.
+                if (status === Image.Error && root.currentTrack && String(url).indexOf("maxresdefault") >= 0)
+                  root.largeCoverFailedFor = root.currentTrack.id
+              }
+            }
+
+            PlainText {
+              anchors.centerIn: parent
+              visible: !nowCover.visible
+              text: Model.GLYPH.music
+              font.pixelSize: Style.font.displayLarge
+              elide: Text.ElideNone
+            }
           }
 
           Column {
@@ -506,6 +672,9 @@ Panel {
                   .arg(Commons.I18n.formatNumber(root.playlistCount))]
                 if (root.session.playlistTitle !== "") parts.push(root.session.playlistTitle)
                 if (root.session.shuffle) parts.push(strings.t("now.shuffled"))
+                if (root.session.autoplay) parts.push(strings.t("now.autoplay"))
+                if (root.repeatMode === "all") parts.push(strings.t("now.repeatAll"))
+                else if (root.repeatMode === "one") parts.push(strings.t("now.repeatOne"))
                 return parts.join("  ·  ").toUpperCase()
               }
             }
@@ -588,6 +757,29 @@ Panel {
               enabled: root.connected
               opacity: enabled ? 1 : 0.4
               onClicked: root.next()
+            }
+            // Repeat, as in Apple Music: dim when off, highlighted for repeat
+            // all, and the "1" glyph for repeat one. It can be set before
+            // anything plays.
+            PanelActionButton {
+              iconText: root.repeatMode === "one" ? Model.GLYPH.repeatOne : Model.GLYPH.repeat
+              tooltipText: strings.t(root.repeatMode === "one" ? "controls.repeatOne"
+                : (root.repeatMode === "all" ? "controls.repeatAll" : "controls.repeatOff"))
+              foreground: root.repeatMode === "off" ? root.fg : Style.selectedStateColor(root.fg, Commons.Color.accent)
+              fontFamily: root.fontFamily
+              bordered: root.repeatMode !== "off"
+              opacity: root.repeatMode === "off" ? 0.55 : 1
+              onClicked: root.cycleRepeat()
+            }
+            // Start radio from the playing song (it keeps playing).
+            PanelActionButton {
+              iconText: Model.GLYPH.radio
+              tooltipText: strings.t("controls.radio")
+              foreground: root.fg
+              fontFamily: root.fontFamily
+              enabled: root.connected && root.currentTrack !== null && !root.radioBusy
+              opacity: enabled ? 1 : 0.4
+              onClicked: root.startRadio(root.currentTrack)
             }
             PanelActionButton {
               iconText: Model.GLYPH.stop
@@ -732,26 +924,56 @@ Panel {
             readonly property bool isTrack: root.view === "tracks"
             readonly property bool isNow: isTrack ? root.isPlayingTrack(index) : root.isPlayingPlaylist(modelData.id)
 
+            readonly property bool hasCover: isTrack && root.showCovers
+
             width: ListView.view.width
-            height: rowLabels.implicitHeight + Style.spacing.controlPaddingY * 2
+            height: Math.max(rowLabels.implicitHeight, leading.height) + Style.spacing.controlPaddingY * 2
             foreground: root.fg
             hasCursor: root.cursorIndex === index
             current: isNow
 
-            PlainText {
+            Item {
               id: leading
               anchors.left: parent.left
               anchors.leftMargin: Style.spacing.rowPaddingX
               anchors.verticalCenter: parent.verticalCenter
-              width: Style.space(28)
-              horizontalAlignment: Text.AlignHCenter
-              elide: Text.ElideNone
-              color: rowItem.isNow ? root.fg : root.dim
-              font.pixelSize: rowItem.isTrack && !rowItem.isNow ? Style.font.caption : Style.font.body
-              text: {
-                if (rowItem.isNow) return root.paused ? Model.GLYPH.pause : Model.GLYPH.play
-                if (!rowItem.isTrack) return rowItem.modelData.id === "LM" ? Model.GLYPH.heart : Model.GLYPH.playlist
-                return Commons.I18n.formatNumber(rowItem.index + 1)
+              width: rowItem.hasCover ? Style.space(36) : Style.space(28)
+              height: rowItem.hasCover ? Style.space(36) : leadingGlyph.implicitHeight
+
+              // Small cover: the 320px thumbnail, fetched only for rows the
+              // list actually creates (the visible ones).
+              SizedImage {
+                id: rowCover
+                anchors.fill: parent
+                visible: rowItem.hasCover && status === Image.Ready
+                crop: true
+                url: rowItem.hasCover ? Model.coverUrl(rowItem.modelData.id, "small") : ""
+              }
+
+              Rectangle {
+                anchors.fill: parent
+                visible: rowCover.visible && rowItem.isNow
+                color: Qt.rgba(0, 0, 0, 0.55)
+              }
+
+              PlainText {
+                id: leadingGlyph
+                anchors.centerIn: parent
+                width: parent.width
+                horizontalAlignment: Text.AlignHCenter
+                elide: Text.ElideNone
+                visible: !rowCover.visible || rowItem.isNow
+                color: rowCover.visible ? "white" : (rowItem.isNow ? root.fg : root.dim)
+                font.pixelSize: rowItem.isTrack && !rowItem.isNow ? Style.font.caption : Style.font.body
+                text: {
+                  if (rowItem.isNow) return root.paused ? Model.GLYPH.pause : Model.GLYPH.play
+                  if (!rowItem.isTrack) {
+                    if (rowItem.modelData.id === "LM") return Model.GLYPH.heart
+                    if (rowItem.modelData.id === Model.SUPERMIX_ID) return Model.GLYPH.supermix
+                    return Model.GLYPH.playlist
+                  }
+                  return Commons.I18n.formatNumber(rowItem.index + 1)
+                }
               }
             }
 
@@ -759,7 +981,7 @@ Panel {
               id: rowLabels
               anchors.left: leading.right
               anchors.leftMargin: Style.space(8)
-              anchors.right: trailing.left
+              anchors.right: rowRadio.visible ? rowRadio.left : trailing.left
               anchors.rightMargin: Style.space(8)
               anchors.verticalCenter: parent.verticalCenter
               spacing: Style.space(1)
@@ -799,6 +1021,22 @@ Panel {
               cursorShape: Qt.PointingHandCursor
               onEntered: root.cursorIndex = rowItem.index
               onClicked: root.activateRow(rowItem.index)
+            }
+
+            // "Start radio" on the highlighted track. Declared after the
+            // row's MouseArea so it sits above it and gets its own clicks.
+            PanelActionButton {
+              id: rowRadio
+              visible: rowItem.isTrack && rowItem.hasCursor
+              anchors.right: trailing.left
+              anchors.rightMargin: Style.space(6)
+              anchors.verticalCenter: parent.verticalCenter
+              iconText: Model.GLYPH.radio
+              tooltipText: strings.t("list.startRadio")
+              foreground: root.fg
+              fontFamily: root.fontFamily
+              enabled: !root.radioBusy
+              onClicked: root.startRadio(rowItem.modelData)
             }
           }
         }

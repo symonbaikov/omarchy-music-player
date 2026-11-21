@@ -8,7 +8,7 @@ const source = readFileSync(new URL("../Model.js", import.meta.url), "utf8").rep
 const M = {}
 // QML's V4 engine lacks some newer built-ins; remove them so tests catch their use.
 const V4_MISSING = "delete String.prototype.trimEnd; delete String.prototype.trimStart; delete Array.prototype.at; delete Object.hasOwn;\n"
-vm.runInNewContext(V4_MISSING + source + "\n;Object.assign(__out, { cleanText, plain, truncate, formatTime, parseLine, parseSession, clampIndex, mpvCommand, GLYPH })", { __out: M })
+vm.runInNewContext(V4_MISSING + source + "\n;Object.assign(__out, { cleanText, plain, truncate, formatTime, parseLine, parseSession, clampIndex, mpvCommand, GLYPH, normalizeRepeat, nextRepeat, repeatFromMpv, repeatCommands, coverUrl, OBSERVED, SUPERMIX_ID, isMix, radioListId, autoplaySeed })", { __out: M })
 
 const MARKUP = '<img src="https://example.invalid/tracker">Song'
 
@@ -93,4 +93,77 @@ test("clampIndex", () => {
 test("mpvCommand is newline-terminated JSON", () => {
   assert.equal(M.mpvCommand(["cycle", "pause"]), '{"command":["cycle","pause"]}\n')
   assert.equal(M.mpvCommand(["get_property", "time-pos"], 9), '{"command":["get_property","time-pos"],"request_id":9}\n')
+})
+
+test("repeat cycles off -> all -> one -> off like Apple Music", () => {
+  assert.equal(M.nextRepeat("off"), "all")
+  assert.equal(M.nextRepeat("all"), "one")
+  assert.equal(M.nextRepeat("one"), "off")
+  assert.equal(M.nextRepeat("bogus"), "all")
+  assert.equal(M.normalizeRepeat("<b>"), "off")
+})
+
+test("repeatFromMpv reads mpv's loop properties", () => {
+  assert.equal(M.repeatFromMpv(false, false), "off")
+  assert.equal(M.repeatFromMpv(false, "inf"), "all")
+  assert.equal(M.repeatFromMpv("inf", false), "one")
+  assert.equal(M.repeatFromMpv("inf", "inf"), "one")
+  assert.equal(M.repeatFromMpv(3, false), "one")
+  assert.equal(M.repeatFromMpv(false, "force"), "all")
+  assert.equal(M.repeatFromMpv("no", "no"), "off")
+})
+
+test("repeatCommands sets both loop properties", () => {
+  assert.equal(JSON.stringify(M.repeatCommands("one")), JSON.stringify([["set_property", "loop-file", "inf"], ["set_property", "loop-playlist", "no"]]))
+  assert.equal(JSON.stringify(M.repeatCommands("all")), JSON.stringify([["set_property", "loop-file", "no"], ["set_property", "loop-playlist", "inf"]]))
+  assert.equal(JSON.stringify(M.repeatCommands("x")), JSON.stringify([["set_property", "loop-file", "no"], ["set_property", "loop-playlist", "no"]]))
+})
+
+test("mpv loop properties are observed", () => {
+  assert.ok(M.OBSERVED.includes("loop-file") && M.OBSERVED.includes("loop-playlist"))
+})
+
+test("coverUrl only builds fixed-host URLs from valid video ids", () => {
+  assert.equal(M.coverUrl("dQw4w9WgXcQ", "large"), "https://i.ytimg.com/vi/dQw4w9WgXcQ/maxresdefault.jpg")
+  assert.equal(M.coverUrl("dQw4w9WgXcQ"), "https://i.ytimg.com/vi/dQw4w9WgXcQ/mqdefault.jpg")
+  assert.equal(M.coverUrl("../../evil/x"), "")
+  assert.equal(M.coverUrl("dQw4w9WgXcQ?x=1"), "")
+  assert.equal(M.coverUrl(""), "")
+  assert.equal(M.coverUrl(null), "")
+})
+
+test("radioListId builds YouTube Music's song radio id from a valid video id only", () => {
+  assert.equal(M.radioListId("dQw4w9WgXcQ"), "RDAMVMdQw4w9WgXcQ")
+  assert.equal(M.radioListId("bad"), "")
+  assert.equal(M.radioListId("dQw4w9WgXcQ&x"), "")
+})
+
+test("isMix recognizes generated mixes", () => {
+  assert.ok(M.isMix("RDAMVMdQw4w9WgXcQ"))
+  assert.ok(M.isMix(M.SUPERMIX_ID))
+  assert.ok(!M.isMix("PL123abc"))
+  assert.ok(!M.isMix("LM"))
+})
+
+test("autoplaySeed fires once, on the last song, only with repeat off", () => {
+  const base = { enabled: true, connected: true, repeat: "off", pos: 9, count: 10, trackId: "dQw4w9WgXcQ", requested: "" }
+  assert.equal(M.autoplaySeed(base), "dQw4w9WgXcQ")
+  assert.equal(M.autoplaySeed({ ...base, requested: "dQw4w9WgXcQ" }), "")
+  assert.equal(M.autoplaySeed({ ...base, pos: 8 }), "")
+  assert.equal(M.autoplaySeed({ ...base, repeat: "all" }), "")
+  assert.equal(M.autoplaySeed({ ...base, repeat: "one" }), "")
+  assert.equal(M.autoplaySeed({ ...base, enabled: false }), "")
+  assert.equal(M.autoplaySeed({ ...base, connected: false }), "")
+  assert.equal(M.autoplaySeed({ ...base, count: 0, pos: -1 }), "")
+  assert.equal(M.autoplaySeed({ ...base, trackId: "<b>x</b>" }), "")
+  assert.equal(M.autoplaySeed({ ...base, count: 1, pos: 0 }), "dQw4w9WgXcQ")
+  assert.equal(M.autoplaySeed(null), "")
+})
+
+test("parseLine accepts radio results and parseSession keeps autoplay", () => {
+  const r = M.parseLine(JSON.stringify({ type: "radio", mode: "append", added: 25 }))
+  assert.equal(r.type, "radio")
+  assert.equal(r.added, 25)
+  const s = M.parseSession(JSON.stringify({ playlistId: "RDAMVMdQw4w9WgXcQ", autoplay: true, tracks: [] }))
+  assert.equal(s.autoplay, true)
 })

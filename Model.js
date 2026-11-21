@@ -25,7 +25,88 @@ var GLYPH = {
   playlist: String.fromCodePoint(0xF0CB8),
   heart: String.fromCodePoint(0xF02D1),
   volume: String.fromCodePoint(0xF057E),
-  volumeOff: String.fromCodePoint(0xF0581)
+  volumeOff: String.fromCodePoint(0xF0581),
+  repeat: String.fromCodePoint(0xF0456),
+  repeatOne: String.fromCodePoint(0xF0458),
+  radio: String.fromCodePoint(0xF043B),
+  supermix: String.fromCodePoint(0xF0AE2),
+  autoplay: String.fromCodePoint(0xF06E4)
+}
+
+// ---- recommendations ---------------------------------------------------------
+
+// YouTube Music's "My Supermix": a fixed list id that YouTube fills from the
+// signed-in account's listening.
+var SUPERMIX_ID = "RDTMAK5uy_kset8DisdE7LSD4TNjEVvrKRTmG7a56sY"
+
+// "RD..." lists are YouTube's generated mixes (song radio, Supermix).
+function isMix(listId) {
+  return String(listId || "").indexOf("RD") === 0
+}
+
+// The radio YouTube Music builds for a song.
+function radioListId(videoId) {
+  var id = String(videoId || "")
+  return VIDEO_ID_RE.test(id) ? "RDAMVM" + id : ""
+}
+
+// Autoplay, like YouTube Music: once the last queued song starts, with repeat
+// off, extend the queue with that song's radio. Returns the seed video id to
+// extend from, or "" when nothing should happen. `requested` is the seed
+// already asked for, so each song triggers it once.
+function autoplaySeed(s) {
+  if (!s || !s.enabled || !s.connected || s.repeat !== "off") return ""
+  if (!(s.count > 0) || s.pos !== s.count - 1) return ""
+  var id = String(s.trackId || "")
+  if (!VIDEO_ID_RE.test(id) || id === s.requested) return ""
+  return id
+}
+
+// ---- repeat (Apple Music style: off -> all -> one -> off) -------------------
+
+var REPEAT_MODES = ["off", "all", "one"]
+
+function normalizeRepeat(mode) {
+  return REPEAT_MODES.indexOf(mode) >= 0 ? mode : "off"
+}
+
+function nextRepeat(mode) {
+  return REPEAT_MODES[(REPEAT_MODES.indexOf(normalizeRepeat(mode)) + 1) % REPEAT_MODES.length]
+}
+
+// mpv reports loop-file / loop-playlist as false ("no"), "inf", "force", or a
+// remaining count.
+function loopOn(value) {
+  return value === true || value === "inf" || value === "force" || (typeof value === "number" && value > 0)
+}
+
+function repeatFromMpv(loopFile, loopPlaylist) {
+  if (loopOn(loopFile)) return "one"
+  if (loopOn(loopPlaylist)) return "all"
+  return "off"
+}
+
+// The two mpv property writes that put the player in `mode`.
+function repeatCommands(mode) {
+  var m = normalizeRepeat(mode)
+  return [
+    ["set_property", "loop-file", m === "one" ? "inf" : "no"],
+    ["set_property", "loop-playlist", m === "all" ? "inf" : "no"]
+  ]
+}
+
+// ---- cover art ---------------------------------------------------------------
+
+// YouTube's own thumbnail for a track, built only from a validated video id
+// on a fixed HTTPS host. Both sizes are 16:9; YouTube Music "art tracks" put
+// the square album art in the middle, so a centre-square crop shows exactly
+// the cover, and for a music video it shows the middle of the frame.
+// "large" = maxresdefault (1280x720, missing for some uploads: fall back to
+// "small"); "small" = mqdefault (320x180, always present, ~10 KB).
+function coverUrl(videoId, size) {
+  var id = String(videoId || "")
+  if (!VIDEO_ID_RE.test(id)) return ""
+  return "https://i.ytimg.com/vi/" + id + "/" + (size === "large" ? "maxresdefault" : "mqdefault") + ".jpg"
 }
 
 // Strip control characters and clamp length. Used for every string that
@@ -125,6 +206,8 @@ function parseLine(line) {
     return { type: "playing", index: validCount(msg.index) || 0, count: validCount(msg.count) || 0 }
   case "stopped":
     return { type: "stopped" }
+  case "radio":
+    return { type: "radio", mode: String(msg.mode || ""), added: validCount(msg.added) || 0 }
   case "error":
     return { type: "error", message: cleanText(msg.message) }
   default:
@@ -143,6 +226,7 @@ function parseSession(text) {
     playlistId: id,
     playlistTitle: cleanText(data.playlistTitle),
     shuffle: data.shuffle === true,
+    autoplay: data.autoplay === true,
     tracks: sanitizeTracks(data.tracks)
   }
 }
@@ -167,4 +251,5 @@ function mpvCommand(args, requestId) {
 }
 
 // Properties the widget follows; the index is the observe id.
-var OBSERVED = ["pause", "media-title", "duration", "playlist-pos", "playlist-count", "volume", "idle-active"]
+var OBSERVED = ["pause", "media-title", "duration", "playlist-pos", "playlist-count", "volume", "idle-active",
+  "loop-file", "loop-playlist"]

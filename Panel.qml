@@ -70,6 +70,37 @@ Panel {
   // last-song triggers it once.
   property string autoplayRequested: ""
   readonly property bool radioBusy: radioProc.running
+  // Loading: mpv's `seeking` (unavailable while a track opens, true during a
+  // seek) and `paused-for-cache` (buffer ran dry). See Model.isLoading.
+  property var seekingRaw: false
+  property bool pausedForCache: false
+  readonly property bool loadingRaw: Model.isLoading({
+    starting: starting, connected: connected, seeking: seekingRaw, pausedForCache: pausedForCache
+  })
+  // Shown only once loading has lasted a moment: on a fast connection a seek
+  // finishes within a frame, and a spinner flashing for it would be noise.
+  property bool loading: false
+  onLoadingRawChanged: {
+    if (loadingRaw) loadingDelay.restart()
+    else {
+      loadingDelay.stop()
+      loading = false
+    }
+  }
+  Timer {
+    id: loadingDelay
+    interval: 250
+    onTriggered: root.loading = root.loadingRaw
+  }
+  // Drives the bar icon's spin; constant motion, so linear.
+  property real spinAngle: 0
+  NumberAnimation on spinAngle {
+    from: 0
+    to: 360
+    duration: 900
+    loops: Animation.Infinite
+    running: root.loading && !Style.reduceMotion
+  }
 
   readonly property bool connected: mpvSocket.connected
   readonly property bool playing: connected && !paused
@@ -309,6 +340,8 @@ Panel {
       sessionFile.reload()
       break
     case "volume": if (typeof data === "number") volume = data; break
+    case "seeking": seekingRaw = data; break
+    case "paused-for-cache": pausedForCache = data === true; break
     case "loop-file":
       loopFileRaw = data
       repeatMode = Model.repeatFromMpv(loopFileRaw, loopPlaylistRaw)
@@ -327,6 +360,8 @@ Panel {
     position = 0
     playlistPos = -1
     playlistCount = 0
+    seekingRaw = false
+    pausedForCache = false
   }
 
   Timer {
@@ -553,7 +588,8 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: root.connected && root.paused ? Model.GLYPH.pause : Model.GLYPH.music
+    text: root.loading ? Model.GLYPH.loading : (root.connected && root.paused ? Model.GLYPH.pause : Model.GLYPH.music)
+    textRotation: root.loading ? root.spinAngle : 0
     active: root.playing
     labelText: root.barLabel
     slotSize: Style.bar.iconSlot + (root.barLabel !== "" ? Math.ceil(labelMetrics.advanceWidth) + Style.space(8) : 0)
@@ -630,10 +666,23 @@ Panel {
 
             PlainText {
               anchors.centerIn: parent
-              visible: !nowCover.visible
+              visible: !nowCover.visible && !root.loading
               text: Model.GLYPH.music
               font.pixelSize: Style.font.displayLarge
               elide: Text.ElideNone
+            }
+
+            // Loading: dim the cover and spin over it.
+            Rectangle {
+              anchors.fill: nowCover
+              visible: root.loading && nowCover.visible
+              color: Qt.rgba(0, 0, 0, 0.5)
+            }
+            Spinner {
+              anchors.centerIn: parent
+              visible: root.loading
+              color: nowCover.visible ? "white" : root.fg
+              font.pixelSize: Style.font.displayLarge
             }
           }
 
@@ -739,8 +788,11 @@ Panel {
               onClicked: root.previous()
             }
             PanelActionButton {
-              iconText: root.playing ? Model.GLYPH.pause : Model.GLYPH.play
-              tooltipText: strings.t("controls.playPause")
+              id: playButton
+              // While loading, the spinner takes the icon's place, as in
+              // YouTube Music; the button still pauses.
+              iconText: root.loading ? "" : (root.playing ? Model.GLYPH.pause : Model.GLYPH.play)
+              tooltipText: root.loading ? strings.t("controls.loading") : strings.t("controls.playPause")
               foreground: root.fg
               fontFamily: root.fontFamily
               fontSize: Style.font.title
@@ -748,6 +800,12 @@ Panel {
               enabled: root.connected
               opacity: enabled ? 1 : 0.4
               onClicked: root.togglePause()
+
+              Spinner {
+                anchors.centerIn: parent
+                visible: root.loading
+                font.pixelSize: Style.font.title
+              }
             }
             PanelActionButton {
               iconText: LayoutMirroring.enabled ? Model.GLYPH.previous : Model.GLYPH.next
@@ -962,7 +1020,7 @@ Panel {
                 width: parent.width
                 horizontalAlignment: Text.AlignHCenter
                 elide: Text.ElideNone
-                visible: !rowCover.visible || rowItem.isNow
+                visible: (!rowCover.visible || rowItem.isNow) && !(rowItem.isNow && root.loading)
                 color: rowCover.visible ? "white" : (rowItem.isNow ? root.fg : root.dim)
                 font.pixelSize: rowItem.isTrack && !rowItem.isNow ? Style.font.caption : Style.font.body
                 text: {
@@ -974,6 +1032,12 @@ Panel {
                   }
                   return Commons.I18n.formatNumber(rowItem.index + 1)
                 }
+              }
+
+              Spinner {
+                anchors.centerIn: parent
+                visible: rowItem.isNow && root.loading
+                color: rowCover.visible ? "white" : root.fg
               }
             }
 
@@ -1062,6 +1126,26 @@ Panel {
           }
         }
       }
+    }
+  }
+
+  // Loading indicator, like Omarchy's own spinning buttons: it turns only
+  // while visible, and stands still when animations are turned off.
+  component Spinner: Text {
+    id: spinner
+    textFormat: Text.PlainText
+    text: Model.GLYPH.loading
+    color: root.fg
+    font.family: root.fontFamily
+    font.pixelSize: Style.font.body
+    transformOrigin: Item.Center
+
+    RotationAnimation on rotation {
+      from: 0
+      to: 360
+      duration: Style.duration(900)
+      loops: Animation.Infinite
+      running: spinner.visible && !Style.reduceMotion
     }
   }
 

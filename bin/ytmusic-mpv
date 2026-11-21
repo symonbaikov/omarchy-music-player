@@ -258,11 +258,21 @@ def fetch_tracks(playlist_id, browser):
             "id": vid,
             "title": title or vid,
             "artist": artist_of(entry),
-            "duration": int(duration) if isinstance(duration, (int, float)) and 0 <= duration < 86400 else None,
+            "duration": int(duration) if isinstance(duration, (int, float)) and 0 < duration < 86400 else None,
         })
         if len(items) >= MAX_TRACKS:
             break
     return {"title": clean_text(data.get("title")), "items": items}
+
+
+def tracks_cache_path(playlist_id, browser):
+    """Mixes ("RD..." lists: song radios, My Supermix) are personalized by
+    the cookies they were read with, so each browser setting gets its own
+    copy; a guest Supermix must never stand in for the account's."""
+    name = playlist_id
+    if playlist_id.startswith("RD"):
+        name += "." + re.sub(r"[^A-Za-z0-9_.+-]", "_", browser)
+    return os.path.join(CACHE_DIR, "tracks", f"{name}.json")
 
 
 def cached_then_fresh(kind, cache_path, max_age, fetch, extra=None, items_filter=None):
@@ -302,7 +312,7 @@ def cmd_tracks(args):
     playlist_id = check_playlist_id(args[0])
     browser = check_browser(opt(args, "--browser", "none"))
     max_age = int(opt(args, "--max-age", "3600"))
-    cache = os.path.join(CACHE_DIR, "tracks", f"{playlist_id}.json")
+    cache = tracks_cache_path(playlist_id, browser)
     cached_then_fresh("tracks", cache, max_age, lambda: fetch_tracks(playlist_id, browser), {"playlistId": playlist_id})
 
 
@@ -418,7 +428,7 @@ def player_options(args):
 def load_tracks(playlist_id, browser, max_age=None):
     """Tracks for a list from the cache (any age when max_age is None),
     fetching and caching them when missing or too old."""
-    path = os.path.join(CACHE_DIR, "tracks", f"{playlist_id}.json")
+    path = tracks_cache_path(playlist_id, browser)
     cached = read_json(path)
     if isinstance(cached, dict) and cached.get("items"):
         age = time.time() - float(cached.get("fetchedAt") or 0)

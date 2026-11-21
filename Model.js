@@ -30,7 +30,23 @@ var GLYPH = {
   repeatOne: String.fromCodePoint(0xF0458),
   radio: String.fromCodePoint(0xF043B),
   supermix: String.fromCodePoint(0xF0AE2),
-  autoplay: String.fromCodePoint(0xF06E4)
+  autoplay: String.fromCodePoint(0xF06E4),
+  loading: String.fromCodePoint(0xF0772)
+}
+
+// ---- loading -------------------------------------------------------------------
+
+// Whether playback is waiting on the network, from mpv's own properties:
+// - `seeking` is unavailable (undefined/null) while a track is being opened,
+//   from start-file until playback actually starts, and true during a seek
+//   until the data at the new position arrives;
+// - `paused-for-cache` is true when the buffer ran dry mid-track.
+// `starting` covers the helper launching mpv before it is reachable at all.
+function isLoading(s) {
+  if (!s) return false
+  if (s.starting) return true
+  if (!s.connected) return false
+  return s.seeking === undefined || s.seeking === null || s.seeking === true || s.pausedForCache === true
 }
 
 // ---- recommendations ---------------------------------------------------------
@@ -179,7 +195,7 @@ function sanitizeTracks(items) {
       id: id,
       title: cleanText(t.title) || id,
       artist: cleanText(t.artist),
-      duration: isFinite(d) && d >= 0 && d < 86400 ? Math.floor(d) : null
+      duration: isFinite(d) && d > 0 && d < 86400 ? Math.floor(d) : null
     })
   }
   return out
@@ -252,4 +268,4 @@ function mpvCommand(args, requestId) {
 
 // Properties the widget follows; the index is the observe id.
 var OBSERVED = ["pause", "media-title", "duration", "playlist-pos", "playlist-count", "volume", "idle-active",
-  "loop-file", "loop-playlist"]
+  "loop-file", "loop-playlist", "seeking", "paused-for-cache"]

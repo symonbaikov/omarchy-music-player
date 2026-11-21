@@ -8,7 +8,7 @@ const source = readFileSync(new URL("../Model.js", import.meta.url), "utf8").rep
 const M = {}
 // QML's V4 engine lacks some newer built-ins; remove them so tests catch their use.
 const V4_MISSING = "delete String.prototype.trimEnd; delete String.prototype.trimStart; delete Array.prototype.at; delete Object.hasOwn;\n"
-vm.runInNewContext(V4_MISSING + source + "\n;Object.assign(__out, { cleanText, plain, truncate, formatTime, parseLine, parseSession, clampIndex, mpvCommand, GLYPH, normalizeRepeat, nextRepeat, repeatFromMpv, repeatCommands, coverUrl, OBSERVED, SUPERMIX_ID, isMix, radioListId, autoplaySeed })", { __out: M })
+vm.runInNewContext(V4_MISSING + source + "\n;Object.assign(__out, { cleanText, plain, truncate, formatTime, parseLine, parseSession, clampIndex, mpvCommand, GLYPH, normalizeRepeat, nextRepeat, repeatFromMpv, repeatCommands, coverUrl, OBSERVED, SUPERMIX_ID, isMix, radioListId, autoplaySeed, isLoading })", { __out: M })
 
 const MARKUP = '<img src="https://example.invalid/tracker">Song'
 
@@ -58,8 +58,10 @@ test("parseLine sanitizes tracks", () => {
     { id: "dQw4w9WgXcQ", title: "Song", artist: "Band", duration: 212.7 },
     { id: "short", title: "bad" },
     { id: "AAAAAAAAAAA", title: "x", duration: 1e9 },
+    { id: "BBBBBBBBBBB", title: "mix entry", duration: 0 },
   ] }))
-  assert.equal(msg.items.length, 2)
+  assert.equal(msg.items.length, 3)
+  assert.equal(msg.items[2].duration, null)
   assert.equal(msg.items[0].duration, 212)
   assert.equal(msg.items[1].duration, null)
 })
@@ -166,4 +168,22 @@ test("parseLine accepts radio results and parseSession keeps autoplay", () => {
   assert.equal(r.added, 25)
   const s = M.parseSession(JSON.stringify({ playlistId: "RDAMVMdQw4w9WgXcQ", autoplay: true, tracks: [] }))
   assert.equal(s.autoplay, true)
+})
+
+test("isLoading follows mpv while a track opens, seeks, or rebuffers", () => {
+  const playing = { connected: true, seeking: false, pausedForCache: false }
+  assert.equal(M.isLoading(playing), false)
+  // seeking is unavailable from start-file until playback starts
+  assert.equal(M.isLoading({ ...playing, seeking: undefined }), true)
+  assert.equal(M.isLoading({ ...playing, seeking: null }), true)
+  assert.equal(M.isLoading({ ...playing, seeking: true }), true)
+  assert.equal(M.isLoading({ ...playing, pausedForCache: true }), true)
+  // nothing to load without a player, unless the helper is launching one
+  assert.equal(M.isLoading({ connected: false, seeking: undefined }), false)
+  assert.equal(M.isLoading({ connected: false, starting: true }), true)
+  assert.equal(M.isLoading(null), false)
+})
+
+test("mpv loading properties are observed", () => {
+  assert.ok(M.OBSERVED.includes("seeking") && M.OBSERVED.includes("paused-for-cache"))
 })

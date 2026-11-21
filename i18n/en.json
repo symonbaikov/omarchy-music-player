@@ -11,6 +11,7 @@
   "now.autoplay": "Autoplay",
   "controls.previous": "Previous (b)",
   "controls.playPause": "Play / pause (p)",
+  "controls.loading": "Loading…",
   "controls.next": "Next (n)",
   "controls.stop": "Stop",
   "controls.repeatOff": "Repeat: off (Shift+R)",

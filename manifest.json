@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.symonbaikov.ytmusic-mpv",
+  "name": "YouTube Music (mpv)",
+  "version": "0.1.0",
+  "author": "Symon Baikov",
+  "license": "MIT",
+  "homepage": "https://github.com/symonbaikov/omarchy-ytmusic-mpv",
+  "repository": "https://github.com/symonbaikov/omarchy-ytmusic-mpv",
+  "description": "Browse your YouTube Music playlists from the bar and play them through a headless mpv. No browser window needed: yt-dlp reads your saved login cookies from disk.",
+  "keywords": [
+    "music",
+    "youtube",
+    "mpv",
+    "yt-dlp",
+    "playlists"
+  ],
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "YouTube Music (mpv)",
+    "description": "Click to browse playlists and control playback; right-click to play / pause; middle-click for the next track.",
+    "category": "Media",
+    "allowMultiple": false,
+    "defaultSection": "left",
+    "defaults": {
+      "browser": "chromium",
+      "playbackCookies": "Off",
+      "showTitle": "On",
+      "defaultVolume": 60
+    },
+    "schema": [
+      {
+        "key": "browser",
+        "type": "string",
+        "label": "Browser to read login cookies from",
+        "defaultValue": "chromium",
+        "description": "yt-dlp --cookies-from-browser value: chromium, brave, firefox, chrome, vivaldi, edge, opera, e.g. \"brave:Profile 1\", or a Firefox-fork profile folder such as \"firefox:~/.config/zen/<profile>\". The browser does not need to be running. Use \"none\" for public playlists only."
+      },
+      {
+        "key": "playbackCookies",
+        "type": "enum",
+        "label": "Use cookies for playback",
+        "options": [
+          "Off",
+          "On"
+        ],
+        "defaultValue": "Off",
+        "description": "Turn on only if private uploads or members-only tracks fail to play. Off is faster and avoids sign-in checks."
+      },
+      {
+        "key": "showTitle",
+        "type": "enum",
+        "label": "Show track title in the bar",
+        "options": [
+          "On",
+          "Off"
+        ],
+        "defaultValue": "On"
+      },
+      {
+        "key": "defaultVolume",
+        "type": "integer",
+        "label": "Starting volume",
+        "min": 0,
+        "max": 100,
+        "step": 5,
+        "defaultValue": 60
+      }
+    ]
+  }
+}

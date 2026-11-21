@@ -1,0 +1,424 @@
+#!/usr/bin/env python3
+"""Backend for the io.github.symonbaikov.ytmusic-mpv Omarchy shell plugin.
+
+Lists YouTube Music playlists and their tracks with yt-dlp, and plays them
+through a headless mpv that the shell drives over mpv's JSON IPC socket.
+No browser has to be running: yt-dlp only reads the browser's saved login
+cookies from disk to see the private library.
+
+Commands (every result is one JSON object per line on stdout):
+  playlists [--browser B] [--max-age S]
+  tracks <playlist-id> [--browser B] [--max-age S]
+  play <playlist-id> [--index N] [--shuffle 0|1] [--browser B]
+       [--playback-cookies 0|1] [--volume V]
+  stop
+  paths
+
+`playlists` and `tracks` first print the cached copy (marked "stale" when
+it is older than --max-age) and then, if it was stale or missing, fetch a
+fresh copy and print that too.
+"""
+
+import json
+import os
+import random
+import re
+import socket
+import subprocess
+import sys
+import time
+
+PLUGIN_ID = "io.github.symonbaikov.ytmusic-mpv"
+
+HOME = os.path.expanduser("~")
+CACHE_DIR = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.join(HOME, ".cache"), PLUGIN_ID)
+RUNTIME_DIR = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or os.path.join("/tmp", f"{PLUGIN_ID}-{os.getuid()}"), PLUGIN_ID)
+SOCKET_PATH = os.path.join(RUNTIME_DIR, "mpv.sock")
+SESSION_PATH = os.path.join(RUNTIME_DIR, "session.json")
+QUEUE_PATH = os.path.join(RUNTIME_DIR, "queue.m3u")
+PID_PATH = os.path.join(RUNTIME_DIR, "mpv.pid")
+MPV_LOG = os.path.join(CACHE_DIR, "mpv.log")
+
+# Bounds on everything that comes back from the network.
+MAX_PLAYLISTS = 500
+MAX_TRACKS = 5000
+MAX_TEXT = 300
+MAX_JSON_BYTES = 64 * 1024 * 1024
+FETCH_TIMEOUT = 180
+
+PLAYLIST_ID_RE = re.compile(r"^[A-Za-z0-9_-]{2,80}$")
+VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+# browser[+keyring][:profile]; the profile may be a path (Zen, LibreWolf and
+# other Firefox forks are read as firefox:<profile dir>).
+BROWSER_RE = re.compile(r"^(none|brave|chrome|chromium|edge|firefox|opera|vivaldi|whale)(\+[A-Za-z0-9_-]{1,32})?(:[A-Za-z0-9 _.()/~+-]{1,200})?$")
+
+LIKED_MUSIC = {"id": "LM", "title": "Liked Music", "count": None}
+
+# Library listings yt-dlp understands, tried in order. YouTube Music
+# playlists are ordinary YouTube playlists, so the YouTube feed lists them.
+LIBRARY_URLS = [
+    "https://www.youtube.com/feed/playlists",
+]
+
+
+def emit(obj):
+    sys.stdout.write(json.dumps(obj, ensure_ascii=False, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+
+def fail(message, kind="error"):
+    emit({"type": kind, "message": clean_text(message)})
+    sys.exit(1)
+
+
+def clean_text(value, limit=MAX_TEXT):
+    if value is None:
+        return ""
+    text = str(value)
+    text = re.sub(r"[\x00-\x1f\x7f]+", " ", text).strip()
+    return text[:limit]
+
+
+def check_playlist_id(value):
+    if not PLAYLIST_ID_RE.match(value or ""):
+        fail("Invalid playlist id")
+    return value
+
+
+def check_browser(value):
+    value = (value or "none").strip()
+    if not BROWSER_RE.match(value):
+        fail(f"Unsupported browser setting: {value}")
+    return value
+
+
+def ensure_dirs():
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    os.makedirs(os.path.join(CACHE_DIR, "tracks"), exist_ok=True)
+    os.makedirs(RUNTIME_DIR, mode=0o700, exist_ok=True)
+
+
+def write_json_atomic(path, data):
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def read_json(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
+def cookie_spec(browser):
+    name, sep, profile = browser.partition(":")
+    return f"{name}:{os.path.expanduser(profile)}" if sep else name
+
+
+def cookie_args(browser):
+    return [] if browser == "none" else ["--cookies-from-browser", cookie_spec(browser)]
+
+
+def run_ytdlp(url, browser):
+    cmd = [
+        "yt-dlp", "--ignore-config", "--flat-playlist", "--dump-single-json",
+        "--no-warnings", "--no-progress", "--socket-timeout", "20",
+        *cookie_args(browser), "--", url,
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, timeout=FETCH_TIMEOUT, stdin=subprocess.DEVNULL)
+    except FileNotFoundError:
+        raise RuntimeError("yt-dlp is not installed")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("yt-dlp timed out")
+    if proc.returncode != 0:
+        errors = [l for l in proc.stderr.decode("utf-8", "replace").splitlines() if l.startswith("ERROR")]
+        raise RuntimeError(errors[-1] if errors else f"yt-dlp exited with {proc.returncode}")
+    if len(proc.stdout) > MAX_JSON_BYTES:
+        raise RuntimeError("yt-dlp response too large")
+    try:
+        return json.loads(proc.stdout)
+    except ValueError:
+        raise RuntimeError("yt-dlp returned invalid JSON")
+
+
+def playlist_id_from_entry(entry):
+    pid = entry.get("id") or ""
+    url = entry.get("url") or ""
+    m = re.search(r"[?&]list=([A-Za-z0-9_-]+)", url)
+    if m:
+        pid = m.group(1)
+    if pid.startswith("VL") and len(pid) > 4:
+        pid = pid[2:]
+    return pid if PLAYLIST_ID_RE.match(pid) else None
+
+
+def fetch_playlists(browser):
+    if browser == "none":
+        raise RuntimeError("Set a browser in the widget settings to read your library")
+    last_error = None
+    for url in LIBRARY_URLS:
+        try:
+            data = run_ytdlp(url, browser)
+        except RuntimeError as exc:
+            last_error = exc
+            continue
+        items, seen = [], {"LM"}
+        for entry in data.get("entries") or []:
+            if not isinstance(entry, dict):
+                continue
+            pid = playlist_id_from_entry(entry)
+            if not pid or pid in seen:
+                continue
+            seen.add(pid)
+            count = entry.get("playlist_count")
+            items.append({
+                "id": pid,
+                "title": clean_text(entry.get("title")) or pid,
+                "count": count if isinstance(count, int) and 0 <= count < 1_000_000 else None,
+            })
+            if len(items) >= MAX_PLAYLISTS:
+                break
+        return [dict(LIKED_MUSIC)] + items
+    raise last_error or RuntimeError("Could not read the library")
+
+
+def artist_of(entry):
+    for key in ("artist", "channel", "uploader", "creator"):
+        value = entry.get(key)
+        if isinstance(value, list):
+            value = ", ".join(str(v) for v in value[:4])
+        if value:
+            return clean_text(re.sub(r"\s+-\s+Topic$", "", str(value)))
+    return ""
+
+
+def fetch_tracks(playlist_id, browser):
+    data = run_ytdlp(f"https://music.youtube.com/playlist?list={playlist_id}", browser)
+    items = []
+    for entry in data.get("entries") or []:
+        if not isinstance(entry, dict):
+            continue
+        vid = entry.get("id") or ""
+        if not VIDEO_ID_RE.match(vid):
+            continue
+        title = clean_text(entry.get("title"))
+        if title in ("[Deleted video]", "[Private video]"):
+            continue
+        duration = entry.get("duration")
+        items.append({
+            "id": vid,
+            "title": title or vid,
+            "artist": artist_of(entry),
+            "duration": int(duration) if isinstance(duration, (int, float)) and 0 <= duration < 86400 else None,
+        })
+        if len(items) >= MAX_TRACKS:
+            break
+    return {"title": clean_text(data.get("title")), "items": items}
+
+
+def cached_then_fresh(kind, cache_path, max_age, fetch, extra=None):
+    extra = extra or {}
+    cached = read_json(cache_path)
+    fresh_enough = False
+    if isinstance(cached, dict) and isinstance(cached.get("items"), list):
+        age = time.time() - float(cached.get("fetchedAt") or 0)
+        fresh_enough = max_age < 0 or age <= max_age
+        emit({"type": kind, "stale": not fresh_enough, **extra, **cached})
+    elif max_age < 0:
+        emit({"type": kind, "stale": True, "items": [], **extra})
+        return
+    if fresh_enough:
+        return
+    try:
+        result = fetch()
+    except RuntimeError as exc:
+        fail(str(exc))
+    result["fetchedAt"] = int(time.time())
+    write_json_atomic(cache_path, result)
+    emit({"type": kind, "stale": False, **extra, **result})
+
+
+def cmd_playlists(args):
+    browser = check_browser(opt(args, "--browser", "none"))
+    max_age = int(opt(args, "--max-age", "3600"))
+    cache = os.path.join(CACHE_DIR, f"playlists-{re.sub(r'[^A-Za-z0-9_.+-]', '_', browser)}.json")
+    cached_then_fresh("playlists", cache, max_age, lambda: {"items": fetch_playlists(browser)})
+
+
+def cmd_tracks(args):
+    if not args:
+        fail("tracks needs a playlist id")
+    playlist_id = check_playlist_id(args[0])
+    browser = check_browser(opt(args, "--browser", "none"))
+    max_age = int(opt(args, "--max-age", "3600"))
+    cache = os.path.join(CACHE_DIR, "tracks", f"{playlist_id}.json")
+    cached_then_fresh("tracks", cache, max_age, lambda: fetch_tracks(playlist_id, browser), {"playlistId": playlist_id})
+
+
+def mpv_request(command, timeout=1.0):
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(timeout)
+            sock.connect(SOCKET_PATH)
+            sock.sendall((json.dumps({"command": command}) + "\n").encode())
+            return True
+    except OSError:
+        return False
+
+
+def our_mpv_pid():
+    try:
+        with open(PID_PATH) as fh:
+            pid = int(fh.read().strip())
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            if SOCKET_PATH.encode() in fh.read():
+                return pid
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def stop_player():
+    pid = our_mpv_pid()
+    mpv_request(["quit"])
+    if pid:
+        for _ in range(20):
+            if not os.path.exists(f"/proc/{pid}"):
+                break
+            time.sleep(0.05)
+        else:
+            try:
+                os.kill(pid, 15)
+            except OSError:
+                pass
+    for path in (SOCKET_PATH, PID_PATH):
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def cmd_stop(_args):
+    stop_player()
+    try:
+        os.unlink(SESSION_PATH)
+    except OSError:
+        pass
+    emit({"type": "stopped"})
+
+
+def cmd_play(args):
+    if not args:
+        fail("play needs a playlist id")
+    playlist_id = check_playlist_id(args[0])
+    browser = check_browser(opt(args, "--browser", "none"))
+    index = max(0, int(opt(args, "--index", "0")))
+    shuffle = opt(args, "--shuffle", "0") == "1"
+    playback_cookies = opt(args, "--playback-cookies", "0") == "1"
+    volume = min(100, max(0, int(opt(args, "--volume", "60"))))
+
+    cached = read_json(os.path.join(CACHE_DIR, "tracks", f"{playlist_id}.json"))
+    if not isinstance(cached, dict) or not cached.get("items"):
+        try:
+            cached = fetch_tracks(playlist_id, browser)
+        except RuntimeError as exc:
+            fail(str(exc))
+        cached["fetchedAt"] = int(time.time())
+        write_json_atomic(os.path.join(CACHE_DIR, "tracks", f"{playlist_id}.json"), cached)
+    tracks = [t for t in cached["items"] if isinstance(t, dict) and VIDEO_ID_RE.match(str(t.get("id", "")))]
+    if not tracks:
+        fail("This playlist has no playable tracks")
+    index = min(index, len(tracks) - 1)
+
+    if shuffle:
+        first = tracks[index]
+        rest = tracks[:index] + tracks[index + 1:]
+        random.shuffle(rest)
+        order, start = [first] + rest, 0
+    else:
+        order, start = tracks, index
+
+    stop_player()
+
+    with open(QUEUE_PATH, "w", encoding="utf-8") as fh:
+        fh.write("#EXTM3U\n")
+        for t in order:
+            label = clean_text(f"{t.get('artist')} - {t.get('title')}" if t.get("artist") else t.get("title"))
+            fh.write(f"#EXTINF:{t.get('duration') or -1},{label}\n")
+            fh.write(f"https://music.youtube.com/watch?v={t['id']}\n")
+
+    write_json_atomic(SESSION_PATH, {
+        "playlistId": playlist_id,
+        "playlistTitle": clean_text(opt(args, "--title", "")) or cached.get("title") or "",
+        "shuffle": shuffle,
+        "tracks": order,
+        "startedAt": int(time.time()),
+    })
+
+    cmd = [
+        "mpv", "--no-video", "--force-window=no", "--no-terminal", "--idle=no",
+        "--audio-display=no", "--audio-client-name=YouTube Music",
+        f"--input-ipc-server={SOCKET_PATH}",
+        "--ytdl-format=bestaudio/best", "--prefetch-playlist=yes",
+        f"--volume={volume}", f"--playlist-start={start}",
+        "--msg-level=all=warn", f"--log-file={MPV_LOG}",
+    ]
+    if playback_cookies and browser != "none":
+        cmd.append(f"--ytdl-raw-options-append=cookies-from-browser={cookie_spec(browser)}")
+    cmd.append(f"--playlist={QUEUE_PATH}")
+
+    with open(os.devnull, "rb") as devnull_in, open(os.devnull, "wb") as devnull_out:
+        proc = subprocess.Popen(cmd, stdin=devnull_in, stdout=devnull_out, stderr=devnull_out,
+                                start_new_session=True, close_fds=True)
+    with open(PID_PATH, "w") as fh:
+        fh.write(str(proc.pid))
+
+    for _ in range(100):
+        if proc.poll() is not None:
+            fail(f"mpv exited early (see {MPV_LOG})")
+        if os.path.exists(SOCKET_PATH) and mpv_request(["get_property", "pid"]):
+            emit({"type": "playing", "socket": SOCKET_PATH, "index": start, "count": len(order)})
+            return
+        time.sleep(0.05)
+    fail("mpv did not open its control socket")
+
+
+def cmd_paths(_args):
+    emit({"type": "paths", "socket": SOCKET_PATH, "session": SESSION_PATH, "cache": CACHE_DIR, "log": MPV_LOG})
+
+
+def opt(args, name, default):
+    if name in args:
+        i = args.index(name)
+        if i + 1 < len(args):
+            return args[i + 1]
+    return default
+
+
+def main():
+    if len(sys.argv) < 2:
+        fail(__doc__.strip().splitlines()[0])
+    ensure_dirs()
+    command, args = sys.argv[1], sys.argv[2:]
+    handlers = {
+        "playlists": cmd_playlists,
+        "tracks": cmd_tracks,
+        "play": cmd_play,
+        "stop": cmd_stop,
+        "paths": cmd_paths,
+    }
+    handler = handlers.get(command)
+    if not handler:
+        fail(f"Unknown command: {command}")
+    try:
+        handler(args)
+    except ValueError as exc:
+        fail(f"Bad argument: {exc}")
+
+
+if __name__ == "__main__":
+    main()

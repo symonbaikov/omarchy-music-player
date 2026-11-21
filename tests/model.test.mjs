@@ -8,7 +8,7 @@ const source = readFileSync(new URL("../Model.js", import.meta.url), "utf8").rep
 const M = {}
 // QML's V4 engine lacks some newer built-ins; remove them so tests catch their use.
 const V4_MISSING = "delete String.prototype.trimEnd; delete String.prototype.trimStart; delete Array.prototype.at; delete Object.hasOwn;\n"
-vm.runInNewContext(V4_MISSING + source + "\n;Object.assign(__out, { cleanText, plain, truncate, formatTime, parseLine, parseSession, clampIndex, mpvCommand, GLYPH, normalizeRepeat, nextRepeat, repeatFromMpv, repeatCommands, coverUrl, OBSERVED, SUPERMIX_ID, isMix, radioListId, autoplaySeed, isLoading })", { __out: M })
+vm.runInNewContext(V4_MISSING + source + "\n;Object.assign(__out, { cleanText, plain, truncate, formatTime, parseLine, parseSession, clampIndex, mpvCommand, GLYPH, normalizeRepeat, nextRepeat, repeatFromMpv, repeatCommands, coverUrl, OBSERVED, SUPERMIX_ID, isMix, radioListId, autoplaySeed, isLoading, addTargets, likedSet, withLiked })", { __out: M })
 
 const MARKUP = '<img src="https://example.invalid/tracker">Song'
 
@@ -186,4 +186,52 @@ test("isLoading follows mpv while a track opens, seeks, or rebuffers", () => {
 
 test("mpv loading properties are observed", () => {
   assert.ok(M.OBSERVED.includes("seeking") && M.OBSERVED.includes("paused-for-cache"))
+})
+
+test("addTargets offers only the user's playlists", () => {
+  const lists = [{ id: "LM" }, { id: M.SUPERMIX_ID }, { id: "RDAMVMdQw4w9WgXcQ" }, { id: "PLmine1" }, { id: "PLmine2" }]
+  assert.deepEqual(Array.from(M.addTargets(lists), p => p.id), ["PLmine1", "PLmine2"])
+  assert.equal(M.addTargets(null).length, 0)
+})
+
+test("liked set: build, toggle, and ignore junk ids", () => {
+  const set = M.likedSet(["dQw4w9WgXcQ", "bad", "<x>"])
+  assert.deepEqual(Object.keys(set), ["dQw4w9WgXcQ"])
+  const on = M.withLiked(set, "AAAAAAAAAAA", true)
+  assert.ok(on["AAAAAAAAAAA"] && on["dQw4w9WgXcQ"])
+  assert.ok(!set["AAAAAAAAAAA"], "original is not mutated")
+  const off = M.withLiked(on, "dQw4w9WgXcQ", false)
+  assert.deepEqual(Object.keys(off), ["AAAAAAAAAAA"])
+  assert.deepEqual(Object.keys(M.withLiked(set, "../x", true)), ["dQw4w9WgXcQ"])
+})
+
+test("parseLine validates like / add / likedIds results", () => {
+  assert.equal(M.parseLine(JSON.stringify({ type: "liked", id: "dQw4w9WgXcQ", liked: true })).liked, true)
+  assert.equal(M.parseLine(JSON.stringify({ type: "liked", id: "nope" })), null)
+  assert.equal(M.parseLine(JSON.stringify({ type: "added", id: "dQw4w9WgXcQ", playlistId: "PLx1" })).playlistId, "PLx1")
+  assert.equal(M.parseLine(JSON.stringify({ type: "added", id: "dQw4w9WgXcQ", playlistId: "../x" })), null)
+  const ids = M.parseLine(JSON.stringify({ type: "likedIds", known: true, ids: ["dQw4w9WgXcQ", "bad", 5] }))
+  assert.equal(ids.ids.length, 1)
+  assert.equal(ids.known, true)
+})
+
+test("targets: only editable playlists, already-there marked, junk dropped", () => {
+  const msg = M.parseLine(JSON.stringify({ type: "targets", videoId: "dQw4w9WgXcQ", items: [
+    { id: "PLmine1", title: "Road trip", contains: false },
+    { id: "PLmine2", title: "<b>Gym</b>", contains: true },
+    { id: "LM", title: "Liked" },
+    { id: M.SUPERMIX_ID, title: "Mix" },
+    { id: "PLmine1", title: "dupe" },
+    { id: "bad id", title: "x" },
+  ] }))
+  assert.equal(JSON.stringify(Array.from(msg.items, p => [p.id, p.contains])), JSON.stringify([["PLmine1", false], ["PLmine2", true]]))
+  assert.equal(msg.items[1].title, "<b>Gym</b>")   // rendered as plain text
+  assert.equal(msg.items[0].count, null)
+  assert.equal(M.parseLine(JSON.stringify({ type: "targets", videoId: "x", items: [] })), null)
+})
+
+test("errors carry the sign-in flag only when the helper sets it", () => {
+  assert.equal(M.parseLine(JSON.stringify({ type: "error", message: "m", auth: true })).auth, true)
+  assert.equal(M.parseLine(JSON.stringify({ type: "error", message: "m" })).auth, false)
+  assert.equal(M.parseLine(JSON.stringify({ type: "error", message: "m", auth: "yes" })).auth, false)
 })

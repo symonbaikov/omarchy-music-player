@@ -34,7 +34,7 @@ Panel {
   readonly property bool barVertical: bar ? bar.vertical === true : false
 
   // ---- library state -------------------------------------------------------
-  property string view: "playlists"          // "playlists" | "tracks"
+  property string view: "playlists"          // "playlists" | "tracks" | "addTo"
   property var playlists: []
   property bool playlistsLoading: false
   property string playlistsError: ""
@@ -43,7 +43,28 @@ Panel {
   property bool tracksLoading: false
   property string tracksError: ""
   property int cursorIndex: -1
-  readonly property var rows: view === "tracks" ? tracks : playlists
+  readonly property var rows: view === "tracks" ? tracks
+    : (view === "addTo" ? (addTargetsLive !== null ? addTargetsLive : (addTargetsLoading ? [] : Model.addTargets(playlists)))
+    : playlists)
+  // YouTube Music's own add-to-playlist list for `addTrack`: only playlists
+  // you can edit, marked when the song is already in them. null until it
+  // arrives; if it can't be read, the library's playlists stand in.
+  property var addTargetsLive: null
+  property bool addTargetsLoading: false
+  // The notice is a sign-in problem: offer a "Sign in" button with it.
+  property bool noticeAuth: false
+
+  // ---- library edits (like, add to playlist) --------------------------------
+  // Liked video ids, from the local Liked Music list; updated at once when
+  // the heart is pressed and rolled back if YouTube refuses.
+  property var likedIds: ({})
+  // The song being added to a playlist (the "addTo" view), and the view to
+  // return to afterwards.
+  property var addTrack: null
+  property string viewBeforeAdd: "playlists"
+  // A short message under the controls ("Added to …", errors).
+  property string notice: ""
+  readonly property bool editBusy: likeProc.running || addProc.running
 
   // ---- player state (mirrored from mpv) -------------------------------------
   property string socketPath: ""
@@ -161,9 +182,25 @@ Panel {
       playlists = msg.items
       if (!msg.stale) playlistsLoading = false
     } else if (msg.type === "tracks") {
+      // A fresh Liked Music list is the truth about what's liked.
+      if (msg.playlistId === "LM" && !msg.stale) likedIds = Model.likedSet(msg.items.map(function(t) { return t.id }))
       if (!openPlaylist || msg.playlistId !== openPlaylist.id) return
       tracks = msg.items
       if (!msg.stale) tracksLoading = false
+    } else if (msg.type === "likedIds") {
+      likedIds = Model.likedSet(msg.ids)
+    } else if (msg.type === "liked") {
+      likedIds = Model.withLiked(likedIds, msg.id, msg.liked)
+      showNotice(msg.liked ? strings.t("notice.liked") : strings.t("notice.unliked"))
+    } else if (msg.type === "added") {
+      showNotice(strings.t("notice.added").arg(addProc.title || playlistTitleById(msg.playlistId)))
+    } else if (msg.type === "targets") {
+      if (addTrack && msg.videoId === addTrack.id) {
+        addTargetsLive = msg.items
+        addTargetsLoading = false
+      }
+    } else if (msg.type === "signin") {
+      showNotice(strings.t("notice.signinOpened").arg(msg.browser))
     } else if (msg.type === "playing") {
       starting = false
       attachAll()
@@ -173,6 +210,19 @@ Panel {
     } else if (msg.type === "error") {
       if (source === "playlists") { playlistsError = msg.message; playlistsLoading = false }
       else if (source === "tracks") { tracksError = msg.message; tracksLoading = false }
+      else if (source === "like") {
+        // Put the heart back the way it was.
+        likedIds = Model.withLiked(likedIds, likeProc.videoId, !likeProc.liking)
+        showNotice(strings.t("notice.failed").arg(msg.message), msg.auth)
+      }
+      else if (source === "add") showNotice(strings.t("notice.failed").arg(msg.message), msg.auth)
+      else if (source === "targets") {
+        // Fall back to the library's playlists; only a sign-in problem is
+        // worth telling the user about here.
+        addTargetsLoading = false
+        if (msg.auth) showNotice(msg.message, true)
+      }
+      else if (source === "signin") showNotice(msg.message)
       else {
         playError = msg.message
         starting = false
@@ -227,6 +277,47 @@ Panel {
   Process {
     id: stopProc
     command: root.helper(["stop"])
+  }
+
+  Process {
+    id: likedProc
+    command: root.helper(["liked"])
+    stdout: SplitParser { onRead: function(line) { root.handleHelperLine(line, "liked") } }
+  }
+
+  Process {
+    id: likeProc
+    property string videoId: ""
+    property bool liking: true
+    stdout: SplitParser { onRead: function(line) { root.handleHelperLine(line, "like") } }
+  }
+
+  Process {
+    id: addProc
+    property string title: ""
+    stdout: SplitParser { onRead: function(line) { root.handleHelperLine(line, "add") } }
+  }
+
+  Process {
+    id: targetsProc
+    stdout: SplitParser { onRead: function(line) { root.handleHelperLine(line, "targets") } }
+    onExited: root.addTargetsLoading = false
+  }
+
+  Process {
+    id: signinProc
+    command: root.helper(["signin", "--browser", root.browser])
+    stdout: SplitParser { onRead: function(line) { root.handleHelperLine(line, "signin") } }
+  }
+
+  Timer {
+    id: noticeTimer
+    // Sign-in problems stay longer: there's a button to press.
+    interval: root.noticeAuth ? 12000 : 4000
+    onTriggered: {
+      root.notice = ""
+      root.noticeAuth = false
+    }
   }
 
   Process {
@@ -440,6 +531,83 @@ Panel {
     return currentTrack
   }
 
+  function showNotice(text, auth) {
+    notice = text
+    noticeAuth = auth === true
+    noticeTimer.restart()
+  }
+
+  // Opens YouTube's sign-in page in the browser the cookies come from.
+  function signIn() {
+    if (!signinProc.running) signinProc.running = true
+  }
+
+  function playlistTitleById(id) {
+    for (var i = 0; i < playlists.length; i++) if (playlists[i].id === id) return playlistTitle(playlists[i])
+    return id
+  }
+
+  function isLiked(id) { return !!(id && likedIds[id]) }
+
+  // The heart, like YouTube Music's: likes the song (it goes to Liked Music)
+  // or removes the like. Shown at once, rolled back if YouTube refuses.
+  function toggleLike(track) {
+    if (!track || !Model.radioListId(track.id) || likeProc.running) return
+    var like = !isLiked(track.id)
+    likedIds = Model.withLiked(likedIds, track.id, like)
+    likeProc.videoId = track.id
+    likeProc.liking = like
+    var args = ["like", track.id, "--browser", browser,
+                "--title", track.title || "", "--artist", track.artist || "",
+                "--duration", String(track.duration || 0)]
+    if (!like) args.push("--remove", "1")
+    likeProc.command = helper(args)
+    likeProc.running = true
+  }
+
+  // "Add to playlist": the list switches to your playlists; picking one adds
+  // the song and returns to where you were.
+  function openAddTo(track) {
+    if (!track || !Model.radioListId(track.id)) return
+    if (playlists.length === 0) loadPlaylists(false)
+    addTrack = track
+    if (view !== "addTo") viewBeforeAdd = view
+    view = "addTo"
+    cursorIndex = -1
+    // Ask YouTube Music which playlists this song can go to.
+    addTargetsLive = null
+    if (browser !== "none") {
+      addTargetsLoading = true
+      targetsProc.command = helper(["targets", track.id, "--browser", browser])
+      targetsProc.running = true
+    } else {
+      addTargetsLoading = false
+    }
+  }
+
+  function closeAddTo() {
+    if (view !== "addTo") return
+    view = viewBeforeAdd
+    addTrack = null
+    addTargetsLive = null
+    addTargetsLoading = false
+    cursorIndex = -1
+  }
+
+  function addToPlaylist(playlist) {
+    if (!playlist || !addTrack || addProc.running) return
+    var title = playlistTitle(playlist)
+    if (playlist.contains === true) {
+      showNotice(strings.t("notice.alreadyIn").arg(title))
+      closeAddTo()
+      return
+    }
+    addProc.title = title
+    addProc.command = helper(["add", playlist.id, addTrack.id, "--browser", browser])
+    addProc.running = true
+    closeAddTo()
+  }
+
   // Off -> repeat all -> repeat one -> off. Works with nothing playing too:
   // the next playback starts in the chosen mode.
   function cycleRepeat() {
@@ -487,6 +655,7 @@ Panel {
   }
 
   function backToPlaylists() {
+    if (view === "addTo") { closeAddTo(); return }
     if (view !== "tracks") return
     view = "playlists"
     var id = openPlaylist ? openPlaylist.id : ""
@@ -501,6 +670,7 @@ Panel {
 
   function activateRow(index) {
     if (view === "tracks") play(index, false)
+    else if (view === "addTo") addToPlaylist(rows[index])
     else openPlaylistAt(index)
   }
 
@@ -540,6 +710,8 @@ Panel {
     case "r": refreshList(); break
     case "R": cycleRepeat(); break
     case "m": startRadio(cursorOrCurrentTrack()); break
+    case "f": toggleLike(cursorOrCurrentTrack()); break
+    case "a": openAddTo(cursorOrCurrentTrack()); break
     case "s": if (view === "tracks") play(Math.floor(Math.random() * Math.max(1, tracks.length)), true); break
     case "+": case "=": setVolume(volume + 5); break
     case "-": setVolume(volume - 5); break
@@ -561,17 +733,27 @@ Panel {
     function stop(): void { root.stop() }
     function cycleRepeat(): void { root.cycleRepeat() }
     function startRadio(): void { root.startRadio(root.currentTrack) }
+    function toggleLike(): void { root.toggleLike(root.currentTrack) }
+    function addToPlaylist(): void {
+      root.open()
+      root.openAddTo(root.currentTrack)
+    }
+    function signIn(): void { root.signIn() }
   }
 
   onOpenedChanged: {
     if (!opened) return
     cursorIndex = -1
     if (playlists.length === 0 || !playlistsLoading) loadPlaylists(false)
+    if (!likedProc.running) likedProc.running = true
     if (connected) requestPosition()
     else attach()
   }
 
-  Component.onCompleted: pathsProc.running = true
+  Component.onCompleted: {
+    pathsProc.running = true
+    likedProc.running = true
+  }
 
   // ---- bar button ----------------------------------------------------------
   implicitWidth: button.implicitWidth
@@ -686,11 +868,38 @@ Panel {
             }
           }
 
+          // Like and add-to-playlist for the playing song, beside its title.
+          Row {
+            id: nowActions
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(4)
+            visible: root.connected && root.currentTrack !== null
+
+            PanelActionButton {
+              readonly property bool liked: root.currentTrack !== null && root.isLiked(root.currentTrack.id)
+              iconText: liked ? Model.GLYPH.heart : Model.GLYPH.heartOutline
+              tooltipText: liked ? strings.t("controls.unlike") : strings.t("controls.like")
+              foreground: liked ? Style.selectedStateColor(root.fg, Commons.Color.accent) : root.fg
+              fontFamily: root.fontFamily
+              enabled: !likeProc.running
+              onClicked: root.toggleLike(root.currentTrack)
+            }
+            PanelActionButton {
+              iconText: Model.GLYPH.playlistAdd
+              tooltipText: strings.t("controls.addToPlaylist")
+              foreground: root.fg
+              fontFamily: root.fontFamily
+              onClicked: root.openAddTo(root.currentTrack)
+            }
+          }
+
           Column {
             id: nowLabels
             anchors.left: nowIcon.right
             anchors.leftMargin: Style.space(14)
-            anchors.right: parent.right
+            anchors.right: nowActions.visible ? nowActions.left : parent.right
+            anchors.rightMargin: nowActions.visible ? Style.space(6) : 0
             anchors.verticalCenter: parent.verticalCenter
             spacing: Style.space(2)
 
@@ -885,6 +1094,40 @@ Panel {
           font.pixelSize: Style.font.bodySmall
         }
 
+        // Notices ("Added to …", errors). A sign-in problem gets a button that
+        // opens YouTube's sign-in page in the browser the cookies come from.
+        Item {
+          visible: root.notice !== ""
+          width: parent.width
+          implicitHeight: Math.max(noticeText.implicitHeight, noticeSignIn.visible ? noticeSignIn.implicitHeight : 0)
+
+          PlainText {
+            id: noticeText
+            anchors.left: parent.left
+            anchors.right: noticeSignIn.visible ? noticeSignIn.left : parent.right
+            anchors.rightMargin: noticeSignIn.visible ? Style.space(8) : 0
+            anchors.verticalCenter: parent.verticalCenter
+            text: root.notice
+            color: root.dim
+            wrapMode: Text.Wrap
+            elide: Text.ElideNone
+            font.pixelSize: Style.font.bodySmall
+          }
+          Button {
+            id: noticeSignIn
+            visible: root.noticeAuth && root.browser !== "none"
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            iconText: Model.GLYPH.login
+            text: strings.t("controls.signIn")
+            fontSize: Style.font.bodySmall
+            foreground: root.fg
+            fontFamily: root.fontFamily
+            bordered: true
+            onClicked: root.signIn()
+          }
+        }
+
         PanelSeparator { foreground: root.fg }
 
         // ---------- list header ----------
@@ -901,7 +1144,7 @@ Panel {
             spacing: Style.space(6)
 
             PanelActionButton {
-              visible: root.view === "tracks"
+              visible: root.view === "tracks" || root.view === "addTo"
               anchors.verticalCenter: parent.verticalCenter
               iconText: LayoutMirroring.enabled ? Model.GLYPH.forward : Model.GLYPH.back
               tooltipText: strings.t("list.back")
@@ -911,9 +1154,10 @@ Panel {
             }
             PanelSectionHeader {
               anchors.verticalCenter: parent.verticalCenter
-              width: Math.min(implicitWidth, headerLeft.width - (root.view === "tracks" ? Style.space(40) : 0))
+              width: Math.min(implicitWidth, headerLeft.width - (root.view !== "playlists" ? Style.space(40) : 0))
               elide: Text.ElideRight
-              text: root.view === "tracks" ? root.playlistTitle(root.openPlaylist) : strings.t("list.playlists")
+              text: root.view === "tracks" ? root.playlistTitle(root.openPlaylist)
+                : (root.view === "addTo" && root.addTrack ? strings.t("list.addTo").arg(root.addTrack.title) : strings.t("list.playlists"))
               foreground: root.fg
               fontFamily: root.fontFamily
             }
@@ -1045,7 +1289,7 @@ Panel {
               id: rowLabels
               anchors.left: leading.right
               anchors.leftMargin: Style.space(8)
-              anchors.right: rowRadio.visible ? rowRadio.left : trailing.left
+              anchors.right: rowActions.visible ? rowActions.left : (rowLikedMark.visible ? rowLikedMark.left : trailing.left)
               anchors.rightMargin: Style.space(8)
               anchors.verticalCenter: parent.verticalCenter
               spacing: Style.space(1)
@@ -1075,7 +1319,9 @@ Panel {
               text: {
                 var d = rowItem.modelData
                 if (rowItem.isTrack) return d.duration !== null ? Model.formatTime(d.duration, Commons.I18n.formatNumber) : ""
-                return d.count !== null ? strings.tn("list.tracks", d.count).arg(Commons.I18n.formatNumber(d.count)) : ""
+                // Add-to view: a check where the song already is.
+                if (root.view === "addTo" && d.contains === true) return Model.GLYPH.check
+                return typeof d.count === "number" ? strings.tn("list.tracks", d.count).arg(Commons.I18n.formatNumber(d.count)) : ""
               }
             }
 
@@ -1087,20 +1333,55 @@ Panel {
               onClicked: root.activateRow(rowItem.index)
             }
 
-            // "Start radio" on the highlighted track. Declared after the
-            // row's MouseArea so it sits above it and gets its own clicks.
-            PanelActionButton {
-              id: rowRadio
+            readonly property bool liked: isTrack && root.isLiked(modelData.id)
+
+            // A liked song keeps a small heart when it isn't highlighted.
+            PlainText {
+              id: rowLikedMark
+              visible: rowItem.liked && !rowActions.visible
+              anchors.right: trailing.left
+              anchors.rightMargin: Style.space(8)
+              anchors.verticalCenter: parent.verticalCenter
+              text: Model.GLYPH.heart
+              color: root.dim
+              font.pixelSize: Style.font.bodySmall
+              elide: Text.ElideNone
+            }
+
+            // Like, add to playlist and start radio for the highlighted track.
+            // Declared after the row's MouseArea so the buttons sit above it
+            // and get their own clicks.
+            Row {
+              id: rowActions
               visible: rowItem.isTrack && rowItem.hasCursor
               anchors.right: trailing.left
               anchors.rightMargin: Style.space(6)
               anchors.verticalCenter: parent.verticalCenter
-              iconText: Model.GLYPH.radio
-              tooltipText: strings.t("list.startRadio")
-              foreground: root.fg
-              fontFamily: root.fontFamily
-              enabled: !root.radioBusy
-              onClicked: root.startRadio(rowItem.modelData)
+              spacing: Style.space(2)
+
+              PanelActionButton {
+                iconText: rowItem.liked ? Model.GLYPH.heart : Model.GLYPH.heartOutline
+                tooltipText: rowItem.liked ? strings.t("controls.unlike") : strings.t("controls.like")
+                foreground: rowItem.liked ? Style.selectedStateColor(root.fg, Commons.Color.accent) : root.fg
+                fontFamily: root.fontFamily
+                enabled: !likeProc.running
+                onClicked: root.toggleLike(rowItem.modelData)
+              }
+              PanelActionButton {
+                iconText: Model.GLYPH.playlistAdd
+                tooltipText: strings.t("controls.addToPlaylist")
+                foreground: root.fg
+                fontFamily: root.fontFamily
+                onClicked: root.openAddTo(rowItem.modelData)
+              }
+              PanelActionButton {
+                iconText: Model.GLYPH.radio
+                tooltipText: strings.t("list.startRadio")
+                foreground: root.fg
+                fontFamily: root.fontFamily
+                enabled: !root.radioBusy
+                onClicked: root.startRadio(rowItem.modelData)
+              }
             }
           }
         }
@@ -1113,6 +1394,12 @@ Panel {
           color: root.dim
           font.pixelSize: Style.font.bodySmall
           text: {
+            if (root.view === "addTo") {
+              if (root.rows.length > 0) return ""
+              if (root.addTargetsLoading) return strings.t("list.loadingTargets")
+              // Empty only means "none of your own" when YouTube said so.
+              return root.addTargetsLive !== null ? strings.t("list.noOwnPlaylists") : strings.t("list.targetsFailed")
+            }
             var loading = root.view === "tracks" ? root.tracksLoading : root.playlistsLoading
             var error = root.view === "tracks" ? root.tracksError : root.playlistsError
             if (error !== "") {
@@ -1124,6 +1411,18 @@ Panel {
             if (loading) return strings.t("list.loading")
             return root.view === "tracks" ? strings.t("list.emptyTracks") : strings.t("list.emptyPlaylists")
           }
+        }
+
+        // The library didn't load: most often not signed in to that browser.
+        Button {
+          visible: root.view === "playlists" && root.playlistsError !== "" && root.browser !== "none"
+          iconText: Model.GLYPH.login
+          text: strings.t("controls.signIn")
+          fontSize: Style.font.bodySmall
+          foreground: root.fg
+          fontFamily: root.fontFamily
+          bordered: true
+          onClicked: root.signIn()
         }
       }
     }

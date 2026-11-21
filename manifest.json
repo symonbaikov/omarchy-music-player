@@ -2,12 +2,12 @@
   "schemaVersion": 1,
   "id": "io.github.symonbaikov.ytmusic-mpv",
   "name": "YouTube Music (mpv)",
-  "version": "0.3.1",
+  "version": "0.4.1",
   "author": "Symon Baikov",
   "license": "MIT",
   "homepage": "https://github.com/symonbaikov/omarchy-ytmusic-mpv",
   "repository": "https://github.com/symonbaikov/omarchy-ytmusic-mpv",
-  "description": "Your YouTube Music in the Omarchy bar without a browser: playlists, My Supermix, song radio and autoplay recommendations, cover art and Apple Music-style repeat, played through a headless mpv. yt-dlp reads your saved login cookies from disk.",
+  "description": "Your YouTube Music in the Omarchy bar without a browser: playlists, likes and add-to-playlist, My Supermix, song radio and autoplay recommendations, cover art and Apple Music-style repeat, played through a headless mpv. yt-dlp reads your saved login cookies from disk.",
   "keywords": [
     "mpv",
     "music",
@@ -44,7 +44,7 @@
         "type": "string",
         "label": "Browser to read login cookies from",
         "defaultValue": "chromium",
-        "description": "yt-dlp --cookies-from-browser value: chromium, brave, firefox, chrome, vivaldi, edge, opera, e.g. \"brave:Profile 1\", or a Firefox-fork profile folder such as \"firefox:~/.config/zen/<profile>\". The browser does not need to be running. Use \"none\" for public playlists only."
+        "description": "Browser you're signed in to YouTube Music with: chromium, brave, chrome, firefox, vivaldi, edge, opera, a profile such as \"brave:Profile 1\", or a Firefox-fork profile folder such as \"firefox:~/.config/zen/<profile>\". It doesn't need to be running. Chromium-based browsers' cookie keyring is taken from their --password-store flag; add \"+gnomekeyring\" or \"+kwallet6\" to set it yourself. Use \"none\" for public playlists only."
       },
       {
         "key": "playbackCookies",

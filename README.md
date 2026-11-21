@@ -13,6 +13,11 @@ web app open while it plays.
 - `mpv --no-video` plays a queue built from the playlist. With `mpv-mpris`
   installed it shows up on MPRIS, so media keys and Omarchy's OSD control it.
 - The widget follows playback live over mpv's JSON IPC socket.
+- **Like** songs (the heart adds them to Liked Music) and **add them to any
+  of your playlists**, like in YouTube Music. The add-to-playlist list comes
+  from YouTube Music's own dialog: only playlists you created (YouTube
+  doesn't let anyone add to playlists they only saved), with a ✓ where the
+  song already is.
 - Cover art for the playing song and for every track in the list.
 - Apple Music-style repeat: off, repeat the playlist, or repeat one song.
 - Recommendations, the YouTube Music way. These are YouTube Music's own
@@ -30,7 +35,12 @@ web app open while it plays.
 - Optional: `mpv-mpris` (media keys and the OSD)
 - A browser signed in to YouTube Music (Chromium, Brave, Chrome, Firefox,
   Zen, Vivaldi, Edge or Opera) to read your private library. Public playlists
-  work without one.
+  work without one. The browser doesn't have to be running.
+- Chromium-based browsers encrypt their cookies with a key kept in GNOME
+  Keyring or KWallet. The plugin reads which one from the browser's
+  `--password-store` flag (`~/.config/chromium-flags.conf`,
+  `brave-flags.conf`, …), so Omarchy's Chromium and Brave work as they come.
+  The keyring has to be unlocked, which it is after a normal login.
 
 Install the packages with Omarchy's package installer if you don't have them.
 
@@ -62,9 +72,11 @@ Removal doesn't touch the cached lists. Delete them yourself if you like:
 
 In the panel: `j`/`k` move, `Enter` opens a playlist or plays a track,
 `h`/`Backspace` goes back, `p` play/pause, `n` next, `b` previous,
-`s` shuffle the open playlist, `Shift+R` cycle repeat, `m` start radio
-from the highlighted track (or the playing one), `r` refresh, `+`/`-`
-volume, `Esc` closes. Hovering a track also shows a radio button.
+`s` shuffle the open playlist, `Shift+R` cycle repeat, `m` start radio,
+`f` like / remove like, `a` add to a playlist (all three act on the
+highlighted track, or the playing one), `r` refresh, `+`/`-` volume, `Esc`
+closes. Hovering a track shows like, add-to-playlist and radio buttons;
+liked tracks keep a small heart.
 
 The repeat button (next to stop) cycles like Apple Music: off (dim) →
 repeat the playlist (highlighted) → repeat one song (highlighted, "1") →
@@ -77,6 +89,8 @@ omarchy-shell io.github.symonbaikov.ytmusic-mpv toggle      # open/close the pan
 omarchy-shell io.github.symonbaikov.ytmusic-mpv playPause   # also: next, previous, stop
 omarchy-shell io.github.symonbaikov.ytmusic-mpv cycleRepeat # off -> all -> one
 omarchy-shell io.github.symonbaikov.ytmusic-mpv startRadio  # radio from the playing song
+omarchy-shell io.github.symonbaikov.ytmusic-mpv toggleLike  # like the playing song
+omarchy-shell io.github.symonbaikov.ytmusic-mpv addToPlaylist # pick a playlist for it
 ```
 
 ## Settings
@@ -106,6 +120,13 @@ Edit them in Omarchy's bar settings, or on the widget's entry in
 - The plugin contacts YouTube only when you open the panel and a cached list
   is older than one hour, when you press refresh, or while it plays. It has
   no background polling.
+- Liking a song and adding it to a playlist are the only requests that change
+  your account, and they happen only when you press the heart or pick a
+  playlist. They go to YouTube Music's own web API at
+  `https://music.youtube.com/youtubei/v1/`, signed with your cookies exactly
+  as music.youtube.com signs them (yt-dlp is read-only, so the helper makes
+  these two requests itself). Nothing else is sent, and the cookies are never
+  written to disk or logged.
 - Radio, autoplay and My Supermix are read from YouTube Music with the same
   cookies as your library, so they're personalized like in the app. Autoplay
   makes one request when the last song in the queue starts, and only then.
@@ -121,13 +142,23 @@ Edit them in Omarchy's bar settings, or on the widget's entry in
 
 ## Troubleshooting
 
-- **"Couldn't load"**: you aren't signed in to YouTube Music in the
-  configured browser, or `browser` points at the wrong profile. Test it from
-  a terminal:
+- **"Couldn't load"** or **"Not signed in"**: you aren't signed in to YouTube
+  Music in the configured browser, or `browser` points at the wrong profile.
+  For a Chromium-based browser without a flags file, name the keyring
+  yourself, for example `chrome+gnomekeyring` or `chromium+kwallet6`. For a
+  Flatpak browser, give its profile folder, for example
+  `chromium:~/.var/app/org.chromium.Chromium/config/chromium/Default`. Test
+  it from a terminal:
   ```bash
   ~/.config/omarchy/plugins/io.github.symonbaikov.ytmusic-mpv/bin/ytmusic-mpv \
     playlists --browser chromium --max-age 0
   ```
+- **Sign-in problems** show a **Sign in** button. It opens YouTube's sign-in
+  page in the browser the cookies are read from (Zen, LibreWolf and so on are
+  recognized by their profile folder).
+- **Like or add-to-playlist failed**: the panel shows YouTube's own reason.
+  `~/.cache/io.github.symonbaikov.ytmusic-mpv/api.log` has the endpoint, HTTP
+  code and YouTube's status for each failure, and never headers or cookies.
 - **A track won't play**: check `~/.cache/io.github.symonbaikov.ytmusic-mpv/mpv.log`,
   and keep `yt-dlp` up to date (`omarchy update`).
 
@@ -135,13 +166,14 @@ Edit them in Omarchy's bar settings, or on the widget's entry in
 
 ```bash
 node --test tests/
+python3 -I -m unittest discover -s tests -p 'test_*.py'
 omarchy plugin validate .
 ```
 
 `bin/ytmusic-mpv` is also a small CLI: `playlists`, `tracks <id>`,
 `play <id> [--index N] [--shuffle 1]`,
-`radio <video-id> [--mode replace|keep|append]` and `stop`. Each prints JSON
-lines.
+`radio <video-id> [--mode replace|keep|append]`, `like <video-id> [--remove 1]`,
+`add <playlist-id> <video-id>`, `liked` and `stop`. Each prints JSON lines.
 
 ## License
 

@@ -13,6 +13,11 @@ Commands (every result is one JSON object per line on stdout):
        [--playback-cookies 0|1] [--volume V] [--repeat off|all|one]
   radio <video-id> [--mode replace|keep|append] [--browser B] [--title T]
         [--playback-cookies 0|1] [--volume V] [--repeat off|all|one]
+  like <video-id> [--remove 1] [--browser B] [--title T] [--artist A] [--duration S]
+  add <playlist-id> <video-id> [--browser B]
+  liked
+  targets <video-id> [--browser B]
+  signin [--browser B]
   stop
   paths
 
@@ -25,9 +30,15 @@ fresh copy and print that too.
 cookies are used. replace starts it as a new queue; keep lets the playing
 song continue and replaces what comes after it; append (autoplay) adds
 tracks not yet in the queue to its end.
+
+`like` and `add` write to the account (like a song, add it to one of your
+playlists) through YouTube Music's own web API, signed with the browser's
+cookies exactly as music.youtube.com does. yt-dlp is read-only, so these
+two are the only requests the helper makes itself.
 """
 
 import fcntl
+import hashlib
 import json
 import os
 import random
@@ -36,6 +47,8 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 
 PLUGIN_ID = "io.github.symonbaikov.ytmusic-mpv"
 
@@ -48,6 +61,9 @@ QUEUE_PATH = os.path.join(RUNTIME_DIR, "queue.m3u")
 PID_PATH = os.path.join(RUNTIME_DIR, "mpv.pid")
 LOCK_PATH = os.path.join(RUNTIME_DIR, "session.lock")
 MPV_LOG = os.path.join(CACHE_DIR, "mpv.log")
+# YouTube Music API errors (endpoint, HTTP code, YouTube's own status and
+# message). Never headers or cookies.
+API_LOG = os.path.join(CACHE_DIR, "api.log")
 
 # Bounds on everything that comes back from the network.
 MAX_PLAYLISTS = 500
@@ -85,8 +101,8 @@ def emit(obj):
     sys.stdout.flush()
 
 
-def fail(message, kind="error"):
-    emit({"type": kind, "message": clean_text(message)})
+def fail(message, kind="error", **extra):
+    emit({"type": kind, "message": clean_text(message), **extra})
     sys.exit(1)
 
 
@@ -132,9 +148,61 @@ def read_json(path):
         return None
 
 
+# Chromium-family browsers encrypt cookies with a key kept wherever
+# --password-store points (Omarchy launches Chromium and Brave with
+# gnome-libsecret). yt-dlp guesses the store from the desktop environment,
+# and under Hyprland it guesses "basictext", so the cookies wouldn't decrypt.
+# Read the browser's own flags file instead, as the browser itself does.
+CHROMIUM_FLAGS_FILES = {
+    "chromium": ["chromium-flags.conf"],
+    "brave": ["brave-flags.conf"],
+    "chrome": ["chrome-flags.conf", "chrome-stable-flags.conf"],
+    "vivaldi": ["vivaldi-stable.conf", "vivaldi-flags.conf"],
+    "edge": ["microsoft-edge-stable-flags.conf"],
+    "opera": ["opera-flags.conf"],
+}
+PASSWORD_STORE_KEYRINGS = {
+    "gnome-libsecret": "gnomekeyring",
+    "gnome-keyring": "gnomekeyring",
+    "gnome": "gnomekeyring",
+    "kwallet": "kwallet",
+    "kwallet5": "kwallet5",
+    "kwallet6": "kwallet6",
+    "basic": "basictext",
+}
+
+
+def browser_keyring(name, config_dir=None):
+    """The yt-dlp keyring matching the browser's --password-store flag, or
+    None to let yt-dlp choose."""
+    config_dir = config_dir or os.environ.get("XDG_CONFIG_HOME") or os.path.join(HOME, ".config")
+    for filename in CHROMIUM_FLAGS_FILES.get(name, []):
+        try:
+            with open(os.path.join(config_dir, filename), encoding="utf-8") as fh:
+                text = fh.read(65536)
+        except OSError:
+            continue
+        found = None
+        for match in re.finditer(r"--password-store[= ]([A-Za-z0-9_-]+)", text):
+            found = match.group(1)
+        if found:
+            return PASSWORD_STORE_KEYRINGS.get(found)
+    return None
+
+
+def browser_parts(browser, config_dir=None):
+    """'chromium[+keyring][:profile]' -> (name, keyring or None, profile or None),
+    filling in the keyring from the browser's flags when it isn't given."""
+    head, sep, profile = browser.partition(":")
+    name, _, keyring = head.partition("+")
+    keyring = keyring.lower() or browser_keyring(name, config_dir)
+    return name, keyring, (os.path.expanduser(profile) if sep else None)
+
+
 def cookie_spec(browser):
-    name, sep, profile = browser.partition(":")
-    return f"{name}:{os.path.expanduser(profile)}" if sep else name
+    name, keyring, profile = browser_parts(browser)
+    spec = f"{name}+{keyring}" if keyring else name
+    return f"{spec}:{profile}" if profile else spec
 
 
 def cookie_args(browser):
@@ -598,6 +666,330 @@ def cmd_radio(args):
         emit({"type": "radio", "mode": mode, "added": len(new)})
 
 
+# ---- writing to the account (like, add to playlist) --------------------------
+
+MUSIC_ORIGIN = "https://music.youtube.com"
+# Fallback only: the current version is taken from yt-dlp, which keeps it up
+# to date with YouTube Music.
+WEB_REMIX_VERSION = "1.20260707.12.00"
+MAX_API_RESPONSE = 4 * 1024 * 1024
+
+
+class QuietLogger:
+    def debug(self, msg): pass
+    def info(self, msg): pass
+    def warning(self, msg, only_once=False): pass
+    def error(self, msg): pass
+
+
+def browser_spec_tuple(browser):
+    """yt-dlp's cookiesfrombrowser tuple: (name, profile, KEYRING, container).
+    yt-dlp wants the keyring upper-cased here (its CLI does that itself)."""
+    name, keyring, profile = browser_parts(browser)
+    return (name, profile, keyring.upper() if keyring else None, None)
+
+
+def music_client_version():
+    try:
+        from yt_dlp.extractor.youtube._base import INNERTUBE_CLIENTS
+        version = INNERTUBE_CLIENTS["web_music"]["INNERTUBE_CONTEXT"]["client"]["clientVersion"]
+        if isinstance(version, str) and re.match(r"^1\.\d{8}\.\d{2}\.\d{2}$", version):
+            return version
+    except Exception:
+        pass
+    return WEB_REMIX_VERSION
+
+
+def sid_authorization(cookies):
+    """The SAPISIDHASH family of headers music.youtube.com signs its API
+    calls with (the same scheme yt-dlp uses)."""
+    sapisid = cookies.get("SAPISID") or cookies.get("__Secure-3PAPISID")
+    parts = []
+    for scheme, sid in (("SAPISIDHASH", sapisid),
+                        ("SAPISID1PHASH", cookies.get("__Secure-1PAPISID")),
+                        ("SAPISID3PHASH", cookies.get("__Secure-3PAPISID"))):
+        if sid:
+            ts = str(round(time.time()))
+            digest = hashlib.sha1(f"{ts} {sid} {MUSIC_ORIGIN}".encode()).hexdigest()
+            parts.append(f"{scheme} {ts}_{digest}")
+    return " ".join(parts)
+
+
+def music_session(browser):
+    """Cookie and Authorization headers for the signed-in account. The
+    cookies are read the same way --cookies-from-browser reads them and are
+    only ever sent to music.youtube.com."""
+    if browser == "none":
+        fail("Set a browser in the widget settings to change your library", auth=True)
+    try:
+        from yt_dlp import YoutubeDL
+    except ImportError:
+        fail("yt-dlp is not installed")
+    try:
+        with YoutubeDL({"cookiesfrombrowser": browser_spec_tuple(browser), "quiet": True,
+                        "no_warnings": True, "logger": QuietLogger()}) as ydl:
+            jar = ydl.cookiejar
+            cookie_header = jar.get_cookie_header(MUSIC_ORIGIN + "/")
+            cookies = {c.name: c.value for c in jar.get_cookies_for_url(MUSIC_ORIGIN + "/")}
+    except Exception as exc:
+        fail(f"Couldn't read {browser.partition(':')[0]} cookies: {exc}", auth=True)
+    authorization = sid_authorization(cookies)
+    if not authorization or "LOGIN_INFO" not in cookies:
+        fail(f"Not signed in to YouTube Music in {browser.partition(':')[0]}", auth=True)
+    return {"Cookie": cookie_header, "Authorization": authorization}
+
+
+def log_api_error(endpoint, code, status, message):
+    try:
+        with open(API_LOG, "a", encoding="utf-8") as fh:
+            fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {endpoint} HTTP {code} {status} {clean_text(message)}\n")
+    except OSError:
+        pass
+
+
+def api_failure(endpoint, code, status, message, action):
+    """Turn a YouTube Music API error into an honest message. Only a real
+    sign-in problem (401 / UNAUTHENTICATED) asks the user to sign in."""
+    log_api_error(endpoint, code, status, message)
+    if code == 401 or status == "UNAUTHENTICATED":
+        fail("YouTube Music says you're signed out: sign in again in your browser", auth=True)
+    if code == 403 or status == "PERMISSION_DENIED":
+        if action == "add":
+            fail("YouTube only lets you add songs to playlists you created", status=status or "")
+        fail(f"YouTube Music doesn't allow this: {message or status or code}", status=status or "")
+    fail(f"YouTube Music: {message or status or f'HTTP {code}'}", status=status or "")
+
+
+def music_api(endpoint, body, session, action=""):
+    """POST to YouTube Music's web API as the signed-in user."""
+    version = music_client_version()
+    payload = {"context": {"client": {"clientName": "WEB_REMIX", "clientVersion": version, "hl": "en"}}}
+    payload.update(body)
+    request = urllib.request.Request(
+        f"{MUSIC_ORIGIN}/youtubei/v1/{endpoint}?prettyPrint=false",
+        data=json.dumps(payload).encode(),
+        method="POST",
+        headers={
+            **session,
+            "Content-Type": "application/json",
+            "Origin": MUSIC_ORIGIN,
+            "X-Origin": MUSIC_ORIGIN,
+            "X-Goog-AuthUser": "0",
+            "X-Youtube-Client-Name": "67",
+            "X-Youtube-Client-Version": version,
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            raw = response.read(MAX_API_RESPONSE + 1)
+    except urllib.error.HTTPError as exc:
+        status = message = ""
+        try:
+            err = json.loads(exc.read(65536)).get("error") or {}
+            status = clean_text(err.get("status"), 64)
+            message = clean_text(err.get("message"), 200)
+        except Exception:
+            pass
+        api_failure(endpoint, exc.code, status, message, action)
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        fail(f"Couldn't reach YouTube Music: {getattr(exc, 'reason', exc)}")
+    if len(raw) > MAX_API_RESPONSE:
+        fail("YouTube Music response too large")
+    try:
+        return json.loads(raw)
+    except ValueError:
+        fail("YouTube Music returned invalid JSON")
+
+
+def update_liked_cache(track, liked):
+    """Keep the local Liked Music list in step, so the heart is right without
+    re-reading the whole library."""
+    path = tracks_cache_path("LM", "none")
+    cached = read_json(path)
+    if not isinstance(cached, dict) or not isinstance(cached.get("items"), list):
+        return
+    items = [t for t in cached["items"] if isinstance(t, dict) and t.get("id") != track["id"]]
+    if liked:
+        items.insert(0, track)
+    cached["items"] = items[:MAX_TRACKS]
+    write_json_atomic(path, cached)
+
+
+def cmd_like(args):
+    if not args or not VIDEO_ID_RE.match(args[0]):
+        fail("like needs a video id")
+    video_id = args[0]
+    remove = opt(args, "--remove", "0") == "1"
+    browser = check_browser(opt(args, "--browser", "none"))
+    session = music_session(browser)
+    music_api("like/removelike" if remove else "like/like", {"target": {"videoId": video_id}}, session, "like")
+    try:
+        duration = int(opt(args, "--duration", "0"))
+    except ValueError:
+        duration = 0
+    update_liked_cache({
+        "id": video_id,
+        "title": clean_text(opt(args, "--title", "")) or video_id,
+        "artist": clean_text(opt(args, "--artist", "")),
+        "duration": duration if 0 < duration < 86400 else None,
+    }, not remove)
+    emit({"type": "liked", "id": video_id, "liked": not remove})
+
+
+def cmd_add(args):
+    if len(args) < 2:
+        fail("add needs a playlist id and a video id")
+    playlist_id = check_playlist_id(args[0])
+    video_id = args[1]
+    if not VIDEO_ID_RE.match(video_id):
+        fail("Invalid video id")
+    if playlist_id == "LM" or playlist_id.startswith("RD"):
+        fail("Songs can't be added to this list")
+    browser = check_browser(opt(args, "--browser", "none"))
+    session = music_session(browser)
+    result = music_api("browse/edit_playlist", {
+        "playlistId": playlist_id,
+        "actions": [{"action": "ACTION_ADD_VIDEO", "addedVideoId": video_id,
+                     "dedupeOption": "DEDUPE_OPTION_SKIP"}],
+    }, session, "add")
+    status = result.get("status") if isinstance(result, dict) else None
+    if status != "STATUS_SUCCEEDED":
+        log_api_error("browse/edit_playlist", 200, status, "")
+        fail("YouTube Music didn't add it")
+    # The cached copy is out of date now: show it, then refresh on next open.
+    path = tracks_cache_path(playlist_id, browser)
+    cached = read_json(path)
+    if isinstance(cached, dict):
+        cached["fetchedAt"] = 0
+        write_json_atomic(path, cached)
+    emit({"type": "added", "playlistId": playlist_id, "id": video_id})
+
+
+def find_renderers(node, key, out, depth=0):
+    """Every `key` object anywhere in a YouTube response, so the parser
+    doesn't depend on how deeply YouTube nests it."""
+    if depth > 40 or len(out) >= MAX_PLAYLISTS:
+        return out
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if k == key and isinstance(v, dict):
+                out.append(v)
+            else:
+                find_renderers(v, key, out, depth + 1)
+    elif isinstance(node, list):
+        for v in node:
+            find_renderers(v, key, out, depth + 1)
+    return out
+
+
+def text_of(node):
+    if isinstance(node, dict):
+        if isinstance(node.get("simpleText"), str):
+            return node["simpleText"]
+        runs = node.get("runs")
+        if isinstance(runs, list):
+            return "".join(r.get("text", "") for r in runs if isinstance(r, dict))
+    return ""
+
+
+def cmd_targets(args):
+    """The playlists this song can be added to, straight from YouTube Music's
+    own "Add to playlist" dialog: only playlists you can edit, each marked
+    when the song is already in it."""
+    if not args or not VIDEO_ID_RE.match(args[0]):
+        fail("targets needs a video id")
+    video_id = args[0]
+    browser = check_browser(opt(args, "--browser", "none"))
+    session = music_session(browser)
+    result = music_api("playlist/get_add_to_playlist",
+                       {"videoIds": [video_id], "excludeWatchLater": True}, session, "targets")
+    items = parse_add_targets(result)
+    if items is None:
+        log_api_error("playlist/get_add_to_playlist", 200, "UNEXPECTED_SHAPE", "")
+        fail("Couldn't read your playlists from YouTube Music")
+    emit({"type": "targets", "videoId": video_id, "items": items})
+
+
+def parse_add_targets(result):
+    """[{id, title, contains}] from a get_add_to_playlist response, or None
+    when it doesn't look like YouTube's add-to-playlist dialog at all."""
+    items, seen = [], set()
+    for option in find_renderers(result, "playlistAddToOptionRenderer", []):
+        pid = option.get("playlistId") or ""
+        if pid.startswith("VL"):
+            pid = pid[2:]
+        if not PLAYLIST_ID_RE.match(pid) or pid in seen or pid == "LM" or pid.startswith("RD"):
+            continue
+        seen.add(pid)
+        items.append({
+            "id": pid,
+            "title": clean_text(text_of(option.get("title"))) or pid,
+            "contains": option.get("containsSelectedVideos") == "ALL",
+        })
+    if not items and not find_renderers(result, "addToPlaylistRenderer", []):
+        return None
+    return items
+
+
+SIGNIN_URL = "https://accounts.google.com/ServiceLogin?service=youtube&continue=https%3A%2F%2Fmusic.youtube.com%2F"
+BROWSER_COMMANDS = {
+    "chromium": ["chromium"],
+    "brave": ["brave", "brave-browser"],
+    "chrome": ["google-chrome-stable", "google-chrome"],
+    "vivaldi": ["vivaldi-stable", "vivaldi"],
+    "edge": ["microsoft-edge-stable", "microsoft-edge"],
+    "opera": ["opera"],
+    "whale": ["naver-whale-stable", "whale"],
+}
+FIREFOX_FORKS = [("zen", ["zen-browser", "zen"]), ("librewolf", ["librewolf"]),
+                 ("floorp", ["floorp"]), ("waterfox", ["waterfox"])]
+
+
+def browser_command(browser):
+    """The program for the browser the cookies come from: the user has to
+    sign in *there*. A Firefox fork is told apart by its profile folder."""
+    import shutil
+    name, _keyring, profile = browser_parts(browser)
+    candidates = list(BROWSER_COMMANDS.get(name, []))
+    if name == "firefox":
+        lowered = (profile or "").lower()
+        for marker, commands in FIREFOX_FORKS:
+            if marker in lowered:
+                candidates += commands
+        candidates.append("firefox")
+    for candidate in candidates:
+        path = shutil.which(candidate)
+        if path:
+            return [path]
+    return [shutil.which("xdg-open") or "xdg-open"]
+
+
+def cmd_signin(args):
+    """Open YouTube's sign-in page (fixed URL) in the cookies' browser."""
+    browser = check_browser(opt(args, "--browser", "none"))
+    command = browser_command(browser) if browser != "none" else [shutil_which("xdg-open")]
+    try:
+        with open(os.devnull, "rb") as devnull_in, open(os.devnull, "wb") as devnull_out:
+            subprocess.Popen(command + [SIGNIN_URL], stdin=devnull_in, stdout=devnull_out,
+                             stderr=devnull_out, start_new_session=True, close_fds=True)
+    except OSError as exc:
+        fail(f"Couldn't open the browser: {exc}")
+    emit({"type": "signin", "browser": os.path.basename(command[0])})
+
+
+def shutil_which(name):
+    import shutil
+    return shutil.which(name) or name
+
+
+def cmd_liked(_args):
+    cached = read_json(tracks_cache_path("LM", "none"))
+    items = cached.get("items") if isinstance(cached, dict) else None
+    ids = [t["id"] for t in playable(items)]
+    emit({"type": "likedIds", "known": isinstance(items, list), "ids": ids[:MAX_TRACKS]})
+
+
 def cmd_paths(_args):
     emit({"type": "paths", "socket": SOCKET_PATH, "session": SESSION_PATH, "cache": CACHE_DIR, "log": MPV_LOG})
 
@@ -620,6 +1012,11 @@ def main():
         "tracks": cmd_tracks,
         "play": cmd_play,
         "radio": cmd_radio,
+        "like": cmd_like,
+        "add": cmd_add,
+        "liked": cmd_liked,
+        "targets": cmd_targets,
+        "signin": cmd_signin,
         "stop": cmd_stop,
         "paths": cmd_paths,
     }

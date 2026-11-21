@@ -31,7 +31,63 @@ var GLYPH = {
   radio: String.fromCodePoint(0xF043B),
   supermix: String.fromCodePoint(0xF0AE2),
   autoplay: String.fromCodePoint(0xF06E4),
-  loading: String.fromCodePoint(0xF0772)
+  loading: String.fromCodePoint(0xF0772),
+  heartOutline: String.fromCodePoint(0xF02D5),
+  playlistAdd: String.fromCodePoint(0xF0412),
+  check: String.fromCodePoint(0xF012C),
+  login: String.fromCodePoint(0xF0342)
+}
+
+// ---- library edits (like, add to playlist) ---------------------------------------
+
+// Playlists a song can be added to: not Liked Music (that's the heart) and
+// not YouTube's generated mixes.
+function addTargets(playlists) {
+  var out = []
+  if (!Array.isArray(playlists)) return out
+  for (var i = 0; i < playlists.length; i++) {
+    var p = playlists[i]
+    if (p && p.id !== "LM" && !isMix(p.id)) out.push(p)
+  }
+  return out
+}
+
+// Playlists from YouTube Music's own add-to-playlist dialog: the ones you
+// can edit, with `contains` when the song is already there.
+function sanitizeTargets(items) {
+  var out = []
+  var seen = {}
+  if (!Array.isArray(items)) return out
+  for (var i = 0; i < items.length && out.length < MAX_PLAYLISTS; i++) {
+    var p = items[i]
+    if (!p || typeof p !== "object") continue
+    var id = String(p.id || "")
+    if (!PLAYLIST_ID_RE.test(id) || seen[id] || id === "LM" || isMix(id)) continue
+    seen[id] = true
+    out.push({ id: id, title: cleanText(p.title) || id, count: null, contains: p.contains === true })
+  }
+  return out
+}
+
+// Liked video ids as a lookup object.
+function likedSet(ids) {
+  var set = {}
+  if (!Array.isArray(ids)) return set
+  for (var i = 0; i < ids.length; i++) {
+    if (VIDEO_ID_RE.test(String(ids[i]))) set[ids[i]] = true
+  }
+  return set
+}
+
+// A copy of `set` with `id` liked or not, so QML sees a new object.
+function withLiked(set, id, liked) {
+  var out = {}
+  for (var k in set) if (set[k]) out[k] = true
+  if (VIDEO_ID_RE.test(String(id))) {
+    if (liked) out[id] = true
+    else delete out[id]
+  }
+  return out
 }
 
 // ---- loading -------------------------------------------------------------------
@@ -224,8 +280,23 @@ function parseLine(line) {
     return { type: "stopped" }
   case "radio":
     return { type: "radio", mode: String(msg.mode || ""), added: validCount(msg.added) || 0 }
+  case "liked":
+    if (!VIDEO_ID_RE.test(String(msg.id || ""))) return null
+    return { type: "liked", id: String(msg.id), liked: msg.liked === true }
+  case "added":
+    if (!VIDEO_ID_RE.test(String(msg.id || "")) || !PLAYLIST_ID_RE.test(String(msg.playlistId || ""))) return null
+    return { type: "added", id: String(msg.id), playlistId: String(msg.playlistId) }
+  case "likedIds":
+    return { type: "likedIds", known: msg.known === true,
+      ids: Array.isArray(msg.ids) ? msg.ids.slice(0, MAX_TRACKS).filter(function(id) { return VIDEO_ID_RE.test(String(id)) }) : [] }
   case "error":
-    return { type: "error", message: cleanText(msg.message) }
+    // `auth`: a sign-in problem, so the panel offers a "Sign in" button.
+    return { type: "error", message: cleanText(msg.message), auth: msg.auth === true }
+  case "targets":
+    if (!VIDEO_ID_RE.test(String(msg.videoId || ""))) return null
+    return { type: "targets", videoId: String(msg.videoId), items: sanitizeTargets(msg.items) }
+  case "signin":
+    return { type: "signin", browser: cleanText(msg.browser, 60) }
   default:
     return null
   }

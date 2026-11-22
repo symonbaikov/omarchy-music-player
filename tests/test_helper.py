@@ -1179,6 +1179,35 @@ class AppleMusic(unittest.TestCase):
         self.assertTrue(songs[0]["cover"].endswith("/300x300bb.jpg"))
 
 
+class AiLanguages(unittest.TestCase):
+    def test_setting_and_prompt_rule(self):
+        self.assertEqual(h.ai_languages("RU, en ,xx,ru,instrumental"), ["ru", "en", "instrumental"])
+        self.assertEqual(h.languages_line([]), "")
+        self.assertTrue(h.languages_line(["ru"]).startswith("Only songs sung in Russian."))
+        self.assertTrue(h.languages_line(["ru", "en", "de"]).startswith("Only songs sung in Russian, English or German."))
+        self.assertTrue(h.languages_line(["instrumental"]).startswith("Only instrumental music"))
+        self.assertIn("or instrumental music", h.languages_line(["ja", "instrumental"]))
+
+    def test_the_rule_reaches_the_ai(self):
+        asked = []
+        saved = (h.taste_profile, h.ask_agent)
+        h.taste_profile = lambda browser="none": {"plays": 20, "likes": 3, "mostPlayed": [], "liked": [], "topArtists": ["Wardruna"]}
+
+        def ask(prompt):
+            asked.append(prompt)
+            raise RuntimeError("stop here")
+        h.ask_agent = ask
+        try:
+            out = []
+            try:
+                out = capture(h.cmd_ai_mix, ["--languages", "ru,instrumental"])
+            except SystemExit:
+                pass
+        finally:
+            h.taste_profile, h.ask_agent = saved
+        self.assertIn("Only songs sung in Russian, or instrumental music without singing.", asked[0])
+
+
 class ServicePages(unittest.TestCase):
     def test_fixed_https_pages(self):
         for name, url in h.SERVICE_PAGES.items():

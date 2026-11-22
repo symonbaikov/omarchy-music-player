@@ -25,6 +25,25 @@ function visibleTabs(setting) {
   return SERVICES.filter(function(s) { return s === "yt" || s === "my" || wanted.indexOf(s) >= 0 })
 }
 
+// Languages the AI Mix can be asked for (setting "aiLanguages", e.g. "ru,en");
+// "instrumental" is music without singing. Empty: any.
+var AI_LANGUAGES = ["en", "ru", "uk", "es", "pt", "fr", "de", "it", "pl", "tr", "ja", "ko", "zh", "hi", "ar", "instrumental"]
+function aiLanguages(setting) {
+  var out = []
+  var parts = String(setting || "").toLowerCase().replace(/\s+/g, "").split(",")
+  for (var i = 0; i < parts.length; i++)
+    if (AI_LANGUAGES.indexOf(parts[i]) >= 0 && out.indexOf(parts[i]) < 0) out.push(parts[i])
+  return out
+}
+// The setting with one language switched on or off.
+function toggleAiLanguage(setting, code) {
+  var list = aiLanguages(setting)
+  var at = list.indexOf(code)
+  if (at >= 0) list.splice(at, 1)
+  else if (AI_LANGUAGES.indexOf(code) >= 0) list.push(code)
+  return AI_LANGUAGES.filter(function(c) { return list.indexOf(c) >= 0 }).join(",")
+}
+
 function isRadio(key) { return /^rd:[0-9a-f-]{36}$/.test(String(key || "")) }
 function isPodcast(key) { return /^pc:[a-f0-9]{16}\/[a-f0-9]{16}$/.test(String(key || "")) }
 // A podcast (a list of its episodes), which you can subscribe to.

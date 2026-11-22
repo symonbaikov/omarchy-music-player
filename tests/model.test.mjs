@@ -8,7 +8,7 @@ const source = readFileSync(new URL("../Model.js", import.meta.url), "utf8").rep
 const M = {}
 // QML's V4 engine lacks some newer built-ins; remove them so tests catch their use.
 const V4_MISSING = "delete String.prototype.trimEnd; delete String.prototype.trimStart; delete Array.prototype.at; delete Object.hasOwn;\n"
-vm.runInNewContext(V4_MISSING + source + "\n;Object.assign(__out, { cleanText, plain, truncate, formatTime, parseLine, parseSession, clampIndex, mpvCommand, GLYPH, normalizeRepeat, nextRepeat, repeatFromMpv, repeatCommands, coverUrl, OBSERVED, SUPERMIX_ID, isMix, radioListId, autoplaySeed, isLoading, addTargets, likedSet, withLiked, playbackFailure, seconds, stepChoice, recentReport, mirrorOffer, parseUpdate, exploreRows, DOWNLOAD_FORMATS, trackCover, serviceOf, isYouTube, TRACK_KEY_RE, cloudForm, tileHue, CLOUD_KINDS, SERVICES, lyricIndex, chordTones, chordNoteNames, guitarDiagram, GUITAR_SHAPES, chordLabel, keyLabel, visibleTabs, isRadio, canDownload, isPodcast, isPodcastShow, validCover })", { __out: M })
+vm.runInNewContext(V4_MISSING + source + "\n;Object.assign(__out, { cleanText, plain, truncate, formatTime, parseLine, parseSession, clampIndex, mpvCommand, GLYPH, normalizeRepeat, nextRepeat, repeatFromMpv, repeatCommands, coverUrl, OBSERVED, SUPERMIX_ID, isMix, radioListId, autoplaySeed, isLoading, addTargets, likedSet, withLiked, playbackFailure, seconds, stepChoice, recentReport, mirrorOffer, parseUpdate, exploreRows, DOWNLOAD_FORMATS, trackCover, serviceOf, isYouTube, TRACK_KEY_RE, cloudForm, tileHue, CLOUD_KINDS, SERVICES, lyricIndex, chordTones, chordNoteNames, guitarDiagram, GUITAR_SHAPES, chordLabel, keyLabel, visibleTabs, isRadio, canDownload, isPodcast, isPodcastShow, validCover, aiLanguages, toggleAiLanguage, AI_LANGUAGES })", { __out: M })
 
 const MARKUP = '<img src="https://example.invalid/tracker">Song'
 
@@ -544,4 +544,14 @@ test("Apple Music songs, lists and the added link", () => {
   const added = M.parseLine(JSON.stringify({ type: "amAdded", id: "am:al:1460471435", title: "Once", count: 11 }))
   assert.equal(added.title, "Once")
   assert.equal(M.parseLine(JSON.stringify({ type: "amAdded", id: "x y" })), null)
+})
+
+test("AI Mix song languages", () => {
+  assert.deepEqual(Array.from(M.aiLanguages("ru, EN,xx,ru,instrumental")), ["ru", "en", "instrumental"])
+  assert.deepEqual(Array.from(M.aiLanguages("")), [])
+  assert.equal(M.toggleAiLanguage("", "ru"), "ru")
+  assert.equal(M.toggleAiLanguage("ru", "en"), "en,ru")
+  assert.equal(M.toggleAiLanguage("en,ru", "ru"), "en")
+  assert.equal(M.toggleAiLanguage("en", "bogus"), "en")
+  assert.ok(M.AI_LANGUAGES.includes("instrumental"))
 })

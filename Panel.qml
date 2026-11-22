@@ -1149,6 +1149,8 @@ Panel {
   // ai-mix). Off until turned on: it sends a summary of your taste to the
   // agent. When on, a mix older than a day is remade by itself.
   readonly property bool aiEnabled: setting("aiMix", "Off") === "On"
+  // The languages the AI Mix's songs are sung in (empty: any).
+  readonly property var aiLanguages: Model.aiLanguages(setting("aiLanguages", ""))
   property string aiState: ""                 // "" | "asking" | "finding"
   property string aiAgent: ""
   property string aiError: ""
@@ -1177,7 +1179,8 @@ Panel {
     aiError = ""
     aiState = "asking"
     aiProc.auto = auto === true
-    aiProc.command = helper(["ai-mix", "--browser", browser].concat(wish ? ["--prompt", wish] : [])
+    aiProc.command = helper(["ai-mix", "--browser", browser, "--languages", aiLanguages.join(",")]
+      .concat(wish ? ["--prompt", wish] : [])
       .concat(auto ? ["--if-older", "86400"] : []))
     aiProc.running = true
   }
@@ -3386,6 +3389,41 @@ Panel {
             width: parent.width
             label: strings.t("ai.wish")
             onSubmitted: root.makeAiMix(aiWish.text, false)
+          }
+          // Song languages: any by default; pick one or more.
+          PlainText {
+            text: strings.t("ai.languages").toUpperCase()
+            color: root.dim
+            font.pixelSize: Style.font.bodySmall
+            font.bold: true
+            font.letterSpacing: 1.1
+          }
+          Flow {
+            width: parent.width
+            spacing: Style.space(6)
+            Button {
+              iconText: root.aiLanguages.length === 0 ? Model.GLYPH.check : ""
+              text: strings.t("ai.lang.any")
+              fontSize: Style.font.bodySmall
+              foreground: root.aiLanguages.length === 0 ? Commons.Color.accent : root.fg
+              fontFamily: root.fontFamily
+              bordered: true
+              onClicked: root.saveSettings({ aiLanguages: "" })
+            }
+            Repeater {
+              model: Model.AI_LANGUAGES
+              Button {
+                required property string modelData
+                readonly property bool on: root.aiLanguages.indexOf(modelData) >= 0
+                iconText: on ? Model.GLYPH.check : ""
+                text: strings.t("ai.lang." + modelData)
+                fontSize: Style.font.bodySmall
+                foreground: on ? Commons.Color.accent : root.fg
+                fontFamily: root.fontFamily
+                bordered: true
+                onClicked: root.saveSettings({ aiLanguages: Model.toggleAiLanguage(root.setting("aiLanguages", ""), modelData) })
+              }
+            }
           }
           Button {
             iconText: root.aiState !== "" ? Model.GLYPH.loading : Model.GLYPH.ai

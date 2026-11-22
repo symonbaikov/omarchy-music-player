@@ -4196,7 +4196,7 @@ Panel {
   }
 
   // A service in the rail: its logo in the service's color; the selected one
-  // lit, with an accent bar at its left edge. Its name shows on hover.
+  // lit and outlined. Its name shows on hover.
   component ServiceTab: BorderSurface {
     id: tab
     property string glyph: ""
@@ -4210,16 +4210,6 @@ Panel {
     color: selected || tabMouse.containsMouse ? Style.controlFill(false, true, root.fg, Commons.Color.accent) : "transparent"
     borderSpec: selected ? Border.controlSpec("focus", root.fg, Commons.Color.accent) : Border.flat("transparent", 0)
 
-    Rectangle {
-      visible: tab.selected
-      anchors.left: parent.left
-      anchors.leftMargin: -Style.space(5)
-      anchors.verticalCenter: parent.verticalCenter
-      width: Style.space(3)
-      height: parent.height * 0.5
-      radius: width / 2
-      color: Commons.Color.accent
-    }
     Text {
       anchors.centerIn: parent
       textFormat: Text.PlainText

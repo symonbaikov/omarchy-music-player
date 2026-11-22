@@ -70,7 +70,7 @@ Panel {
     : service === "sc" ? (svc.sc.setup ? [] : [scSearchEntry].concat(svc.sc.items))
     : service === "cl" ? (svc.cl.setup || cloudFormOpen ? [] : svc.cl.items.concat([cloudAddEntry]))
     : svc[service].setup ? [] : svc[service].items
-  readonly property var rows: view === "settings" || view === "download" ? []
+  readonly property var rows: view === "settings" || view === "download" || view === "services" ? []
     : view === "explore" ? exploreRowsData
     : view === "playlists" ? libraryRows
     : view === "tracks" ? tracks
@@ -121,18 +121,38 @@ Panel {
     { id: "sp", glyph: Model.GLYPH.spotify, color: "#1ED760", label: strings.t("tab.sp") },
     { id: "sc", glyph: Model.GLYPH.soundcloud, color: "#FF5500", label: strings.t("tab.sc") },
     { id: "cl", glyph: Model.GLYPH.cloud, color: "#4FA3FF", label: strings.t("tab.cl") },
+    { id: "rd", glyph: Model.GLYPH.radioService, color: "#B388FF", label: strings.t("tab.rd") },
     { id: "my", glyph: Model.GLYPH.supermix, color: Commons.Color.accent, label: strings.t("tab.my") }
   ]
   // Per service: { items, loading, error, setup } ("setup": needs connecting).
   property var svc: ({ sp: { items: [], loading: false, error: "", setup: "" },
                        sc: { items: [], loading: false, error: "", setup: "" },
                        cl: { items: [], loading: false, error: "", setup: "" },
+                       rd: { items: [], loading: false, error: "", setup: "" },
                        my: { items: [], loading: false, error: "", setup: "" } })
   readonly property string spClientId: String(setting("spotifyClientId", "") || "")
   readonly property string scUserSetting: String(setting("soundcloudUser", "") || "")
   property bool spotifyWaiting: false
   readonly property var scSearchEntry: ({ kind: "explore", id: "__scsearch", title: strings.t("sc.searchEntry"),
     artist: strings.t("sc.searchHint") })
+
+  // The tabs the user keeps (setting "tabs"; the "+" tab picks them).
+  readonly property var shownTabs: {
+    var ids = Model.visibleTabs(setting("tabs", Model.DEFAULT_TABS))
+    return serviceTabs.filter(function(t) { return ids.indexOf(t.id) >= 0 })
+  }
+  function setTabShown(id, on) {
+    var ids = Model.visibleTabs(setting("tabs", Model.DEFAULT_TABS)).filter(function(x) { return x !== id })
+    if (on) ids.push(id)
+    saveSettings({ tabs: Model.SERVICES.filter(function(x) { return ids.indexOf(x) >= 0 }).join(",") })
+    if (!on && service === id) switchService("yt")
+  }
+  function openServices() {
+    if (view !== "services") viewBeforeSettings = view === "addTo" ? "playlists" : view
+    view = "services"
+    cursorIndex = -1
+    if (!opened) open()
+  }
 
   function setSvc(name, changes) {
     var next = Object.assign({}, svc)
@@ -155,6 +175,10 @@ Panel {
   property var cloudSources: []
   property var cloudRemotes: []
   property bool rcloneInstalled: true
+  // The form can be used: a folder on this computer needs no rclone.
+  readonly property bool cloudFormUsable: rcloneInstalled || cloudKind === "local"
+  // ~/Music, when it's there and not added yet: offered in one click.
+  property string cloudMusicDir: ""
   property bool cloudFormOpen: false
   property string cloudKind: "drive"
   property bool cloudKindTouched: false
@@ -212,6 +236,11 @@ Panel {
     installProc.command = ["omarchy-launch-floating-terminal-with-presentation", "omarchy pkg add rclone"]
     installProc.running = true
     close()
+  }
+
+  function addMusicFolder() {
+    cloudKind = "local"
+    connectCloud(cloudMusicDir, "")
   }
 
   function removeCloud(id) {
@@ -332,8 +361,11 @@ Panel {
   readonly property bool playing: connected && !paused
   readonly property var currentTrack: connected && session && playlistPos >= 0 && playlistPos < session.tracks.length
     ? session.tracks[playlistPos] : null
-  readonly property string nowTitle: currentTrack ? currentTrack.title : Model.cleanText(mediaTitle)
-  readonly property string nowArtist: currentTrack ? currentTrack.artist : ""
+  // A station shows the song on air (when the stream says), the station under it.
+  property string onAir: ""
+  readonly property bool onRadio: currentTrack !== null && Model.isRadio(currentTrack.id)
+  readonly property string nowTitle: onRadio && onAir !== "" ? onAir : currentTrack ? currentTrack.title : Model.cleanText(mediaTitle)
+  readonly property string nowArtist: onRadio ? (onAir !== "" ? currentTrack.title : strings.t("rd.live")) : currentTrack ? currentTrack.artist : ""
   readonly property string barLabel: showTitle && connected && !barVertical && nowTitle !== "" ? Model.truncate(nowTitle, 28) : ""
   // Non-empty when autoplay should extend the queue from this song now.
   readonly property string autoplayDueSeed: Model.autoplaySeed({
@@ -412,6 +444,12 @@ Panel {
       if (msg.key === chordsProc.key) chordsStage = msg.stage
     } else if (msg.type === "scores") {
       if (msg.key === scoresProc.key) scores = msg
+    } else if (msg.type === "radioFavs") {
+      var set = {}
+      for (var fi = 0; fi < msg.ids.length; fi++) set[msg.ids[fi]] = true
+      radioFavs = set
+      if (view === "tracks" && openPlaylist && openPlaylist.id === "rd:fav") loadTracks(true)
+      if (service === "rd") loadService("rd", true)
     } else if (msg.type === "lyrics") {
       if (msg.key === lyricsProc.key) { lyrics = msg; lyricsLoading = false }
     } else if (msg.type === "cloud") {
@@ -419,9 +457,11 @@ Panel {
         cloudSources = msg.sources
         cloudRemotes = msg.remotes
         rcloneInstalled = msg.rclone
+        cloudMusicDir = msg.musicDir
         if (cloudRemote === "" && msg.remotes.length > 0) cloudRemote = msg.remotes[0].name
         // rclone already knows a storage: offer it first, nothing to type.
-        if (!cloudKindTouched && msg.remotes.length > 0) cloudKind = "remote"
+        if (!cloudKindTouched && msg.musicDir !== "" && msg.sources.length === 0) cloudKind = "local"
+        else if (!cloudKindTouched && msg.remotes.length > 0) cloudKind = "remote"
       } else if (msg.state === "waiting" || msg.state === "checking") {
         cloudBusy = msg.state
       } else if (msg.state === "added") {
@@ -1102,7 +1142,7 @@ Panel {
     if (view !== "explore") {
       if (view === "addTo") closeAddTo()
       searchReturnView = view === "settings" || view === "download" ? "playlists" : view
-      exploreService = service === "sc" ? "sc" : "yt"
+      exploreService = service === "sc" || service === "rd" ? service : "yt"
     }
     view = "explore"
     runSearch(q)
@@ -1163,7 +1203,7 @@ Panel {
     // A SoundCloud result plays with the other results after it.
     if (item.kind === "song" && !Model.isYouTube(item.id)) {
       var at = exploreRowsData.indexOf(item)
-      openPlaylist = { id: "sc:search", title: exploreTitle, count: null }
+      openPlaylist = { id: exploreService === "rd" ? "rd:search" : "sc:search", title: exploreTitle, count: null }
       tracks = exploreRowsData
       tracksFromExplore = true
       play(at >= 0 ? at : Math.max(0, cursorIndex), false)
@@ -1183,7 +1223,7 @@ Panel {
 
   // ---- download --------------------------------------------------------------
   function openDownload(track) {
-    if (!track || !Model.TRACK_KEY_RE.test(String(track.id))) return
+    if (!track || !Model.canDownload(track.id)) return
     downloadTrack = { id: track.id, title: track.title, artist: track.artist || "" }
     if (view !== "download") viewBeforeDownload = view === "addTo" || view === "settings" ? "playlists" : view
     view = "download"
@@ -1394,6 +1434,7 @@ Panel {
     case "duration": duration = typeof data === "number" && isFinite(data) ? data : 0; break
     case "playlist-pos":
       playlistPos = typeof data === "number" ? data : -1
+      onAir = ""
       position = 0
       break
     case "playlist-count":
@@ -1431,6 +1472,7 @@ Panel {
       break
     }
     case "user-data/ytmusic/features": pauseFadeSupported = !!data && data.pause_fade === true; break
+    case "metadata/by-key/icy-title": onAir = typeof data === "string" ? Model.cleanText(data, 200) : ""; break
     case "seeking": seekingRaw = data; break
     case "paused-for-cache": pausedForCache = data === true; break
     case "loop-file":
@@ -1646,11 +1688,32 @@ Panel {
     return id
   }
 
-  function isLiked(id) { return !!(id && likedIds[id]) }
+  function isLiked(id) { return !!(id && (Model.isRadio(id) ? radioFavs[id] : likedIds[id])) }
+  // Can be liked: a YouTube song, or a station (a favorite).
+  function canLike(id) { return Model.isYouTube(id) || Model.isRadio(id) }
+
+  // Favorite stations, as a lookup.
+  property var radioFavs: ({})
+  Process {
+    id: radioFavProc
+    stdout: SplitParser { onRead: function(line) { root.handleHelperLine(line, "radioFav") } }
+  }
 
   // The heart, like YouTube Music's: likes the song (it goes to Liked Music)
   // or removes the like. Shown at once, rolled back if YouTube refuses.
   function toggleLike(track) {
+    if (track && Model.isRadio(track.id)) {
+      if (radioFavProc.running) return
+      var fav = !isLiked(track.id)
+      var next = Object.assign({}, radioFavs)
+      if (fav) next[track.id] = true
+      else delete next[track.id]
+      radioFavs = next
+      radioFavProc.command = helper(["radio-fav", track.id].concat(fav ? [] : ["--remove", "1"]))
+      radioFavProc.running = true
+      showNotice(strings.t(fav ? "rd.faved" : "rd.unfaved"))
+      return
+    }
     if (!track || !Model.radioListId(track.id) || likeProc.running) return
     var like = !isLiked(track.id)
     likedIds = Model.withLiked(likedIds, track.id, like)
@@ -1796,7 +1859,7 @@ Panel {
       return
     }
     if (view === "tracks" && tracksFromExplore) { view = "explore"; cursorIndex = -1; return }
-    if (view === "settings") {
+    if (view === "settings" || view === "services") {
       view = viewBeforeSettings === "tracks" && openPlaylist ? "tracks" : "playlists"
       cursorIndex = -1
       return
@@ -1938,6 +2001,8 @@ Panel {
   }
 
   Component.onCompleted: {
+    radioFavProc.command = helper(["radio-favs"])
+    radioFavProc.running = true
     pathsProc.running = true
     likedProc.running = true
     // Settings may have changed while the shell wasn't running.
@@ -2019,15 +2084,23 @@ Panel {
             spacing: Style.space(4)
 
             Repeater {
-              model: root.serviceTabs
+              model: root.shownTabs
               ServiceTab {
                 required property var modelData
                 glyph: modelData.glyph
                 brand: modelData.color
                 label: modelData.label
-                selected: root.service === modelData.id
+                selected: root.service === modelData.id && root.view !== "services"
                 onClicked: root.switchService(modelData.id)
               }
+            }
+            // "+": pick which services have a tab.
+            ServiceTab {
+              glyph: Model.GLYPH.plus
+              brand: root.fg
+              label: strings.t("services.title")
+              selected: root.view === "services"
+              onClicked: root.view === "services" ? root.backToPlaylists() : root.openServices()
             }
           }
 
@@ -2114,7 +2187,8 @@ Panel {
             anchors.fill: searchField
             verticalAlignment: Text.AlignVCenter
             visible: searchField.text === "" && !searchField.preeditText
-            text: (root.view === "explore" ? root.exploreService === "sc" : root.service === "sc") ? strings.t("sc.searchField") : strings.t("explore.search")
+            readonly property string where: root.view === "explore" ? root.exploreService : root.service
+            text: where === "sc" ? strings.t("sc.searchField") : where === "rd" ? strings.t("rd.searchField") : strings.t("explore.search")
             color: root.dim
             font.pixelSize: Style.font.subtitle
           }
@@ -2182,7 +2256,7 @@ Panel {
             visible: root.connected && root.currentTrack !== null
 
             PanelActionButton {
-              visible: root.currentTrack !== null && Model.isYouTube(root.currentTrack.id)
+              visible: root.currentTrack !== null && root.canLike(root.currentTrack.id)
               readonly property bool liked: root.currentTrack !== null && root.isLiked(root.currentTrack.id)
               iconText: liked ? Model.GLYPH.heart : Model.GLYPH.heartOutline
               tooltipText: liked ? strings.t("controls.unlike") : strings.t("controls.like")
@@ -2199,6 +2273,7 @@ Panel {
               onClicked: root.openAddTo(root.currentTrack)
             }
             PanelActionButton {
+              visible: root.currentTrack !== null && Model.canDownload(root.currentTrack.id)
               iconText: Model.GLYPH.download
               tooltipText: strings.t("controls.download")
               foreground: root.fg
@@ -2660,6 +2735,7 @@ Panel {
               width: Math.min(implicitWidth, headerLeft.width - (root.view !== "playlists" ? Style.space(48) : 0))
               elide: Text.ElideRight
               text: root.view === "settings" ? strings.t("settings.title")
+                : root.view === "services" ? strings.t("services.title")
                 : root.view === "explore" ? root.exploreTitle
                 : root.view === "download" && root.downloadTrack ? strings.t("download.title").arg(root.downloadTrack.title)
                 : root.view === "tracks" ? root.playlistTitle(root.openPlaylist)
@@ -2697,7 +2773,7 @@ Panel {
               onClicked: root.handleKey("s")
             }
             Button {
-              visible: root.view !== "settings" && root.view !== "download" && !(root.view === "explore" && root.exploreMode === "mood")
+              visible: root.view !== "settings" && root.view !== "download" && root.view !== "services" && !(root.view === "explore" && root.exploreMode === "mood")
               iconText: Model.GLYPH.refresh
               iconSpinning: root.view === "tracks" ? root.tracksLoading : root.view === "explore" ? root.exploreLoading : root.playlistsLoading
               fontSize: Style.font.title
@@ -2921,6 +2997,44 @@ Panel {
           }
         }
 
+        // ---------- which services have a tab ----------
+        Column {
+          visible: root.view === "services"
+          width: parent.width
+          spacing: Style.space(6)
+          PlainText {
+            width: parent.width
+            text: strings.t("services.hint")
+            color: root.dim
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.Wrap
+            elide: Text.ElideNone
+          }
+          Repeater {
+            model: root.serviceTabs.filter(function(t) { return t.id !== "yt" && t.id !== "my" })
+            Toggle {
+              required property var modelData
+              width: parent.width
+              label: modelData.glyph + "  " + modelData.label
+              description: strings.t("services.about." + modelData.id)
+              checked: root.shownTabs.some(function(t) { return t.id === modelData.id })
+              foreground: root.fg
+              accent: Commons.Color.accent
+              fontFamily: root.fontFamily
+              onClicked: root.setTabShown(modelData.id, !checked)
+            }
+          }
+          PlainText {
+            width: parent.width
+            topPadding: Style.space(4)
+            text: strings.t("services.soon")
+            color: root.dim
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.Wrap
+            elide: Text.ElideNone
+          }
+        }
+
         // ---------- connect cloud storage ----------
         BorderSurface {
           id: cloudCard
@@ -2947,13 +3061,22 @@ Panel {
             }
             PlainText {
               width: parent.width
-              text: root.rcloneInstalled ? strings.t("cloud.body") : strings.t("cloud.noRclone")
+              text: root.cloudFormUsable ? strings.t("cloud.body") : strings.t("cloud.noRclone")
               color: root.dim
               wrapMode: Text.Wrap
               elide: Text.ElideNone
             }
             Button {
-              visible: !root.rcloneInstalled
+              visible: root.cloudMusicDir !== "" && root.cloudBusy === ""
+              iconText: Model.GLYPH.folderMusic
+              text: strings.t("cloud.addMusic").arg(root.cloudMusicDir.replace(root.homeDir, "~"))
+              foreground: root.fg
+              fontFamily: root.fontFamily
+              bordered: true
+              onClicked: root.addMusicFolder()
+            }
+            Button {
+              visible: !root.cloudFormUsable
               iconText: Model.GLYPH.download
               text: strings.t("cloud.installRclone")
               foreground: root.fg
@@ -2963,7 +3086,7 @@ Panel {
             }
 
             Flow {
-              visible: root.rcloneInstalled
+              visible: true
               width: parent.width
               spacing: Style.space(6)
               Repeater {
@@ -2982,7 +3105,7 @@ Panel {
               }
             }
             PlainText {
-              visible: root.rcloneInstalled
+              visible: root.cloudFormUsable
               width: parent.width
               text: strings.t("cloud.hint." + root.cloudKind)
               color: root.dim
@@ -2993,7 +3116,7 @@ Panel {
 
             // A remote rclone already has (`rclone config`).
             Flow {
-              visible: root.rcloneInstalled && root.cloudKind === "remote" && root.cloudRemotes.length > 0
+              visible: root.cloudFormUsable && root.cloudKind === "remote" && root.cloudRemotes.length > 0
               width: parent.width
               spacing: Style.space(6)
               Repeater {
@@ -3011,7 +3134,7 @@ Panel {
               }
             }
             PlainText {
-              visible: root.rcloneInstalled && root.cloudKind === "remote" && root.cloudRemotes.length === 0
+              visible: root.cloudFormUsable && root.cloudKind === "remote" && root.cloudRemotes.length === 0
               width: parent.width
               text: strings.t("cloud.noRemotes")
               color: root.dim
@@ -3021,7 +3144,7 @@ Panel {
             }
 
             Repeater {
-              model: root.rcloneInstalled && root.cloudFormEpoch >= 0 ? root.cloudKindSpec.fields.slice() : []
+              model: root.cloudFormUsable && root.cloudFormEpoch >= 0 ? root.cloudKindSpec.fields.slice() : []
               CloudField {
                 required property var modelData
                 width: cloudColumn.width
@@ -3032,19 +3155,20 @@ Panel {
             }
             CloudField {
               id: cloudPathField
-              visible: root.rcloneInstalled
+              visible: root.cloudFormUsable
               width: parent.width
-              label: strings.t(root.cloudKind === "s3" ? "cloud.pathS3" : root.cloudKind === "smb" ? "cloud.pathSmb" : "cloud.path")
+              label: strings.t(root.cloudKind === "s3" ? "cloud.pathS3" : root.cloudKind === "smb" ? "cloud.pathSmb"
+                : root.cloudKind === "local" ? "cloud.pathLocal" : "cloud.path")
             }
             CloudField {
               id: cloudTitleField
-              visible: root.rcloneInstalled
+              visible: root.cloudFormUsable
               width: parent.width
               label: strings.t("cloud.name")
             }
 
             Row {
-              visible: root.rcloneInstalled
+              visible: root.cloudFormUsable
               spacing: Style.space(8)
               Button {
                 iconText: root.cloudBusy !== "" ? Model.GLYPH.loading : Model.GLYPH.cloud
@@ -3388,6 +3512,8 @@ Panel {
                     if (rowItem.modelData.id === "sp:liked") return Model.GLYPH.spotify
                     if (/^sc:likes:/.test(rowItem.modelData.id)) return Model.GLYPH.soundcloud
                     if (/^cl:[a-f0-9]{8}$/.test(rowItem.modelData.id)) return Model.GLYPH.cloud
+                    if (rowItem.modelData.id === "rd:fav") return Model.GLYPH.heart
+                    if (/^rd:/.test(rowItem.modelData.id)) return Model.GLYPH.radioService
                     if (/^cl:/.test(rowItem.modelData.id)) return Model.GLYPH.album
                     if (rowItem.modelData.id === Model.SUPERMIX_ID) return Model.GLYPH.supermix
                     return root.view === "explore" ? Model.GLYPH.album : Model.GLYPH.playlist
@@ -3480,7 +3606,7 @@ Panel {
               spacing: Style.space(2)
 
               PanelActionButton {
-                visible: Model.isYouTube(rowItem.modelData.id)
+                visible: root.canLike(rowItem.modelData.id)
                 iconText: rowItem.liked ? Model.GLYPH.heart : Model.GLYPH.heartOutline
                 tooltipText: rowItem.liked ? strings.t("controls.unlike") : strings.t("controls.like")
                 foreground: rowItem.liked ? Style.selectedStateColor(root.fg, Commons.Color.accent) : root.fg
@@ -3505,6 +3631,7 @@ Panel {
                 onClicked: root.startRadio(rowItem.modelData)
               }
               PanelActionButton {
+                visible: Model.canDownload(rowItem.modelData.id)
                 iconText: Model.GLYPH.download
                 tooltipText: strings.t("controls.download")
                 foreground: root.fg
@@ -3531,7 +3658,7 @@ Panel {
           color: root.dim
           font.pixelSize: Style.font.bodySmall
           text: {
-            if (root.view === "settings" || root.view === "download") return ""
+            if (root.view === "settings" || root.view === "download" || root.view === "services") return ""
             if (root.view === "explore") {
               if (root.exploreError !== "") return strings.t("error.prefix").arg(root.exploreError)
               if (root.rows.length > 0) return ""

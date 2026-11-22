@@ -8,7 +8,7 @@ const source = readFileSync(new URL("../Model.js", import.meta.url), "utf8").rep
 const M = {}
 // QML's V4 engine lacks some newer built-ins; remove them so tests catch their use.
 const V4_MISSING = "delete String.prototype.trimEnd; delete String.prototype.trimStart; delete Array.prototype.at; delete Object.hasOwn;\n"
-vm.runInNewContext(V4_MISSING + source + "\n;Object.assign(__out, { cleanText, plain, truncate, formatTime, parseLine, parseSession, clampIndex, mpvCommand, GLYPH, normalizeRepeat, nextRepeat, repeatFromMpv, repeatCommands, coverUrl, OBSERVED, SUPERMIX_ID, isMix, radioListId, autoplaySeed, isLoading, addTargets, likedSet, withLiked, playbackFailure, seconds, stepChoice, recentReport, mirrorOffer, parseUpdate, exploreRows, DOWNLOAD_FORMATS, trackCover, serviceOf, isYouTube, TRACK_KEY_RE, cloudForm, tileHue, CLOUD_KINDS, SERVICES, lyricIndex, chordTones, chordNoteNames, guitarDiagram, GUITAR_SHAPES, chordLabel, keyLabel })", { __out: M })
+vm.runInNewContext(V4_MISSING + source + "\n;Object.assign(__out, { cleanText, plain, truncate, formatTime, parseLine, parseSession, clampIndex, mpvCommand, GLYPH, normalizeRepeat, nextRepeat, repeatFromMpv, repeatCommands, coverUrl, OBSERVED, SUPERMIX_ID, isMix, radioListId, autoplaySeed, isLoading, addTargets, likedSet, withLiked, playbackFailure, seconds, stepChoice, recentReport, mirrorOffer, parseUpdate, exploreRows, DOWNLOAD_FORMATS, trackCover, serviceOf, isYouTube, TRACK_KEY_RE, cloudForm, tileHue, CLOUD_KINDS, SERVICES, lyricIndex, chordTones, chordNoteNames, guitarDiagram, GUITAR_SHAPES, chordLabel, keyLabel, visibleTabs, isRadio, canDownload })", { __out: M })
 
 const MARKUP = '<img src="https://example.invalid/tracker">Song'
 
@@ -445,4 +445,21 @@ test("chords and scores: sanitized; chord notes and guitar shapes are right", ()
   assert.equal(sc.items.length, 1)
   assert.equal(sc.ultimateGuitar, "")
   assert.ok(sc.musescore.startsWith("https://musescore.com/"))
+})
+
+test("radio keys and lists; the tabs setting", () => {
+  const st = "rd:1c6dcd6f-88c6-4fd4-8191-078435168e85"
+  assert.ok(M.TRACK_KEY_RE.test(st))
+  assert.ok(M.isRadio(st))
+  assert.equal(M.serviceOf(st), "rd")
+  assert.equal(M.canDownload(st), false)
+  assert.equal(M.canDownload("dQw4w9WgXcQ"), true)
+  const lists = M.parseLine(JSON.stringify({ type: "playlists", service: "rd", items: [
+    { id: "rd:fav", title: "Favorite stations", count: 2 }, { id: "rd:tag:hip-hop", title: "Hip Hop" },
+    { id: "rd:country:US", title: "US" }, { id: "rd:tag:../x", title: "bad" }] }))
+  assert.equal(lists.service, "rd")
+  assert.deepEqual(Array.from(lists.items, i => i.id), ["rd:fav", "rd:tag:hip-hop", "rd:country:US"])
+  assert.deepEqual(Array.from(M.parseLine(JSON.stringify({ type: "radioFavs", ids: [st, "x"] })).ids), [st])
+  assert.deepEqual(Array.from(M.visibleTabs("")), ["yt", "sp", "sc", "cl", "rd", "my"])
+  assert.deepEqual(Array.from(M.visibleTabs("rd,sc,bogus")), ["yt", "sc", "rd", "my"])
 })

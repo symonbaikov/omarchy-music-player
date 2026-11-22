@@ -8,7 +8,8 @@
     <img src="docs/icons/youtubemusic.svg" width="32" height="32" alt="YouTube Music" title="YouTube Music" />&nbsp;&nbsp;
     <img src="docs/icons/spotify.svg" width="32" height="32" alt="Spotify" title="Spotify" />&nbsp;&nbsp;
     <img src="docs/icons/soundcloud.svg" width="32" height="32" alt="SoundCloud" title="SoundCloud" />&nbsp;&nbsp;
-    <img src="docs/icons/cloud.svg" width="32" height="32" alt="Your cloud storage" title="Your cloud storage: S3, Google Drive, Dropbox, OneDrive, SFTP, SMB, WebDAV, FTP" />&nbsp;&nbsp;
+    <img src="docs/icons/cloud.svg" width="32" height="32" alt="Your cloud storage" title="Your files: the Music folder, S3, Google Drive, Dropbox, OneDrive, SFTP, SMB, WebDAV, FTP" />&nbsp;&nbsp;
+    <img src="docs/icons/radio.svg" width="32" height="32" alt="Radio" title="Internet radio: about 50,000 stations" />&nbsp;&nbsp;
     <img src="docs/icons/mymusic.svg" width="32" height="32" alt="My Music" title="My Music: mixes across services" />
   </p>
 
@@ -35,7 +36,8 @@ permanent. It started as a YouTube Music player.)
 | <img src="docs/icons/youtubemusic.svg" width="20" height="20" alt="" align="center" />&nbsp;YouTube&nbsp;Music | Your playlists, Liked Music, My Supermix, Explore, search, radio, likes, add to playlist | The browser you're signed in with (see Settings) |
 | <img src="docs/icons/spotify.svg" width="20" height="20" alt="" align="center" />&nbsp;Spotify | Your Liked Songs and the playlists you own or collaborate on | Once: your own Spotify app (below) |
 | <img src="docs/icons/soundcloud.svg" width="20" height="20" alt="" align="center" />&nbsp;SoundCloud | Your likes and playlists, and search across SoundCloud | Your profile name or link |
-| <img src="docs/icons/cloud.svg" width="20" height="20" alt="" align="center" />&nbsp;Cloud | The music folders in your own storage: every folder an album, with its cover | Pick the storage and sign in (below) |
+| <img src="docs/icons/cloud.svg" width="20" height="20" alt="" align="center" />&nbsp;Files | Your Music folder and your own storage: every folder an album, with its cover | One click for ~/Music; pick a storage and sign in (below) |
+| <img src="docs/icons/radio.svg" width="20" height="20" alt="" align="center" />&nbsp;Radio | About 50,000 stations: top, most liked, your country's, genres, search, favorites | Nothing |
 | <img src="docs/icons/mymusic.svg" width="20" height="20" alt="" align="center" />&nbsp;My&nbsp;Music | **My Mix** (your likes from every service, alternating), your own mixed playlists, Downloads | Nothing |
 
 **Spotify** keeps its own audio locked to Spotify's apps, so its songs play
@@ -58,7 +60,15 @@ apps the songs of other people's playlists).
 link in the SoundCloud tab. Private likes need you signed in to SoundCloud in
 the browser the plugin reads cookies from.
 
-**Cloud** plays the audio files in your own storage through
+**Radio**: about 50,000 internet radio stations from
+[Radio Browser](https://www.radio-browser.info), an open directory: the top
+stations, the most liked, your country's (from your language setting),
+genres, search, and your favorites (the heart on a station). The song on
+air shows when the station announces it.
+
+**Files** starts with your **Music folder**: one click adds `~/Music` (or
+pick any folder on this computer), played straight from its files. It
+also plays the audio files in your own storage through
 [rclone](https://rclone.org) (`omarchy pkg add rclone`; the tab offers to
 install it). In the Cloud tab pick where your music lives:
 
@@ -80,6 +90,9 @@ straight from the storage (seeking works), fade, Peak mix, go into your
 mixes and download like any other. The listing is kept for 6 hours; refresh
 to read new files at once. Remove a storage in settings: its files are
 never touched.
+
+**Pick your tabs**: the `+` tab lists every service; switch on the ones you
+use. YouTube Music and My Music are always there.
 
 **Mixes**: the add button next to a song (any service) adds it to one of your
 mixes or starts a new one. In a mix, the stop-square button on a row removes
@@ -367,6 +380,12 @@ omarchy bar set io.github.symonbaikov.ytmusic-mpv playbackCookies On
   open, the song's title and artist go to `songsterr.com` to find tabs; the
   MuseScore and Ultimate Guitar buttons only open their search in your
   browser.
+- **Radio**: the lists and search come from Radio Browser's servers
+  (`*.api.radio-browser.info`), which also count a listen when a station is
+  played. A station's logo is fetched once from the station's own site by
+  the helper and kept in the cache; the stream comes from the station's
+  server, like in any radio player. Favorite stations are kept in
+  `~/.local/share/io.github.symonbaikov.ytmusic-mpv/radio.json`.
 - **Your mixes** are kept in `~/.local/share/io.github.symonbaikov.ytmusic-mpv/mixes.json`.
 - **Cloud storage** is reached only by rclone, and only the storage you
   connected. A new storage's settings go into rclone's own config (passwords
@@ -407,6 +426,11 @@ omarchy bar set io.github.symonbaikov.ytmusic-mpv playbackCookies On
   validated before use.
 
 ## Troubleshooting
+
+- **The sound drops out for a moment** (switching the keyboard layout, an
+  app starting): the player keeps 100 ms of sound in PipeWire's buffer so
+  short system hiccups don't reach your ears. A player started before
+  this version still has the small buffer: start any playlist again.
 
 - **"Couldn't load"** or **"Not signed in"**: you aren't signed in to YouTube
   Music in the configured browser, or `browser` points at the wrong profile.

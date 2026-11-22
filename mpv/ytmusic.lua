@@ -128,6 +128,8 @@ local function prepare()
     if pos < 0 or pos + 1 >= count then return end
     local cur, nxt = entry_name(pos), entry_name(pos + 1)
     if not cur or not nxt or is_segment(nxt) then return end
+    -- A radio station is live: no climax to mix from or into.
+    if cur:sub(1, 16) == "ytmusic-radio://" or nxt:sub(1, 16) == "ytmusic-radio://" then return end
     if mix and mix.pos == pos and mix.from == cur and mix.to == nxt then return end
     local raw = mp.get_property_native("ytdl-raw-options") or {}
     local job = { pos = pos, from = cur, to = nxt, state = "pending" }
@@ -294,6 +296,7 @@ end
 -- cloud songs" below).
 local SPOTIFY = "ytmusic-spotify://"
 local CLOUD = "ytmusic-cloud://"
+local RADIO = "ytmusic-radio://"
 
 local function watch_id(url)
     return url and url:match("^https://music%.youtube%.com/watch%?v=([%w_-]+)$")
@@ -391,18 +394,20 @@ mp.register_event("end-file", function(e)
         if item.id == entry_id then index, entry = i - 1, item end
     end
     local name = entry and entry.filename or ""
-    if not entry or not (watch_id(name) or name:sub(1, #SPOTIFY) == SPOTIFY or name:sub(1, #CLOUD) == CLOUD
+    local radio = name:sub(1, #RADIO) == RADIO
+    if not entry or not (watch_id(name) or name:sub(1, #SPOTIFY) == SPOTIFY or name:sub(1, #CLOUD) == CLOUD or radio
         or name:match("^https://[%w.]*soundcloud%.com/")) then return end
     -- A mix ending this song early, or the song simply finishing.
     if mix and mix.state == "ready" and mix.pos == index then return end
-    if e.reason == "eof" and (last_duration <= 0 or t > last_duration - 4) then return end
+    -- A station never ends: an end is a dropped stream, always reopened.
+    if not radio and e.reason == "eof" and (last_duration <= 0 or t > last_duration - 4) then return end
     local key = entry.filename .. "@" .. math.floor(t / 30)
     if resumed[key] then return end
     resumed[key] = true
     msg.warn(string.format("stream broke at %.1f s, opening it again", t))
     local title = entry.title or ""
-    local file_opts = string.format("start=%.1f", t)
-    if title ~= "" then file_opts = file_opts .. ",force-media-title=%" .. #title .. "%" .. title end
+    local file_opts = radio and "" or string.format("start=%.1f", t)
+    if title ~= "" and not radio then file_opts = file_opts .. ",force-media-title=%" .. #title .. "%" .. title end
     mp.command_native({ "loadfile", entry.filename, "insert-at", index + 1, file_opts })
     mp.command_native({ "playlist-remove", index })
     mp.command_native({ "playlist-play-index", index })
@@ -416,6 +421,9 @@ end)
 -- server. The entry keeps its name, so the panel still knows which song it is.
 local function resolved_ok(kind, url)
     if kind == "sp" then return watch_id(url) ~= nil end
+    if kind == "rd" then return url:match("^https?://[^%s]+$") ~= nil end
+    -- A song in a local folder: its file.
+    if kind == "cl" and url:sub(1, 1) == "/" then return true end
     return url:match("^http://[%w]+:[%w]+@127%.0%.0%.1:%d+/") ~= nil
 end
 
@@ -432,6 +440,9 @@ mp.add_hook("on_load", 5, function(hook)
         kind, key = "cl", url:sub(#CLOUD + 1)
         if not key:match("^[%x]+/[%x]+$") then return end
         used_cloud = true
+    elseif url:sub(1, #RADIO) == RADIO then
+        kind, key = "rd", url:sub(#RADIO + 1)
+        if not key:match("^[%x%-]+$") then return end
     else
         return
     end
@@ -451,6 +462,8 @@ mp.add_hook("on_load", 5, function(hook)
         end
         if out and out.type == "resolved" and type(out.url) == "string" and resolved_ok(kind, out.url) then
             mp.set_property("stream-open-filename", out.url)
+        elseif kind == "rd" then
+            msg.error("radio station " .. key .. " can't be reached: " .. tostring(out and out.message or "helper failed"))
         elseif kind == "sp" then
             msg.warn("no YouTube Music match for Spotify song " .. key .. ": " .. tostring(out and out.message or "helper failed"))
         else

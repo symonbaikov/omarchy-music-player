@@ -430,7 +430,7 @@ FloatingWindow {
 
           SideHeader { label: win.t("full.library") }
           Repeater {
-            model: win.p.serviceTabs
+            model: win.p.shownTabs
             SideItem {
               required property var modelData
               glyph: modelData.glyph
@@ -727,14 +727,21 @@ FloatingWindow {
           }
           Txt {
             width: parent.width
-            text: win.p.rcloneInstalled ? win.t("cloud.body") : win.t("cloud.noRclone")
+            text: win.p.cloudFormUsable ? win.t("cloud.body") : win.t("cloud.noRclone")
             color: win.dim
             font.pixelSize: Style.font.heading
             wrapMode: Text.Wrap
             elide: Text.ElideNone
           }
           BigButton {
-            visible: !win.p.rcloneInstalled
+            visible: win.p.cloudMusicDir !== "" && win.p.cloudBusy === ""
+            glyph: Model.GLYPH.folderMusic
+            label: win.t("cloud.addMusic").arg(win.p.cloudMusicDir.replace(win.p.homeDir, "~"))
+            filled: true
+            onClicked: win.p.addMusicFolder()
+          }
+          BigButton {
+            visible: !win.p.cloudFormUsable
             glyph: Model.GLYPH.download
             label: win.t("cloud.installRclone")
             filled: true
@@ -742,7 +749,7 @@ FloatingWindow {
           }
 
           Flow {
-            visible: win.p.rcloneInstalled
+            visible: true
             width: parent.width
             spacing: Style.space(10)
             Repeater {
@@ -757,7 +764,7 @@ FloatingWindow {
             }
           }
           Txt {
-            visible: win.p.rcloneInstalled
+            visible: win.p.cloudFormUsable
             width: parent.width
             text: win.t("cloud.hint." + win.p.cloudKind)
             color: win.dim
@@ -768,7 +775,7 @@ FloatingWindow {
 
           // A remote rclone already has.
           Flow {
-            visible: win.p.rcloneInstalled && win.p.cloudKind === "remote" && win.p.cloudRemotes.length > 0
+            visible: win.p.cloudFormUsable && win.p.cloudKind === "remote" && win.p.cloudRemotes.length > 0
             width: parent.width
             spacing: Style.space(10)
             Repeater {
@@ -782,7 +789,7 @@ FloatingWindow {
             }
           }
           Txt {
-            visible: win.p.rcloneInstalled && win.p.cloudKind === "remote" && win.p.cloudRemotes.length === 0
+            visible: win.p.cloudFormUsable && win.p.cloudKind === "remote" && win.p.cloudRemotes.length === 0
             width: parent.width
             text: win.t("cloud.noRemotes")
             color: win.dim
@@ -791,7 +798,7 @@ FloatingWindow {
           }
 
           Repeater {
-            model: win.p.rcloneInstalled && win.p.cloudFormEpoch >= 0 ? win.p.cloudKindSpec.fields.slice() : []
+            model: win.p.cloudFormUsable && win.p.cloudFormEpoch >= 0 ? win.p.cloudKindSpec.fields.slice() : []
             FormField {
               required property var modelData
               width: cloudForm.width
@@ -803,21 +810,22 @@ FloatingWindow {
           }
           FormField {
             id: fullCloudPath
-            visible: win.p.rcloneInstalled
+            visible: win.p.cloudFormUsable
             width: parent.width
-            label: win.t(win.p.cloudKind === "s3" ? "cloud.pathS3" : win.p.cloudKind === "smb" ? "cloud.pathSmb" : "cloud.path")
+            label: win.t(win.p.cloudKind === "s3" ? "cloud.pathS3" : win.p.cloudKind === "smb" ? "cloud.pathSmb"
+              : win.p.cloudKind === "local" ? "cloud.pathLocal" : "cloud.path")
             onSubmitted: win.connectStorage()
           }
           FormField {
             id: fullCloudName
-            visible: win.p.rcloneInstalled
+            visible: win.p.cloudFormUsable
             width: parent.width
             label: win.t("cloud.name")
             onSubmitted: win.connectStorage()
           }
 
           Row {
-            visible: win.p.rcloneInstalled
+            visible: win.p.cloudFormUsable
             spacing: Style.space(12)
             BigButton {
               glyph: win.p.cloudBusy !== "" ? Model.GLYPH.loading : Model.GLYPH.cloud
@@ -1724,7 +1732,7 @@ FloatingWindow {
 
         PanelActionButton {
           anchors.verticalCenter: parent.verticalCenter
-          visible: win.p.currentTrack !== null && Model.isYouTube(win.p.currentTrack.id)
+          visible: win.p.currentTrack !== null && win.p.canLike(win.p.currentTrack.id)
           readonly property bool liked: win.p.currentTrack !== null && win.p.isLiked(win.p.currentTrack.id)
           iconText: liked ? Model.GLYPH.heart : Model.GLYPH.heartOutline
           fontSize: Style.font.title

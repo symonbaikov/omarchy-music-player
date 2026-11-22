@@ -10,14 +10,28 @@ var MAX_TEXT = 300
 // A list: a YouTube playlist id, or one of the other services' lists
 // (sc:… SoundCloud, sp:… Spotify, mix:… your mixes, cl:… your cloud storage:
 // a source, or one folder in it).
-var PLAYLIST_ID_RE = /^(?:[A-Za-z0-9_-]{2,80}|sc:(?:likes|sets):[A-Za-z0-9_-]{1,100}|sc:set:[A-Za-z0-9_-]{1,100}\/[A-Za-z0-9_-]{1,200}|sc:search|sp:liked|sp:pl:[A-Za-z0-9]{22}|mix:all|mix:[a-f0-9]{8}|cl:[a-f0-9]{8}(?::[a-f0-9]{16})?)$/
+var PLAYLIST_ID_RE = /^(?:[A-Za-z0-9_-]{2,80}|sc:(?:likes|sets):[A-Za-z0-9_-]{1,100}|sc:set:[A-Za-z0-9_-]{1,100}\/[A-Za-z0-9_-]{1,200}|sc:search|sp:liked|sp:pl:[A-Za-z0-9]{22}|mix:all|mix:[a-f0-9]{8}|cl:[a-f0-9]{8}(?::[a-f0-9]{16})?|rd:(?:fav|top|vote|search|country:[A-Z]{2}|tag:[a-z0-9-]{1,40}))$/
 var VIDEO_ID_RE = /^[A-Za-z0-9_-]{11}$/
 // A track from any service: a YouTube video id, sc:…, sp:… or cl:….
-var TRACK_KEY_RE = /^(?:[A-Za-z0-9_-]{11}|sc:(?:[0-9]{1,20}|[A-Za-z0-9_-]{1,100}\/[A-Za-z0-9_-]{1,200})|sp:[A-Za-z0-9]{22}|cl:[a-f0-9]{8}\/[a-f0-9]{16})$/
-var SERVICES = ["yt", "sp", "sc", "cl", "my"]
+var TRACK_KEY_RE = /^(?:[A-Za-z0-9_-]{11}|sc:(?:[0-9]{1,20}|[A-Za-z0-9_-]{1,100}\/[A-Za-z0-9_-]{1,200})|sp:[A-Za-z0-9]{22}|cl:[a-f0-9]{8}\/[a-f0-9]{16}|rd:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/
+var SERVICES = ["yt", "sp", "sc", "cl", "rd", "my"]
+// Tabs shown unless the user picks others (the "+" tab).
+var DEFAULT_TABS = "yt,sp,sc,cl,rd,my"
+
+// The tabs to show, from the setting: known services, each once, in the
+// usual order; YouTube Music and My Music always.
+function visibleTabs(setting) {
+  var wanted = String(setting || DEFAULT_TABS).split(",")
+  return SERVICES.filter(function(s) { return s === "yt" || s === "my" || wanted.indexOf(s) >= 0 })
+}
+
+function isRadio(key) { return /^rd:[0-9a-f-]{36}$/.test(String(key || "")) }
+// A song that can be saved as a file (a live station can't).
+function canDownload(key) { return TRACK_KEY_RE.test(String(key || "")) && !isRadio(key) }
 // Kinds of storage the "Connect storage" form offers (see the helper's
 // CLOUD_KINDS), with the fields each asks for.
 var CLOUD_KINDS = [
+  { id: "local", label: "This computer", fields: [] },
   { id: "drive", label: "Google Drive", oauth: true, fields: [] },
   { id: "dropbox", label: "Dropbox", oauth: true, fields: [] },
   { id: "onedrive", label: "OneDrive", oauth: true, fields: [] },
@@ -32,7 +46,8 @@ var SECRET_FIELDS = ["pass", "secret_access_key"]
 
 function serviceOf(key) {
   var k = String(key || "")
-  return k.indexOf("sc:") === 0 ? "sc" : k.indexOf("sp:") === 0 ? "sp" : k.indexOf("cl:") === 0 ? "cl" : "yt"
+  var p = k.slice(0, 3)
+  return p === "sc:" || p === "sp:" || p === "cl:" || p === "rd:" ? k.slice(0, 2) : "yt"
 }
 
 // Liking, adding to a YouTube playlist and radio are YouTube Music's.
@@ -89,6 +104,11 @@ var GLYPH = {
   chevronDown: String.fromCodePoint(0xF0140),
   artist: String.fromCodePoint(0xF0803),
   lyrics: String.fromCodePoint(0xF1021),
+  radioService: String.fromCodePoint(0xF0439),
+  folderMusic: String.fromCodePoint(0xF1359),
+  server: String.fromCodePoint(0xF048B),
+  podcast: String.fromCodePoint(0xF0994),
+  plusCircle: String.fromCodePoint(0xF0417),
   notes: String.fromCodePoint(0xF0387),
   guitar: String.fromCodePoint(0xF02A4),
   piano: String.fromCodePoint(0xF0747)
@@ -392,6 +412,8 @@ function parseLine(line) {
     return sanitizeCloud(msg)
   case "lyrics":
     return sanitizeLyrics(msg)
+  case "radioFavs":
+    return { type: "radioFavs", ids: Array.isArray(msg.ids) ? msg.ids.filter(isRadio).slice(0, 500) : [] }
   case "chords":
     return sanitizeChords(msg)
   case "chordsProgress":
@@ -583,7 +605,7 @@ function mpvCommand(args, requestId) {
 // user-data/ytmusic/*: set by the player's own script (mpv/ytmusic.lua)
 // when a song came from a backup source, and when songs keep failing.
 var OBSERVED = ["user-data/ytmusic/fallback", "user-data/ytmusic/health", "user-data/ytmusic/unplayable",
-  "user-data/ytmusic/features",
+  "user-data/ytmusic/features", "metadata/by-key/icy-title",
   "pause", "media-title", "duration", "playlist-pos", "playlist-count", "volume", "idle-active",
   "loop-file", "loop-playlist", "seeking", "paused-for-cache"]
 
@@ -597,7 +619,8 @@ function sanitizeCloud(msg) {
   if (!state) return null
   var out = { type: "cloud", state: state, rclone: msg.rclone !== false, sources: [], remotes: [],
     id: /^[a-f0-9]{8}$/.test(String(msg.id || "")) ? String(msg.id) : "", title: cleanText(msg.title, 80),
-    kind: cleanText(msg.kind, 20) }
+    kind: cleanText(msg.kind, 20),
+    musicDir: typeof msg.musicDir === "string" && msg.musicDir.charAt(0) === "/" ? cleanText(msg.musicDir, 300) : "" }
   var src = Array.isArray(msg.sources) ? msg.sources : []
   for (var i = 0; i < src.length && out.sources.length < 50; i++) {
     var s = src[i]

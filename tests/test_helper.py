@@ -985,6 +985,52 @@ class Chords(unittest.TestCase):
             self.assertFalse(h.SCORE_URL_RE.match(bad), bad)
 
 
+
+class Radio(unittest.TestCase):
+    UUID = "1c6dcd6f-88c6-4fd4-8191-078435168e85"
+
+    def test_station_as_a_track(self):
+        track, url = h.radio_station({"stationuuid": self.UUID, "name": "BBC Radio 6 Music\n", "url_resolved": "https://a.example/live.aac",
+                                      "tags": "indie,rock,alt,extra", "countrycode": "GB", "codec": "AAC", "bitrate": 128,
+                                      "favicon": "https://a.example/logo.png"})
+        self.assertEqual(track["id"], "rd:" + self.UUID)
+        self.assertEqual(track["title"], "BBC Radio 6 Music")
+        self.assertEqual(track["artist"], "indie, rock, alt · GB · AAC 128")
+        self.assertEqual(url, "https://a.example/live.aac")
+        self.assertTrue(h.TRACK_KEY_RE.match(track["id"]))
+        for bad in ({"stationuuid": "x", "url_resolved": "https://a"}, {"stationuuid": self.UUID, "url_resolved": "javascript:x"},
+                    {"stationuuid": self.UUID, "url_resolved": "https://a b"}):
+            self.assertEqual(h.radio_station(bad), (None, None))
+
+    def test_lists(self):
+        for lid in ("rd:fav", "rd:top", "rd:vote", "rd:search", "rd:country:DE", "rd:tag:hip-hop"):
+            self.assertTrue(h.is_list_id(lid), lid)
+        self.assertFalse(h.is_list_id("rd:tag:../x"))
+        self.assertEqual(h.radio_list_query("rd:tag:hip-hop")[1]["tag"], "hip hop")
+        self.assertEqual(h.radio_list_query("rd:country:DE")[1]["countrycode"], "DE")
+        self.assertEqual(h.track_url({"id": "rd:" + self.UUID}), "ytmusic-radio://" + self.UUID)
+        self.assertEqual(h.source_of("rd:" + self.UUID), "rd")
+
+
+class LocalFolder(unittest.TestCase):
+    def test_lists_songs_and_never_leaves_the_folder(self):
+        with tempfile.TemporaryDirectory() as d:
+            album = os.path.join(d, "Band", "Album")
+            os.makedirs(album)
+            for name in ("01 - Song.mp3", "cover.jpg", "notes.txt", ".hidden.mp3"):
+                pathlib.Path(album, name).write_bytes(b"x")
+            os.makedirs(os.path.join(d, ".git"))
+            pathlib.Path(d, ".git", "x.mp3").write_bytes(b"x")
+            entries = h.local_entries(d)
+            self.assertEqual(sorted(e["Path"] for e in entries),
+                             ["Band/Album/.hidden.mp3", "Band/Album/01 - Song.mp3", "Band/Album/cover.jpg"])
+            src = {"id": "0a1b2c3d", "kind": "local", "remote": "", "path": d}
+            self.assertTrue(h.local_file(src, "Band/Album/01 - Song.mp3").endswith("01 - Song.mp3"))
+            for bad in ("../etc/passwd", "Band/../../x", "/etc/passwd"):
+                with self.assertRaises(RuntimeError):
+                    h.local_file(src, bad)
+
+
 class Reports(unittest.TestCase):
     def test_redact_removes_everything_personal(self):
         home = os.path.expanduser("~")

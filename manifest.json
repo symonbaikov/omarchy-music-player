@@ -42,6 +42,7 @@
       "fadeOut": 0,
       "pauseFade": 600,
       "transition": "Off",
+      "tabs": "yt,sp,sc,cl,rd,my",
       "crossfade": 6,
       "backupMirrors": "Off",
       "mirrors": "",

@@ -12,7 +12,7 @@ Commands (every result is one JSON object per line on stdout):
   play <playlist-id> [--index N] [--video-id ID] [--shuffle 0|1] [PLAYER]
   radio <video-id> [--mode replace|keep|append] [--title T] [PLAYER]
     PLAYER: [--browser B] [--playback-cookies 0|1] [--volume V]
-            [--repeat off|all|one] [--fade-in S] [--fade-out S]
+            [--repeat off|all|one] [--fade-in S] [--fade-out S] [--pause-fade S]
             [--transition off|peak] [--xfade S]
   like <video-id> [--remove 1] [--browser B] [--title T] [--artist A] [--duration S]
   add <playlist-id> <video-id> [--browser B]
@@ -28,6 +28,9 @@ Commands (every result is one JSON object per line on stdout):
   download <video-id> [--dir D] [--format mp3|m4a|opus|flac|wav] [--cover 0|1] [--title T] [--artist A] [PLAYER]
   tracks DOWNLOADS   the downloaded songs (they play from their files)
   cloud | cloud-add (form as JSON on stdin) | cloud-remove <source> | cloud-stop
+  podcast-sub [<pc:show> [--remove 1]]   subscribe to a podcast; lists them
+  am-add <link> | --remove <list>   keep an Apple Music playlist or album
+  scrobble [--set (form on stdin) | --remove listenbrainz|lastfm]   Last.fm / ListenBrainz
   lyrics <track> [--title T] [--artist A] [--duration S]
   chords <track> [PLAYER] | scores <track> [--title T] [--artist A] | open-score <url>
   playlists --service cl   your cloud storage's folders (rclone)
@@ -122,10 +125,14 @@ VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 # SoundCloud, "sp:<id>" for Spotify (played from its YouTube Music match),
 # "cl:<source>/<hash>" for a file in your own cloud storage (see "cloud").
 TRACK_KEY_RE = re.compile(r"^(?:[A-Za-z0-9_-]{11}|sc:(?:[0-9]{1,20}|[A-Za-z0-9_-]{1,100}/[A-Za-z0-9_-]{1,200})|sp:[A-Za-z0-9]{22}"
-                          r"|cl:[a-f0-9]{8}/[a-f0-9]{16})$")
+                          r"|cl:[a-f0-9]{8}/[a-f0-9]{16}|ms:[a-f0-9]{8}/[A-Za-z0-9_-]{1,64}|rd:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|pc:[a-f0-9]{16}/[a-f0-9]{16}|dz:[0-9]{1,20}|au:[A-Za-z0-9]{1,16}|am:[0-9]{1,15}|mc:[A-Za-z0-9_-]{1,100}/[A-Za-z0-9%_.-]{1,300})$")
 SERVICE_LIST_RE = re.compile(
     r"^(?:sc:(?:likes|sets):[A-Za-z0-9_-]{1,100}|sc:set:[A-Za-z0-9_-]{1,100}/[A-Za-z0-9_-]{1,200}|sc:search"
-    r"|sp:liked|sp:pl:[A-Za-z0-9]{22}|mix:all|mix:[a-f0-9]{8}|cl:[a-f0-9]{8}(?::[a-f0-9]{16})?)$")
+    r"|sp:liked|sp:pl:[A-Za-z0-9]{22}|mix:all|mix:[a-f0-9]{8}|cl:[a-f0-9]{8}(?::[a-f0-9]{16})?"
+    r"|rd:(?:fav|top|vote|search|country:[A-Z]{2}|tag:[a-z0-9-]{1,40})|pc:(?:new|[a-f0-9]{16})|dz:(?:fav|chart|search|pl:[0-9]{1,20})"
+    r"|am:(?:top|search|al:[0-9]{3,15}|pl:pl\.[A-Za-z0-9-]{8,64})"
+    r"|au:(?:search|trending(?::[a-z0-9-]{1,40})?)|mc:(?:search|hot:[a-z0-9-]{1,40})"
+    r"|ms:[a-f0-9]{8}:(?:fav|rnd|al:[A-Za-z0-9_-]{1,64}|pl:[A-Za-z0-9_-]{1,64})|ai:mix|hist:recent)$")
 SC_USER_RE = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
 SPOTIFY_SCHEME = "ytmusic-spotify://"
 # browser[+keyring][:profile]; the profile may be a path (Zen, LibreWolf and
@@ -173,7 +180,7 @@ def is_list_id(value):
 
 
 def source_of(key):
-    return "sc" if key.startswith("sc:") else "sp" if key.startswith("sp:") else "cl" if key.startswith("cl:") else "yt"
+    return key[:2] if key[:3] in ("sc:", "sp:", "cl:", "rd:", "ms:", "pc:", "dz:", "au:", "mc:", "am:") else "yt"
 
 
 def check_playlist_id(value):
@@ -371,10 +378,22 @@ def list_source(playlist_id):
 
 
 def fetch_tracks(playlist_id, browser):
+    if playlist_id.startswith("rd:"):
+        return fetch_radio(playlist_id)
+    if playlist_id.startswith("ms:"):
+        return fetch_server_tracks(playlist_id)
     if playlist_id.startswith("sc:"):
         return fetch_sc_tracks(playlist_id, browser)
     if playlist_id.startswith("sp:"):
         return fetch_sp_tracks(playlist_id)
+    if playlist_id.startswith("dz:"):
+        return fetch_dz_tracks(playlist_id)
+    if playlist_id.startswith("am:"):
+        return fetch_am_tracks(playlist_id)
+    if playlist_id.startswith("mc:"):
+        return fetch_mc_tracks(playlist_id)
+    if playlist_id.startswith("au:"):
+        return fetch_au_tracks(playlist_id)
     url, limit = list_source(playlist_id)
     data = run_ytdlp(url, browser, limit)
     items = []
@@ -442,11 +461,58 @@ def sc_items(data):
             continue
         duration = entry.get("duration")
         artist = entry.get("uploader") or (key[3:].split("/")[0] if "/" in key else "")
-        items.append({"id": key, "title": clean_text(entry.get("title")) or key, "artist": clean_text(artist),
-                      "duration": int(duration) if isinstance(duration, (int, float)) and 0 < duration < 86400 else None})
+        item = {"id": key, "title": clean_text(entry.get("title")) or key, "artist": clean_text(artist),
+                "duration": int(duration) if isinstance(duration, (int, float)) and 0 < duration < 86400 else None}
+        thumbs = {str(t.get("id")): str(t.get("url") or "") for t in entry.get("thumbnails") or [] if isinstance(t, dict)}
+        cover = thumbs.get("t300x300") or thumbs.get("t500x500") or thumbs.get("large") or ""
+        if SC_ART_RE.match(cover) or re.match(r"^https://i[0-9]?\.sndcdn\.com/artworks-[A-Za-z0-9_-]{1,120}-large\.jpg$", cover):
+            item["cover"] = cover
+        items.append(item)
         if len(items) >= MAX_TRACKS:
             break
     return items
+
+
+SC_META_PATH = os.path.join(CACHE_DIR, "soundcloud-meta.json")
+SC_ART_RE = re.compile(r"^https://i[0-9]?\.sndcdn\.com/artworks-[A-Za-z0-9_-]{1,120}-t[0-9]{2,3}x[0-9]{2,3}\.(?:jpg|png)$")
+
+
+def with_sc_meta(items):
+    """Each song's cover and its artist's display name. yt-dlp's quick list
+    reading leaves both out, so they come from SoundCloud's public oEmbed
+    (no account), once per song, kept in the cache."""
+    import concurrent.futures
+    meta = read_json(SC_META_PATH)
+    meta = meta if isinstance(meta, dict) else {}
+    todo = [t["id"] for t in items if not t.get("cover") and t["id"] not in meta and "/" in t["id"]][:400]
+
+    def one(key):
+        url = "https://soundcloud.com/oembed?" + urllib.parse.urlencode({"format": "json", "url": sc_url(key)})
+        try:
+            d = http_json(url, max_bytes=64 * 1024, timeout=8)
+        except Exception:
+            return key, None
+        thumb = str(d.get("thumbnail_url") or "").replace("-t500x500.", "-t300x300.")
+        return key, {"cover": thumb if SC_ART_RE.match(thumb) else "", "artist": clean_text(d.get("author_name"), 120)}
+
+    if todo:
+        with concurrent.futures.ThreadPoolExecutor(16) as pool:
+            for key, m in pool.map(one, todo):
+                if m:
+                    meta[key] = m
+        if len(meta) > 20000:
+            meta = dict(list(meta.items())[-20000:])
+        write_json_atomic(SC_META_PATH, meta)
+    out = []
+    for t in items:
+        m = meta.get(t["id"]) or {}
+        t = dict(t)
+        if m.get("cover"):
+            t["cover"] = m["cover"]
+        if m.get("artist"):
+            t["artist"] = m["artist"]
+        out.append(t)
+    return out
 
 
 def fetch_sc_tracks(list_id, browser):
@@ -459,7 +525,7 @@ def fetch_sc_tracks(list_id, browser):
     else:
         raise RuntimeError("search results are only kept, not fetched again")
     data = run_ytdlp(url, browser, SC_LIMIT)
-    return {"title": clean_text(data.get("title")) or title, "items": sc_items(data)}
+    return {"title": clean_text(data.get("title")) or title, "items": with_sc_meta(sc_items(data))}
 
 
 def fetch_sc_playlists(user, browser):
@@ -667,16 +733,29 @@ def match_score(want, cand):
     return score
 
 
+MATCHED = ("sp:", "dz:", "am:")
+
+
+def match_files(key):
+    """(known songs, YouTube matches) for a song played from its match."""
+    if key.startswith("dz:"):
+        return DZ_TRACKS_PATH, DZ_MATCH_PATH
+    if key.startswith("am:"):
+        return AM_TRACKS_PATH, AM_MATCH_PATH
+    return SP_TRACKS_PATH, SP_MATCH_PATH
+
+
 def resolve_spotify(key):
-    """The YouTube Music video id for a Spotify song, cached."""
+    """The YouTube Music video id for a Spotify or Deezer song, cached."""
     sp_id = key[3:]
-    matches = read_json(SP_MATCH_PATH)
+    tracks_path, match_path = match_files(key)
+    matches = read_json(match_path)
     matches = matches if isinstance(matches, dict) else {}
     if VIDEO_ID_RE.match(str(matches.get(sp_id) or "")):
         return matches[sp_id]
-    known = (read_json(SP_TRACKS_PATH) or {}).get(key)
+    known = (read_json(tracks_path) or {}).get(key)
     if not known:
-        raise RuntimeError("unknown Spotify song; open its playlist again")
+        raise RuntimeError("unknown song; open its playlist again")
     best, best_score = None, 1.5
     queries = ([known["isrc"]] if known.get("isrc") else []) + [f"{known.get('artist', '')} {known.get('title', '')}".strip()]
     for q in queries:
@@ -693,7 +772,7 @@ def resolve_spotify(key):
     if not best:
         raise RuntimeError(f"no YouTube Music match for {known.get('title')}")
     matches[sp_id] = best
-    write_json_atomic(SP_MATCH_PATH, matches)
+    write_json_atomic(match_path, matches)
     return best
 
 
@@ -708,7 +787,20 @@ def cmd_resolve(args):
         if key.startswith("cl:"):
             emit({"type": "resolved", "key": key, "url": cloud_stream_url(key)})
             return
-        vid = resolve_spotify(key) if key.startswith("sp:") else None
+        if key.startswith("rd:"):
+            emit({"type": "resolved", "key": key, "url": radio_stream_url(key)})
+            return
+        if key.startswith("ms:"):
+            emit({"type": "resolved", "key": key, "url": server_stream_url(key)})
+            return
+        if key.startswith("au:"):
+            emit({"type": "resolved", "key": key, "url": audius_stream_url(key)})
+            return
+        if key.startswith("pc:"):
+            url, start = podcast_stream(key)
+            emit({"type": "resolved", "key": key, "url": url, "start": start})
+            return
+        vid = resolve_spotify(key) if key[:3] in MATCHED else None
     except RuntimeError as exc:
         fail(str(exc))
     emit({"type": "resolved", "key": key, "url": f"https://music.youtube.com/watch?v={vid}" if vid else track_url({"id": key})})
@@ -810,10 +902,58 @@ def clean_track(t):
     d = t.get("duration")
     out = {"id": t["id"], "title": clean_text(t.get("title"), 200) or t["id"], "artist": clean_text(t.get("artist"), 200),
            "duration": int(d) if isinstance(d, (int, float)) and 0 < d < 86400 else None}
-    cover = t.get("cover")
-    if isinstance(cover, str) and re.match(r"^https://(?:i\.scdn\.co|i[0-9]?\.sndcdn\.com)/[A-Za-z0-9_./-]{1,300}$", cover):
+    cover = valid_cover(t.get("cover"))
+    if cover:
         out["cover"] = cover
     return out
+
+
+# Where covers may come from: the services' own image hosts, or a picture the
+# helper saved in the covers folder (radio, Audius, podcasts, your files and
+# server, downloads).
+REMOTE_COVER_RE = re.compile(
+    r"^https://(?:i\.scdn\.co/image/[A-Za-z0-9]{1,100}|i[0-9]?\.sndcdn\.com/[A-Za-z0-9_./-]{1,300}"
+    r"|(?:(?:lh3|yt3)\.googleusercontent\.com|yt3\.ggpht\.com|i[0-9]?\.ytimg\.com)/[A-Za-z0-9_./=%~&?-]{1,500}"
+    r"|is[0-9]-ssl\.mzstatic\.com/image/thumb/[A-Za-z0-9_./=%-]{1,400}"
+    r"|thumbnailer\.mixcloud\.com/unsafe/[0-9x]{3,9}/[A-Za-z0-9_./-]{1,300}"
+    r"|cdn-images\.dzcdn\.net/images/(?:cover|playlist|artist)/[a-f0-9-]{32,131}/[0-9]{2,4}x[0-9]{2,4}-[0-9a-z-]{1,40}\.jpg)$")
+
+
+def valid_cover(cover):
+    if not isinstance(cover, str) or not cover:
+        return ""
+    if REMOTE_COVER_RE.match(cover):
+        return cover
+    if os.path.isabs(cover) and os.path.isfile(cover):
+        real = os.path.realpath(cover)
+        if os.path.dirname(real) == os.path.realpath(COVERS_DIR) and re.match(r"^[A-Za-z0-9_.-]{1,120}\.(?:jpg|png)$", os.path.basename(real)):
+            return real
+    return ""
+
+
+def known_cover(key):
+    """A cover for a song played before covers were noted in the history:
+    from what the helper keeps about it."""
+    if key.startswith("sp:"):
+        return valid_cover(((read_json(SP_TRACKS_PATH) or {}).get(key) or {}).get("cover"))
+    if key[:3] in ("dz:", "am:"):
+        return valid_cover(((read_json(match_files(key)[0]) or {}).get(key) or {}).get("cover"))
+    if key.startswith("sc:"):
+        return valid_cover(((read_json(SC_META_PATH) or {}).get(key) or {}).get("cover"))
+    if key.startswith("au:"):
+        return valid_cover(au_cover_path(key[3:]))
+    return ""
+
+
+def liked_list_ids():
+    """Your liked songs in each service (their saved copies are read)."""
+    settings = widget_settings()
+    ids = ["LM", "sp:liked"]
+    if sc_user(settings.get("soundcloudUser")):
+        ids.append("sc:likes:" + sc_user(settings.get("soundcloudUser")))
+    if str(settings.get("deezerUser") or "").strip():
+        ids.append("dz:fav")
+    return ids
 
 
 def liked_everywhere(browser):
@@ -821,7 +961,7 @@ def liked_everywhere(browser):
     shuffled and then taken in turn, so the services alternate. The order is
     the same all day (seeded by the date), so the list and the queue agree."""
     lists = []
-    for list_id in ["LM", "sp:liked"] + ([f"sc:likes:{u}"] if (u := sc_user(widget_settings().get("soundcloudUser"))) else []):
+    for list_id in liked_list_ids():
         cached = read_json(tracks_cache_path(list_id, browser))
         items = playable(cached.get("items")) if isinstance(cached, dict) else []
         if items:
@@ -949,6 +1089,30 @@ def cmd_playlists(args):
         cache = os.path.join(CACHE_DIR, "playlists-sp.json")
         cached_then_fresh("playlists", cache, max_age, fetch_sp_playlists, extra)
         return
+    if service == "rd":
+        emit({"type": "playlists", "stale": False, "items": radio_lists(), **extra})
+        return
+    if service == "mc":
+        emit({"type": "playlists", "stale": False, "items": mc_lists(), **extra})
+        return
+    if service == "am":
+        cache = os.path.join(CACHE_DIR, f"playlists-am-{am_country()}.json")
+        cached_then_fresh("playlists", cache, max_age, lambda: {"items": am_lists()}, extra)
+        return
+    if service == "au":
+        emit({"type": "playlists", "stale": False, "items": au_lists(), **extra})
+        return
+    if service == "dz":
+        user = deezer_user(widget_settings().get("deezerUser"))
+        if not user:
+            fail("Add your Deezer profile", kind="error", setup="dz", service="dz")
+        cache = os.path.join(CACHE_DIR, f"playlists-dz-{user}.json")
+        cached_then_fresh("playlists", cache, max_age, lambda: fetch_dz_playlists(user), extra)
+        return
+    if service == "pc":
+        emit({"type": "podcastSubs", "ids": ["pc:" + s["h"] for s in podcast_state()["subs"]]})
+        emit({"type": "playlists", "stale": False, "items": podcast_lists(), **extra})
+        return
     if service == "cl":
         sources = read_cloud()
         if not sources:
@@ -958,8 +1122,8 @@ def cmd_playlists(args):
         cached, stale = [], False
         for src in sources:
             index = read_json(os.path.join(CLOUD_DIR, f"{src['id']}.json"))
-            if isinstance(index, dict) and isinstance(index.get("tracks"), list):
-                cached += cloud_lists(src, index)
+            if isinstance(index, dict) and (isinstance(index.get("tracks"), list) or isinstance(index.get("lists"), list)):
+                cached += source_lists(src, index)
                 stale = stale or time.time() - float(index.get("fetchedAt") or 0) > limit
             else:
                 stale = True
@@ -976,6 +1140,13 @@ def cmd_playlists(args):
         return
     if service == "my":
         items = [{"id": "mix:all", "title": "My Mix", "count": None}]
+        ai = read_json(AI_MIX_PATH)
+        if isinstance(ai, dict) and ai.get("items"):
+            items.insert(0, {"id": "ai:mix", "title": clean_text(ai.get("title"), 60) or "AI Mix",
+                             "count": len(playable(ai.get("items"))), "subtitle": clean_text(ai.get("about"), 120)})
+        recent = recent_tracks(100)
+        if recent:
+            items.append({"id": "hist:recent", "title": "Recently played", "count": len(recent)})
         items += [{"id": m["id"], "title": clean_text(m.get("title")) or "Mix", "count": len(playable(m.get("items")))}
                   for m in read_mixes()]
         items.append({"id": DOWNLOADS_ID, "title": "Downloads", "count": len(downloaded_tracks())})
@@ -995,9 +1166,20 @@ def cmd_tracks(args):
     if playlist_id.startswith("mix:"):
         emit({"type": "tracks", "stale": False, "playlistId": playlist_id, **mix_tracks(playlist_id, opt(args, "--browser", "none"))})
         return
-    if playlist_id.startswith("cl:"):
+    if playlist_id == "ai:mix":
+        emit({"type": "tracks", "stale": False, "playlistId": playlist_id, **ai_mix_tracks()})
+        return
+    if playlist_id == "hist:recent":
+        emit({"type": "tracks", "stale": False, "playlistId": playlist_id, "title": "Recently played", "items": recent_tracks(100)})
+        return
+    if playlist_id == "rd:fav":
+        emit({"type": "tracks", "stale": False, "playlistId": playlist_id, "title": "Favorite stations",
+              "items": with_radio_covers(radio_favorites())})
+        return
+    if playlist_id.startswith("cl:") or playlist_id.startswith("pc:"):
         try:
-            emit({"type": "tracks", "stale": False, "playlistId": playlist_id, **cloud_tracks(playlist_id)})
+            emit({"type": "tracks", "stale": False, "playlistId": playlist_id,
+                  **(podcast_tracks if playlist_id.startswith("pc:") else cloud_tracks)(playlist_id)})
         except RuntimeError as exc:
             fail(str(exc))
         return
@@ -1114,6 +1296,7 @@ def player_options(args):
         "volume": min(100, max(0, int(opt(args, "--volume", "60")))),
         "repeat": repeat,
         "fade_in": min(30.0, max(0.0, float(opt(args, "--fade-in", "0")))),
+        "pause_fade": min(3.0, max(0.0, float(opt(args, "--pause-fade", "0.6")))),
         "fade_out": min(30.0, max(0.0, float(opt(args, "--fade-out", "0")))),
         "transition": transition,
         "xfade": min(16.0, max(2.0, float(opt(args, "--xfade", "6")))),
@@ -1128,9 +1311,15 @@ def load_tracks(playlist_id, browser, max_age=None, raise_errors=False):
         return {"title": "Downloads", "items": downloaded_tracks()}
     if playlist_id.startswith("mix:"):
         return mix_tracks(playlist_id, browser)
-    if playlist_id.startswith("cl:"):
+    if playlist_id == "ai:mix":
+        return ai_mix_tracks()
+    if playlist_id == "hist:recent":
+        return {"title": "Recently played", "items": recent_tracks(100)}
+    if playlist_id == "rd:fav":
+        return {"title": "Favorite stations", "items": with_radio_covers(radio_favorites())}
+    if playlist_id.startswith("cl:") or playlist_id.startswith("pc:"):
         try:
-            return cloud_tracks(playlist_id)
+            return (podcast_tracks if playlist_id.startswith("pc:") else cloud_tracks)(playlist_id)
         except RuntimeError as exc:
             if raise_errors:
                 raise
@@ -1170,9 +1359,27 @@ def track_url(track):
     if key.startswith("sp:"):
         # mpv/ytmusic.lua resolves it to the song's YouTube Music match.
         return SPOTIFY_SCHEME + key[3:]
+    if key.startswith("dz:"):
+        return DEEZER_SCHEME + key[3:]
+    if key.startswith("am:"):
+        return APPLE_SCHEME + key[3:]
+    if key.startswith("mc:"):
+        return mc_url(key)
+    if key.startswith("au:"):
+        # mpv/ytmusic.lua resolves it to Audius' stream.
+        return AUDIUS_SCHEME + key[3:]
     if key.startswith("cl:"):
         # mpv/ytmusic.lua resolves it to the file on the local rclone server.
         return CLOUD_SCHEME + key[3:]
+    if key.startswith("rd:"):
+        # mpv/ytmusic.lua resolves it to the station's stream.
+        return RADIO_SCHEME + key[3:]
+    if key.startswith("ms:"):
+        # mpv/ytmusic.lua resolves it to the media server's stream.
+        return SERVER_SCHEME + key[3:]
+    if key.startswith("pc:"):
+        # mpv/ytmusic.lua resolves it to the episode's file.
+        return PODCAST_SCHEME + key[3:]
     return f"https://music.youtube.com/watch?v={key}"
 
 
@@ -1230,7 +1437,8 @@ def start_player(playlist_id, title, order, start, options, autoplay=False):
     with open(QUEUE_PATH, "w", encoding="utf-8") as fh:
         fh.write("#EXTM3U\n")
         for t in order:
-            label = clean_text(f"{t.get('artist')} - {t.get('title')}" if t.get("artist") else t.get("title"))
+            label = clean_text(f"{t.get('artist')} - {t.get('title')}"
+                               if t.get("artist") and not str(t.get("id", "")).startswith("rd:") else t.get("title"))
             fh.write(f"#EXTINF:{t.get('duration') or -1},{label}\n")
             fh.write(track_url(t) + "\n")
 
@@ -1256,11 +1464,16 @@ def start_player(playlist_id, title, order, start, options, autoplay=False):
         "--msg-level=all=warn,ytmusic=info", f"--log-file={MPV_LOG}",
         # Songs join without a gap: the peak mix relies on it.
         "--gapless-audio=yes",
+        # A deeper PipeWire buffer (the default is one 21 ms quantum): a
+        # moment of system load (switching the keyboard layout through an
+        # input method, an app starting) no longer makes the sound drop out.
+        "--pipewire-buffer=100",
         # Fades and the peak mix (see mpv/ytmusic.lua).
         f"--script={MPV_SCRIPT}",
         f"--script-opts-append=ytmusic-helper={os.path.realpath(__file__)}",
         f"--script-opts-append=ytmusic-python={sys.executable or 'python3'}",
         f"--script-opts-append=ytmusic-fade_in={options['fade_in']:g}",
+        f"--script-opts-append=ytmusic-pause_fade={options['pause_fade']:g}",
         f"--script-opts-append=ytmusic-fade_out={options['fade_out']:g}",
         f"--script-opts-append=ytmusic-transition={options['transition']}",
         f"--script-opts-append=ytmusic-xfade={options['xfade']:g}",
@@ -1431,18 +1644,22 @@ def cache_name(key):
     YouTube Music match, so both share one download."""
     # No dash in these: a rendered segment is named seg-<a>-<b>, and a dash
     # inside <a> or <b> would make that name ambiguous.
-    if key.startswith("sc:"):
-        return "sc" + hashlib.sha1(key.encode()).hexdigest()[:16]
-    if key.startswith("sp:"):
+    if key[:3] in ("sc:", "mc:", "au:"):
+        return key[:2] + hashlib.sha1(key.encode()).hexdigest()[:16]
+    if key[:3] in MATCHED:
         return resolve_spotify(key)
     if key.startswith("cl:"):
         return "cl" + key.rsplit("/", 1)[-1]
+    if key.startswith("ms:"):
+        return "ms" + hashlib.sha1(key.encode()).hexdigest()[:16]
     return key
 
 
 def download_url(key):
-    if key.startswith("sp:"):
+    if key[:3] in MATCHED:
         return f"https://music.youtube.com/watch?v={resolve_spotify(key)}"
+    if key.startswith("au:"):
+        return audius_stream_url(key)
     return track_url({"id": key})
 WATCH_RE = re.compile(r"^https://music\.youtube\.com/watch\?v=([A-Za-z0-9_-]{11})$")
 
@@ -1559,10 +1776,23 @@ def mix_entry(name):
         return m.group(1), None
     if (name or "").startswith(SPOTIFY_SCHEME) and SP_ID_RE.match(name[len(SPOTIFY_SCHEME):]):
         return "sp:" + name[len(SPOTIFY_SCHEME):], None
+    if (name or "").startswith(DEEZER_SCHEME) and re.match(r"^[0-9]{1,20}$", name[len(DEEZER_SCHEME):]):
+        return "dz:" + name[len(DEEZER_SCHEME):], None
+    if (name or "").startswith(APPLE_SCHEME) and re.match(r"^[0-9]{1,15}$", name[len(APPLE_SCHEME):]):
+        return "am:" + name[len(APPLE_SCHEME):], None
+    if (name or "").startswith(AUDIUS_SCHEME) and re.match(r"^[A-Za-z0-9]{1,16}$", name[len(AUDIUS_SCHEME):]):
+        return "au:" + name[len(AUDIUS_SCHEME):], None
+    m = re.match(r"^https://www\.mixcloud\.com/([A-Za-z0-9_-]{1,100})/([A-Za-z0-9%_.-]{1,300})/$", name or "")
+    if m:
+        return f"mc:{m.group(1)}/{m.group(2)}", None
     if sc_track_key(name):
         return sc_track_key(name), None
     if (name or "").startswith(CLOUD_SCHEME) and CLOUD_KEY_RE.match("cl:" + name[len(CLOUD_SCHEME):]):
         return "cl:" + name[len(CLOUD_SCHEME):], None
+    if (name or "").startswith(SERVER_SCHEME) and SERVER_KEY_RE.match("ms:" + name[len(SERVER_SCHEME):]):
+        return "ms:" + name[len(SERVER_SCHEME):], None
+    if (name or "").startswith(PODCAST_SCHEME) and PODCAST_KEY_RE.match("pc:" + name[len(PODCAST_SCHEME):]):
+        return "pc:" + name[len(PODCAST_SCHEME):], None
     path = os.path.realpath(name or "")
     if os.path.dirname(path) != os.path.realpath(MIX_DIR):
         return None, None
@@ -1571,7 +1801,7 @@ def mix_entry(name):
         return None, None
     side = read_json(path[:-5] + ".json")
     key = side.get("id") if isinstance(side, dict) else ""
-    if not TRACK_KEY_RE.match(str(key or "")) or (not key.startswith("sp:") and cache_name(key) != m.group(2)):
+    if not TRACK_KEY_RE.match(str(key or "")) or (key[:3] not in MATCHED and cache_name(key) != m.group(2)):
         return None, None
     return key, side
 
@@ -1620,8 +1850,10 @@ def download_audio(video_id, cookie_opts, clients=None, deadline=AUDIO_DEADLINE)
     name = cache_name(video_id)
     if video_id.startswith("cl:"):
         return copy_cloud_audio(video_id, name), "cloud"
+    if video_id.startswith("ms:"):
+        return download_server_audio(video_id, name), "server"
     url = download_url(video_id)
-    if video_id.startswith("sc:"):
+    if video_id[:3] in ("sc:", "mc:", "au:"):
         clients = [None]
     """Download a song's audio into the cache, trying YouTube's clients in
     turn. Returns (metadata, the client that worked); raises RuntimeError
@@ -2329,13 +2561,28 @@ def browser_command(browser):
     return [shutil.which("xdg-open") or "xdg-open"]
 
 
+# Pages to sign in to a service, or to find your profile there (fixed URLs).
+SERVICE_PAGES = {
+    "yt": SIGNIN_URL,
+    "sc": "https://soundcloud.com/signin",
+    "sc-profile": "https://soundcloud.com/you/library",
+    "dz": "https://www.deezer.com/login",
+    "dz-profile": "https://www.deezer.com/",
+}
+
+
 def cmd_signin(args):
-    """Open YouTube's sign-in page (fixed URL) in the cookies' browser."""
+    """Open a sign-in page (fixed URL) in the cookies' browser: YouTube's,
+    or with --service sc / dz SoundCloud's or Deezer's (sc-profile and
+    dz-profile open your own pages there, to copy your profile link)."""
     browser = check_browser(opt(args, "--browser", "none"))
+    page = SERVICE_PAGES.get(opt(args, "--service", "yt"))
+    if not page:
+        fail("unknown service")
     command = browser_command(browser) if browser != "none" else [shutil_which("xdg-open")]
     try:
         with open(os.devnull, "rb") as devnull_in, open(os.devnull, "wb") as devnull_out:
-            subprocess.Popen(command + [SIGNIN_URL], stdin=devnull_in, stdout=devnull_out,
+            subprocess.Popen(command + [page], stdin=devnull_in, stdout=devnull_out,
                              stderr=devnull_out, start_new_session=True, close_fds=True)
     except OSError as exc:
         fail(f"Couldn't open the browser: {exc}")
@@ -2540,12 +2787,42 @@ def cmd_search(args):
     query = clean_text(" ".join(args[:1]), 150).strip()
     if not query:
         fail("search needs a query")
+    if opt(args, "--service", "yt") == "pc":
+        try:
+            shows = podcast_search(query)
+        except RuntimeError as exc:
+            fail(str(exc))
+        emit({"type": "search", "query": query, "service": "pc",
+              "items": [dict(podcast_list_item(s), kind="list", artist=s.get("author", "")) for s in shows[:60]]})
+        return
+    if opt(args, "--service", "yt") in ("mc", "au", "am"):
+        try:
+            found = {"mc": mixcloud_search, "au": audius_search, "am": apple_music_search}[opt(args, "--service", "yt")](query)
+        except RuntimeError as exc:
+            fail(str(exc))
+        emit({"type": "search", "query": query, "service": opt(args, "--service", "yt"),
+              "items": [dict(t, kind="song") for t in found]})
+        return
+    if opt(args, "--service", "yt") == "dz":
+        try:
+            found = deezer_search(query)
+        except RuntimeError as exc:
+            fail(str(exc))
+        emit({"type": "search", "query": query, "service": "dz", "items": [dict(t, kind="song") for t in found]})
+        return
+    if opt(args, "--service", "yt") == "rd":
+        try:
+            stations = radio_search(query)
+        except RuntimeError as exc:
+            fail(str(exc))
+        emit({"type": "search", "query": query, "service": "rd", "items": [dict(t, kind="song") for t in stations[:60]]})
+        return
     if opt(args, "--service", "yt") == "sc":
         try:
             data = run_ytdlp(f"scsearch30:{query}", check_browser(opt(args, "--browser", "none")))
         except RuntimeError as exc:
             fail(str(exc))
-        songs = [dict(t, kind="song") for t in sc_items(data)]
+        songs = [dict(t, kind="song") for t in with_sc_meta(sc_items(data)[:40])]
         write_json_atomic(tracks_cache_path("sc:search", "none"),
                           {"title": f"SoundCloud: {query}", "items": songs, "fetchedAt": int(time.time())})
         emit({"type": "search", "query": query, "service": "sc", "items": songs[:50]})
@@ -2625,8 +2902,8 @@ def safe_filename(text):
 def cover_urls(key):
     """Where a song's cover comes from (never with cookies): YouTube's
     thumbnail, Spotify's album image, SoundCloud's artwork."""
-    if key.startswith("sp:"):
-        known = (read_json(SP_TRACKS_PATH) or {}).get(key) or {}
+    if key[:3] in MATCHED:
+        known = (read_json(match_files(key)[0]) or {}).get(key) or {}
         urls = [known["cover"]] if isinstance(known.get("cover"), str) else []
         try:
             vid = resolve_spotify(key)
@@ -2634,10 +2911,10 @@ def cover_urls(key):
         except RuntimeError:
             pass
         return urls
-    if key.startswith("sc:"):
+    if key[:3] in ("sc:", "mc:", "au:"):
         meta = audio_meta(key) or {}
         thumb = meta.get("thumbnail")
-        return [thumb.replace("-large.", "-t500x500.")] if isinstance(thumb, str) else []
+        return [thumb.replace("-large.", "-t500x500.")] if isinstance(thumb, str) and thumb.startswith("https://") else []
     return [f"https://i.ytimg.com/vi/{key}/{s}.jpg" for s in ("maxresdefault", "hqdefault")]
 
 
@@ -2677,6 +2954,10 @@ def cmd_download(args):
     if not args or not TRACK_KEY_RE.match(args[0]):
         fail("download needs a track")
     video_id = args[0]
+    if video_id.startswith("rd:"):
+        fail("A radio station is live: there is no song to download")
+    if video_id.startswith("pc:"):
+        fail("Podcast episodes play from their feed and can't be downloaded here")
     fmt = opt(args, "--format", "mp3")
     if fmt not in DOWNLOAD_FORMATS:
         fail("--format must be one of " + ", ".join(DOWNLOAD_FORMATS))
@@ -2794,7 +3075,7 @@ CLOUD_KINDS = {
     "dropbox": {"type": "dropbox", "oauth": True},
     "onedrive": {"type": "onedrive", "oauth": True},
 }
-CLOUD_KIND_NAMES = {"s3": "S3", "sftp": "SFTP", "smb": "SMB", "webdav": "WebDAV", "ftp": "FTP",
+CLOUD_KIND_NAMES = {"local": "This computer", "subsonic": "Subsonic", "jellyfin": "Jellyfin", "plex": "Plex", "s3": "S3", "sftp": "SFTP", "smb": "SMB", "webdav": "WebDAV", "ftp": "FTP",
                     "drive": "Google Drive", "dropbox": "Dropbox", "onedrive": "OneDrive", "remote": "rclone"}
 FIELD_RE = {
     "host": re.compile(r"^[A-Za-z0-9.:\[\]_-]{1,253}$"),
@@ -2841,8 +3122,11 @@ def read_cloud():
     items = data.get("sources") if isinstance(data, dict) and isinstance(data.get("sources"), list) else []
     out = []
     for s in items:
+        local = isinstance(s, dict) and s.get("remote") == "" and isinstance(s.get("path"), str) and (
+            (s.get("kind") == "local" and os.path.isabs(s["path"]))
+            or (s.get("kind") in SERVER_KINDS and SERVER_URL_RE.match(s["path"]) is not None))
         if (isinstance(s, dict) and CLOUD_SRC_RE.match(str(s.get("id", "")))
-                and REMOTE_NAME_RE.match(str(s.get("remote", ""))) and isinstance(s.get("path", ""), str)):
+                and (local or REMOTE_NAME_RE.match(str(s.get("remote", "")))) and isinstance(s.get("path", ""), str)):
             out.append({"id": s["id"], "remote": s["remote"], "path": s.get("path", ""), "kind": str(s.get("kind", "remote")),
                         "title": clean_text(s.get("title"), 80) or s["remote"], "created": s.get("created") is True})
     return out
@@ -2967,23 +3251,26 @@ def cmd_cloud(args):
     """cloud: the sources and the remotes rclone already knows."""
     sources = [{"id": s["id"], "title": s["title"], "kind": s["kind"], "remote": s["remote"], "path": s["path"]}
                for s in read_cloud()]
+    # The Music folder, offered when it's there and not added yet.
+    music = os.path.join(HOME, "Music")
+    extra = {"musicDir": music} if os.path.isdir(music) and not any(
+        s["kind"] == "local" and os.path.realpath(s["path"]) == os.path.realpath(music) for s in sources) else {}
     if not rclone_available():
-        emit({"type": "cloud", "state": "list", "rclone": False, "sources": sources, "remotes": []})
+        emit({"type": "cloud", "state": "list", "rclone": False, "sources": sources, "remotes": [], **extra})
         return
     try:
         remotes = rclone_remotes()
     except RuntimeError:
         remotes = []
-    emit({"type": "cloud", "state": "list", "rclone": True, "sources": sources, "remotes": remotes})
+    emit({"type": "cloud", "state": "list", "rclone": True, "sources": sources, "remotes": remotes, **extra})
 
 
 def cmd_cloud_add(args):
     """cloud-add: connect a storage. The form arrives as JSON on stdin:
     {kind, title, path, fields, remote}. kind "remote" uses a remote rclone
     already has; the others create one (in the browser for Google Drive,
-    Dropbox and OneDrive). The folder is listed once to check it works."""
-    if not rclone_available():
-        fail("rclone isn't installed (omarchy pkg add rclone)", setup="rclone")
+    Dropbox and OneDrive). kind "local" is a folder on this computer (no
+    rclone needed). The folder is listed once to check it works."""
     try:
         form = json.loads(sys.stdin.readline(64 * 1024) or "{}")
     except ValueError:
@@ -2991,6 +3278,14 @@ def cmd_cloud_add(args):
     if not isinstance(form, dict):
         fail("cloud-add needs the form as JSON on stdin")
     kind = str(form.get("kind") or "")
+    if kind == "local":
+        add_local_folder(form)
+        return
+    if kind in SERVER_KINDS:
+        add_media_server(kind, form)
+        return
+    if not rclone_available():
+        fail("rclone isn't installed (omarchy pkg add rclone)", setup="rclone")
     fields = form.get("fields") if isinstance(form.get("fields"), dict) else {}
     try:
         path = clean_cloud_path(form.get("path"))
@@ -3047,6 +3342,23 @@ def cmd_cloud_add(args):
     emit({"type": "cloud", "state": "added", "id": src_id, "title": title})
 
 
+def add_local_folder(form):
+    raw = str(form.get("path") or "~/Music").strip() or "~/Music"
+    if re.search(r"[\x00-\x1f\x7f]", raw) or len(raw) > 500:
+        fail("That folder path isn't usable")
+    path = os.path.realpath(os.path.expanduser(raw))
+    if not os.path.isdir(path) or not os.access(path, os.R_OK):
+        fail(f"There is no folder {raw}")
+    sources = read_cloud()
+    if any(s["kind"] == "local" and os.path.realpath(s["path"]) == path for s in sources):
+        fail("That folder is already in your files")
+    src_id = os.urandom(4).hex()
+    title = clean_text(form.get("title"), 80) or os.path.basename(path) or path
+    sources.append({"id": src_id, "remote": "", "path": path, "kind": "local", "title": title, "created": False})
+    write_cloud(sources)
+    emit({"type": "cloud", "state": "added", "id": src_id, "title": title})
+
+
 def cmd_cloud_remove(args):
     """cloud-remove <source>: forget a source (and the remote, if this
     plugin made it). Files in the storage are never touched."""
@@ -3054,7 +3366,9 @@ def cmd_cloud_remove(args):
     if not src:
         fail("No such storage")
     write_cloud([s for s in read_cloud() if s["id"] != src["id"]])
-    if src["created"] and not any(s["remote"] == src["remote"] for s in read_cloud()):
+    if src["kind"] in SERVER_KINDS:
+        save_server_secret(src["id"], None)
+    if src["created"] and src["remote"] and not any(s["remote"] == src["remote"] for s in read_cloud()):
         delete_remote(src["remote"])
     for path in (os.path.join(CLOUD_DIR, f"{src['id']}.json"),):
         try:
@@ -3090,8 +3404,31 @@ def cloud_names(relpath):
     return clean_text(title, 200) or parts[-1], clean_text(artist, 200), clean_text(album, 200)
 
 
+def local_entries(root_dir):
+    """lsjson-like entries for the audio and cover files under a folder."""
+    out = []
+    for dirpath, dirnames, filenames in os.walk(root_dir, followlinks=False):
+        dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
+        for name in filenames:
+            ext = os.path.splitext(name)[1][1:].lower()
+            if ext not in CLOUD_AUDIO and ext not in CLOUD_COVER_EXT:
+                continue
+            full = os.path.join(dirpath, name)
+            try:
+                st = os.stat(full)
+            except OSError:
+                continue
+            out.append({"Path": os.path.relpath(full, root_dir), "Size": st.st_size,
+                        "ModTime": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(st.st_mtime))})
+            if len(out) > CLOUD_MAX_FILES * 2:
+                return out
+    return out
+
+
 def fetch_cloud_index(src):
     """Every audio file under a source, and a cover image per folder."""
+    if src["kind"] == "local":
+        return index_entries(src, local_entries(src["path"]))
     patterns = ["*.{" + ",".join(CLOUD_AUDIO) + "}",
                 "{" + ",".join(CLOUD_COVER_NAMES) + "}.{" + ",".join(CLOUD_COVER_EXT) + "}"]
     args = ["lsjson", "-R", "--files-only", "--no-mimetype", "--fast-list", "--ignore-case",
@@ -3105,6 +3442,10 @@ def fetch_cloud_index(src):
         entries = json.loads(proc.stdout or "[]")
     except ValueError:
         raise RuntimeError("rclone's listing didn't parse")
+    return index_entries(src, entries)
+
+
+def index_entries(src, entries):
     tracks, covers = [], {}
     for e in entries:
         rel = e.get("Path") if isinstance(e, dict) else None
@@ -3128,7 +3469,51 @@ def fetch_cloud_index(src):
         tracks.append({"id": f"cl:{src['id']}/{path_hash(rel)}", "rel": rel, "folder": folder, "size": size,
                        "title": title, "artist": artist, "album": album, "mtime": mtime[:19], "duration": None})
     tracks.sort(key=lambda t: natural_key(t["rel"]))
-    return {"tracks": tracks, "covers": fetch_cloud_covers(src, {f: c[1] for f, c in covers.items()})}
+    found = fetch_cloud_covers(src, {f: c[1] for f, c in covers.items()})
+    if src.get("kind") == "local":
+        found.update(embedded_covers(src, tracks, found))
+    return {"tracks": tracks, "covers": found}
+
+
+def embedded_covers(src, tracks, have):
+    """For a folder on this computer without a cover image: the picture
+    inside its first song (MP3, FLAC and M4A often carry one), saved next to
+    the other covers. Returns {folder: local file}."""
+    import concurrent.futures
+    first = {}
+    for t in tracks:
+        if t["folder"] not in have and t["folder"] not in first:
+            first[t["folder"]] = t["rel"]
+    todo = list(first.items())[:CLOUD_MAX_COVERS]
+
+    def one(item):
+        folder, rel = item
+        local = cloud_cover_path(src["id"], folder, "jpg")
+        if not os.path.isfile(local):
+            try:
+                path = local_file(src, rel)
+            except RuntimeError:
+                return folder, None
+            os.makedirs(COVERS_DIR, mode=0o700, exist_ok=True)
+            try:
+                subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", path, "-an", "-map", "0:v:0",
+                                "-frames:v", "1", "-vf", "scale=300:300:force_original_aspect_ratio=decrease",
+                                local + ".tmp.jpg"], capture_output=True, timeout=20, stdin=subprocess.DEVNULL)
+                if os.path.isfile(local + ".tmp.jpg") and os.path.getsize(local + ".tmp.jpg") > 0:
+                    os.replace(local + ".tmp.jpg", local)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            finally:
+                if os.path.exists(local + ".tmp.jpg"):
+                    os.unlink(local + ".tmp.jpg")
+        return folder, local if os.path.isfile(local) else None
+
+    out = {}
+    with concurrent.futures.ThreadPoolExecutor(4) as pool:
+        for folder, local in pool.map(one, todo):
+            if local:
+                out[folder] = local
+    return out
 
 
 def cloud_cover_path(src_id, folder, ext):
@@ -3144,6 +3529,14 @@ def fetch_cloud_covers(src, covers):
         local = cloud_cover_path(src["id"], folder, ext)
         wanted[folder] = (rel, local)
     missing = [(f, rel, local) for f, (rel, local) in wanted.items() if not os.path.isfile(local)]
+    if missing and src["kind"] == "local":
+        os.makedirs(COVERS_DIR, mode=0o700, exist_ok=True)
+        for _, rel, local in missing:
+            try:
+                shutil.copyfile(os.path.join(src["path"], rel), local)
+            except OSError:
+                pass
+        missing = []
     if missing:
         os.makedirs(COVERS_DIR, mode=0o700, exist_ok=True)
         tmp = tempfile.mkdtemp(prefix=".fetch-", dir=COVERS_DIR)
@@ -3170,10 +3563,10 @@ def cloud_index(src, max_age=None):
     older than max_age seconds)."""
     path = os.path.join(CLOUD_DIR, f"{src['id']}.json")
     cached = read_json(path)
-    if isinstance(cached, dict) and isinstance(cached.get("tracks"), list):
+    if isinstance(cached, dict) and (isinstance(cached.get("tracks"), list) or isinstance(cached.get("lists"), list)):
         if max_age is None or time.time() - float(cached.get("fetchedAt") or 0) <= max_age:
             return cached
-    index = fetch_cloud_index(src)
+    index = fetch_server_index(src) if src["kind"] in SERVER_KINDS else fetch_cloud_index(src)
     index["fetchedAt"] = int(time.time())
     os.makedirs(CLOUD_DIR, mode=0o700, exist_ok=True)
     write_json_atomic(path, index)
@@ -3196,7 +3589,8 @@ def cloud_lists(src, index):
         folders.setdefault(t["folder"], []).append(t)
     first_cover = next(iter(covers.values()), None)
     items = [{"id": f"cl:{src['id']}", "title": src["title"], "count": len(index["tracks"]),
-              "subtitle": f"{CLOUD_KIND_NAMES.get(src['kind'], 'rclone')} · {src['remote']}:{src['path']}".rstrip(":"),
+              "subtitle": (f"{CLOUD_KIND_NAMES['local']} · {src['path'].replace(HOME, '~', 1)}" if src["kind"] == "local"
+                           else f"{CLOUD_KIND_NAMES.get(src['kind'], 'rclone')} · {src['remote']}:{src['path']}".rstrip(":")),
               **({"cover": first_cover} if first_cover else {})}]
     for folder in sorted(folders, key=natural_key):
         if folder == "" and len(folders) == 1:
@@ -3212,11 +3606,15 @@ def cloud_lists(src, index):
     return items
 
 
+def source_lists(src, index):
+    return server_lists(src, index) if src["kind"] in SERVER_KINDS else cloud_lists(src, index)
+
+
 def fetch_cloud_playlists(sources, max_age):
     items, errors = [], []
     for src in sources:
         try:
-            items += cloud_lists(src, cloud_index(src, max_age))
+            items += source_lists(src, cloud_index(src, max_age))
         except RuntimeError as exc:
             errors.append(f"{src['title']}: {exc}")
             items.append({"id": f"cl:{src['id']}", "title": src["title"], "count": None, "subtitle": str(exc)[:120]})
@@ -3276,7 +3674,7 @@ def stop_cloud_server():
 
 
 def cloud_upstreams(sources):
-    return " ".join(f'"{s["id"]}={s["remote"]}:{s["path"]}"' for s in sources)
+    return " ".join(f'"{s["id"]}={s["remote"]}:{s["path"]}"' for s in sources if s["kind"] not in ("local",) + SERVER_KINDS)
 
 
 def server_answers(state, timeout=2):
@@ -3327,8 +3725,19 @@ def cloud_server():
     raise RuntimeError("rclone's file server didn't start")
 
 
+def local_file(src, rel):
+    """The file on disk for a song in a local folder (never outside it)."""
+    root_dir = os.path.realpath(src["path"])
+    full = os.path.realpath(os.path.join(root_dir, rel))
+    if not full.startswith(root_dir + os.sep) or not os.path.isfile(full):
+        raise RuntimeError("That song isn't in its folder any more; refresh the list")
+    return full
+
+
 def cloud_stream_url(key):
     src, rel, _ = cloud_file(key)
+    if src["kind"] == "local":
+        return local_file(src, rel)
     state = cloud_server()
     return (f"http://{state['user']}:{state['pass']}@127.0.0.1:{state['port']}/"
             f"{src['id']}/{urllib.parse.quote(rel, safe='/')}")
@@ -3345,6 +3754,11 @@ def copy_cloud_audio(key, name):
         raise RuntimeError("the file is too big")
     os.makedirs(MIX_DIR, mode=0o700, exist_ok=True)
     target = os.path.join(MIX_DIR, f"audio-{name}.{ext}")
+    if src["kind"] == "local":
+        shutil.copyfile(local_file(src, rel), target)
+        meta = {"audio": os.path.basename(target), "heatmap": [], "usedAt": int(time.time())}
+        write_json_atomic(os.path.join(MIX_DIR, f"{name}.json"), meta)
+        return meta
     proc = rclone("copyto", "--low-level-retries", "3",
                   f"{src['remote']}:{src['path'].rstrip('/')}/{rel}" if src["path"] else f"{src['remote']}:{rel}",
                   target, timeout=600)
@@ -3488,7 +3902,7 @@ def lyrics_from_youtube(key):
     """YouTube Music's own lyrics for a song (plain text), without an account."""
     try:
         vid = key if VIDEO_ID_RE.match(key) else (
-            (read_json(SP_MATCH_PATH) or {}).get(key[3:]) if key.startswith("sp:") else None)
+            (read_json(match_files(key)[1]) or {}).get(key[3:]) if key[:3] in MATCHED else None)
         if not vid or not VIDEO_ID_RE.match(str(vid)):
             return None
         nxt = music_public("next", {"videoId": vid})
@@ -3777,6 +4191,2066 @@ def cmd_open_score(args):
     emit({"type": "scoreOpened"})
 
 
+# ---- radio (Radio Browser) ------------------------------------------------------
+# Internet radio from radio-browser.info, a free and open directory of about
+# 50,000 stations: top stations, the most liked, your country's, genres,
+# search, and your favorites (the heart). Stations play their own stream
+# straight in mpv; the song on air shows as the stream announces it.
+#
+# A station is "rd:<uuid>"; lists are "rd:fav", "rd:top", "rd:vote",
+# "rd:country:<CC>", "rd:tag:<genre>" and "rd:search". mpv gets
+# ytmusic-radio://<uuid>, which mpv/ytmusic.lua resolves here to the stream.
+
+RADIO_SERVERS = ("https://de1.api.radio-browser.info", "https://de2.api.radio-browser.info")
+RADIO_SCHEME = "ytmusic-radio://"
+RADIO_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+RADIO_FAV_PATH = os.path.join(DATA_DIR, "radio.json")
+RADIO_STATIONS_PATH = os.path.join(CACHE_DIR, "radio-stations.json")
+RADIO_URL_RE = re.compile(r"^https?://[^\s\"'<>\\\\]{1,600}$")
+RADIO_LIMIT_LIST = 100
+RADIO_GENRES = ("pop", "rock", "jazz", "classical", "electronic", "hip-hop", "metal", "chillout", "ambient",
+                "lofi", "folk", "80s", "90s", "dance", "house", "techno", "soundtrack", "blues", "reggae",
+                "country", "news", "talk")
+
+
+def radio_api(path, params=None):
+    query = ("?" + urllib.parse.urlencode(params)) if params else ""
+    last = "no answer"
+    for server in RADIO_SERVERS:
+        request = urllib.request.Request(f"{server}/json/{path}{query}",
+                                         headers={"User-Agent": LRCLIB_UA, "Accept": "application/json"})
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                return json.loads(response.read(8 * 1024 * 1024))
+        except (OSError, ValueError) as exc:
+            last = str(exc)
+    raise RuntimeError(f"Radio Browser didn't answer: {last}")
+
+
+RADIO_COUNTRIES_PATH = os.path.join(CACHE_DIR, "radio-countries.json")
+COUNTRY_NAMES = {"US": "United States", "GB": "United Kingdom", "RU": "Russia", "KR": "South Korea", "KP": "North Korea",
+                 "IR": "Iran", "SY": "Syria", "VE": "Venezuela", "BO": "Bolivia", "TZ": "Tanzania", "MD": "Moldova",
+                 "VN": "Vietnam", "LA": "Laos", "TW": "Taiwan", "CZ": "Czechia", "NL": "Netherlands", "AE": "United Arab Emirates",
+                 "PH": "Philippines", "DO": "Dominican Republic", "CD": "DR Congo"}
+
+
+def radio_countries(max_age=7 * 86400):
+    """[{code, name, count}] of countries with stations, most first."""
+    cached = read_json(RADIO_COUNTRIES_PATH)
+    if isinstance(cached, dict) and time.time() - float(cached.get("fetchedAt") or 0) < max_age and cached.get("items"):
+        return cached["items"]
+    items = []
+    for c in radio_api("countries", {"order": "stationcount", "reverse": "true", "hidebroken": "true"}) or []:
+        code = str(c.get("iso_3166_1") or "") if isinstance(c, dict) else ""
+        if re.match(r"^[A-Z]{2}$", code) and isinstance(c.get("stationcount"), int) and c["stationcount"] > 0:
+            name = COUNTRY_NAMES.get(code) or re.sub(r"^The ", "", clean_text(c.get("name"), 80))
+            items.append({"code": code, "name": name, "count": c["stationcount"]})
+    write_json_atomic(RADIO_COUNTRIES_PATH, {"items": items, "fetchedAt": int(time.time())})
+    return items
+
+
+def country_name(code):
+    for c in (read_json(RADIO_COUNTRIES_PATH) or {}).get("items") or []:
+        if isinstance(c, dict) and c.get("code") == code:
+            return c.get("name") or code
+    return COUNTRY_NAMES.get(code, code)
+
+
+def cmd_radio_countries(_args):
+    try:
+        items = radio_countries()
+    except RuntimeError as exc:
+        fail(str(exc))
+    emit({"type": "radioCountries", "items": items, "current": radio_country()})
+
+
+def radio_country():
+    """The country chosen in the Radio tab, else the one the system's
+    language setting names (de_DE → DE)."""
+    chosen = str(widget_settings().get("radioCountry") or "")
+    if re.match(r"^[A-Z]{2}$", chosen):
+        return chosen
+    for var in ("LC_ALL", "LC_MESSAGES", "LANG"):
+        m = re.match(r"^[a-z]{2,3}_([A-Z]{2})", os.environ.get(var, ""))
+        if m:
+            return m.group(1)
+    return ""
+
+
+def radio_station(s):
+    """A station as a track, and its stream URL (kept apart)."""
+    if not isinstance(s, dict) or not RADIO_UUID_RE.match(str(s.get("stationuuid", ""))):
+        return None, None
+    url = s.get("url_resolved") or s.get("url")
+    if not isinstance(url, str) or not RADIO_URL_RE.match(url.strip()):
+        return None, None
+    tags = [t.strip() for t in str(s.get("tags") or "").split(",") if t.strip()][:3]
+    about = " · ".join(x for x in (", ".join(tags), str(s.get("countrycode") or ""),
+                                   f"{s.get('codec') or ''} {s.get('bitrate') or ''}".strip() if s.get("bitrate") else "") if x)
+    track = {"id": "rd:" + s["stationuuid"], "title": clean_text(s.get("name"), 120) or "Radio",
+             "artist": clean_text(about, 120), "duration": None}
+    favicon = s.get("favicon")
+    if isinstance(favicon, str) and favicon.startswith("https://"):
+        track["favicon"] = favicon[:500]
+    return track, url.strip()
+
+
+def remember_stations(pairs):
+    known = read_json(RADIO_STATIONS_PATH)
+    known = known if isinstance(known, dict) else {}
+    for track, url in pairs:
+        known[track["id"][3:]] = {"url": url, "track": {k: v for k, v in track.items() if k != "cover"}}
+    if len(known) > 5000:
+        known = dict(list(known.items())[-5000:])
+    write_json_atomic(RADIO_STATIONS_PATH, known)
+
+
+def radio_cover_path(uuid):
+    return os.path.join(COVERS_DIR, f"rd-{uuid}.png")
+
+
+def fetch_radio_covers(tracks):
+    """Each station's logo, made a small PNG next to the other covers (the
+    logos live on the stations' own sites: fetched by the helper, so the
+    panel only ever shows local files)."""
+    import concurrent.futures
+    os.makedirs(COVERS_DIR, mode=0o700, exist_ok=True)
+    def one(t):
+        path = radio_cover_path(t["id"][3:])
+        if os.path.isfile(path) or "favicon" not in t:
+            return
+        try:
+            body, response = http_get(t["favicon"], 1024 * 1024, timeout=6, accept="image/*")
+        except Exception:
+            return
+        if not response.headers.get_content_type().startswith("image/") or b"<svg" in body[:400].lower():
+            return
+        tmp = path + ".src"
+        with open(tmp, "wb") as fh:
+            fh.write(body)
+        try:
+            subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", tmp, "-frames:v", "1",
+                            "-vf", "scale=128:128:force_original_aspect_ratio=decrease", path],
+                           capture_output=True, timeout=20, stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(one, tracks[:RADIO_LIMIT_LIST]))
+
+
+def with_radio_covers(tracks):
+    out = []
+    for t in tracks:
+        t = {k: v for k, v in t.items() if k != "favicon"}
+        if os.path.isfile(radio_cover_path(t["id"][3:])):
+            t["cover"] = radio_cover_path(t["id"][3:])
+        out.append(t)
+    return out
+
+
+def radio_favorites():
+    data = read_json(RADIO_FAV_PATH)
+    items = data.get("stations") if isinstance(data, dict) and isinstance(data.get("stations"), list) else []
+    return [t for t in items if isinstance(t, dict) and RADIO_UUID_RE.match(str(t.get("id", ""))[3:])]
+
+
+def radio_list_query(list_id):
+    if list_id == "rd:top":
+        return "stations/topclick/%d" % RADIO_LIMIT_LIST, {"hidebroken": "true"}
+    if list_id == "rd:vote":
+        return "stations/topvote/%d" % RADIO_LIMIT_LIST, {"hidebroken": "true"}
+    m = re.match(r"^rd:country:([A-Z]{2})$", list_id)
+    if m:
+        return "stations/search", {"countrycode": m.group(1), "order": "clickcount", "reverse": "true",
+                                   "hidebroken": "true", "limit": RADIO_LIMIT_LIST}
+    m = re.match(r"^rd:tag:([a-z0-9-]{1,40})$", list_id)
+    if m:
+        return "stations/search", {"tag": m.group(1).replace("-", " "), "order": "clickcount", "reverse": "true",
+                                   "hidebroken": "true", "limit": RADIO_LIMIT_LIST}
+    raise RuntimeError("Unknown radio list")
+
+
+def fetch_radio(list_id):
+    path, params = radio_list_query(list_id)
+    pairs = [p for p in (radio_station(s) for s in radio_api(path, params) or []) if p[0]]
+    remember_stations(pairs)
+    tracks = [t for t, _ in pairs]
+    fetch_radio_covers(tracks)
+    return {"title": "", "items": with_radio_covers(tracks)}
+
+
+def radio_lists():
+    favs = radio_favorites()
+    items = [{"id": "rd:fav", "title": "Favorite stations", "count": len(favs)},
+             {"id": "rd:top", "title": "Top stations", "count": None, "subtitle": "The most played right now"},
+             {"id": "rd:vote", "title": "Most liked", "count": None, "subtitle": "Listeners' favorites"}]
+    country = radio_country()
+    if country:
+        items.append({"id": f"rd:country:{country}", "title": f"Stations in {country_name(country)}", "count": None,
+                      "subtitle": "Your country" if widget_settings().get("radioCountry") else "From your language settings"})
+    items += [{"id": f"rd:tag:{g}", "title": g.replace("-", " ").title() if g not in ("80s", "90s", "lofi") else g,
+               "count": None, "subtitle": "Genre"} for g in RADIO_GENRES]
+    return items
+
+
+def radio_search(query):
+    pairs = [p for p in (radio_station(s) for s in radio_api("stations/search", {
+        "name": query, "order": "clickcount", "reverse": "true", "hidebroken": "true", "limit": 60}) or []) if p[0]]
+    remember_stations(pairs)
+    tracks = [t for t, _ in pairs]
+    fetch_radio_covers(tracks)
+    tracks = with_radio_covers(tracks)
+    write_json_atomic(tracks_cache_path("rd:search", "none"),
+                      {"title": f"Radio: {query}", "items": tracks, "fetchedAt": int(time.time())})
+    return tracks
+
+
+def radio_stream_url(key):
+    """A station's stream: asked from the directory, which counts the
+    listen; the last known address if it doesn't answer."""
+    uuid = key[3:]
+    known = (read_json(RADIO_STATIONS_PATH) or {}).get(uuid) or {}
+    try:
+        data = radio_api(f"url/{uuid}")
+        url = data.get("url") if isinstance(data, dict) else None
+        if isinstance(url, str) and RADIO_URL_RE.match(url.strip()):
+            return url.strip()
+    except RuntimeError:
+        pass
+    if isinstance(known.get("url"), str) and RADIO_URL_RE.match(known["url"]):
+        return known["url"]
+    raise RuntimeError("That station can't be reached")
+
+
+def cmd_radio_fav(args):
+    """radio-fav <station> [--remove 1]: the heart for a station."""
+    key = args[0] if args else ""
+    if not (key.startswith("rd:") and RADIO_UUID_RE.match(key[3:])):
+        fail("radio-fav needs a station")
+    remove = opt(args, "--remove", "0") == "1"
+    favs = [t for t in radio_favorites() if t["id"] != key]
+    if not remove:
+        known = ((read_json(RADIO_STATIONS_PATH) or {}).get(key[3:]) or {}).get("track")
+        if not isinstance(known, dict):
+            fail("Open the station's list again first")
+        favs.insert(0, {"id": key, "title": clean_text(known.get("title"), 120), "artist": clean_text(known.get("artist"), 120),
+                        "duration": None})
+    os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
+    write_json_atomic(RADIO_FAV_PATH, {"stations": favs[:500]})
+    emit({"type": "radioFavs", "ids": [t["id"] for t in favs]})
+
+
+def cmd_radio_favs(_args):
+    emit({"type": "radioFavs", "ids": [t["id"] for t in radio_favorites()]})
+
+
+# ---- Deezer -----------------------------------------------------------------------
+# Deezer's public API (no account, no key): your favorite tracks and playlists
+# from your profile (setting deezerUser), Deezer's charts and search. Like
+# Spotify, the audio stays locked to Deezer's apps, so songs play from their
+# YouTube Music match (resolve_spotify handles both). A song is "dz:<id>";
+# lists are "dz:fav", "dz:pl:<id>", "dz:chart", "dz:search".
+
+DEEZER_SCHEME = "ytmusic-deezer://"
+APPLE_SCHEME = "ytmusic-apple://"
+DZ_TRACKS_PATH = os.path.join(CACHE_DIR, "deezer-tracks.json")
+DZ_MATCH_PATH = os.path.join(CACHE_DIR, "deezer-matches.json")
+DZ_LIMIT = 500
+
+
+def deezer_user(value):
+    """A profile number from what the user typed: the number, or a profile
+    link (deezer.com/<lang>/profile/<number>); a share link is followed."""
+    v = str(value or "").strip()
+    if re.match(r"^[0-9]{1,15}$", v):
+        return v
+    m = re.search(r"deezer\.com/(?:[a-z]{2}(?:-[a-z]{2})?/)?profile/([0-9]{1,15})", v)
+    if m:
+        return m.group(1)
+    if re.match(r"^https://(?:link\.deezer\.com|deezer\.page\.link)/[A-Za-z0-9/_-]{1,80}$", v):
+        try:
+            _, response = http_get(v, 2 * 1024 * 1024, timeout=10, accept="text/html")
+            m = re.search(r"deezer\.com/(?:[a-z]{2}(?:-[a-z]{2})?/)?profile/([0-9]{1,15})", response.geturl())
+            return m.group(1) if m else ""
+        except (OSError, RuntimeError):
+            return ""
+    return ""
+
+
+def deezer(path, params=None):
+    url = "https://api.deezer.com/" + path + ("?" + urllib.parse.urlencode(params) if params else "")
+    try:
+        data = http_json(url, timeout=15)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("Deezer can't be reached") from exc
+    if isinstance(data, dict) and isinstance(data.get("error"), dict):
+        err = data["error"]
+        if err.get("code") in (200, 300, 800) or err.get("type") in ("OAuthException", "DataException"):
+            raise RuntimeError("Deezer doesn't show this: make your profile and favorites public in Deezer's settings")
+        raise RuntimeError("Deezer: " + clean_text(err.get("message"), 120))
+    return data
+
+
+def dz_image(kind, md5, size=250):
+    # A mosaic of four covers is four hashes joined with "-".
+    if not re.match(r"^[a-f0-9]{32}(?:-[a-f0-9]{32}){0,3}$", str(md5 or "")):
+        return None
+    return f"https://cdn-images.dzcdn.net/images/{kind}/{md5}/{size}x{size}-000000-80-0-0.jpg"
+
+
+def dz_track(obj):
+    if not isinstance(obj, dict) or not re.match(r"^[0-9]{1,20}$", str(obj.get("id") or "")):
+        return None
+    if obj.get("type", "track") != "track" or obj.get("readable") is False and not obj.get("title"):
+        return None
+    album = obj.get("album") if isinstance(obj.get("album"), dict) else {}
+    t = {"id": "dz:" + str(obj["id"]), "title": clean_text(obj.get("title")) or str(obj["id"]),
+         "artist": clean_text((obj.get("artist") or {}).get("name"), 120),
+         "duration": obj.get("duration") if isinstance(obj.get("duration"), int) and 0 < obj["duration"] < 86400 else None}
+    if album.get("title"):
+        t["album"] = clean_text(album.get("title"), 150)
+    cover = dz_image("cover", album.get("md5_image") or obj.get("md5_image"))
+    if cover:
+        t["cover"] = cover
+    return t
+
+
+def remember_dz_tracks(tracks):
+    known = read_json(DZ_TRACKS_PATH)
+    known = known if isinstance(known, dict) else {}
+    for t in tracks:
+        known[t["id"]] = {k: t.get(k) for k in ("title", "artist", "duration", "cover") if t.get(k)}
+    if len(known) > 20000:
+        known = dict(list(known.items())[-20000:])
+    write_json_atomic(DZ_TRACKS_PATH, known)
+
+
+def dz_pages(path, params=None, limit=DZ_LIMIT):
+    out, index = [], 0
+    while len(out) < limit:
+        page = deezer(path, dict(params or {}, limit=100, index=index))
+        rows = page.get("data") if isinstance(page, dict) else None
+        if not rows:
+            break
+        out += [t for t in (dz_track(r) for r in rows) if t]
+        index += len(rows)
+        if not page.get("next"):
+            break
+    return out[:limit]
+
+
+def fetch_dz_tracks(list_id):
+    if list_id == "dz:chart":
+        title, items = "Top tracks", dz_pages("chart/0/tracks", limit=100)
+    elif list_id == "dz:fav":
+        user = deezer_user(widget_settings().get("deezerUser"))
+        if not user:
+            raise RuntimeError("Add your Deezer profile")
+        title, items = "Favorite tracks", dz_pages(f"user/{user}/tracks")
+    else:
+        m = re.match(r"^dz:pl:([0-9]{1,20})$", list_id)
+        if not m:
+            raise RuntimeError("unknown Deezer list")
+        info = deezer(f"playlist/{m.group(1)}")
+        title, items = clean_text(info.get("title"), 150) or "Playlist", dz_pages(f"playlist/{m.group(1)}/tracks")
+    remember_dz_tracks(items)
+    return {"title": title, "items": items}
+
+
+def dz_playlist_item(p, subtitle=None):
+    if not isinstance(p, dict) or not re.match(r"^[0-9]{1,20}$", str(p.get("id") or "")):
+        return None
+    item = {"id": f"dz:pl:{p['id']}", "title": clean_text(p.get("title"), 150) or "Playlist",
+            "count": p.get("nb_tracks") if isinstance(p.get("nb_tracks"), int) else None}
+    if subtitle:
+        item["subtitle"] = subtitle
+    kind = p.get("picture_type") if p.get("picture_type") in ("playlist", "cover") else "playlist"
+    cover = dz_image(kind, p.get("md5_image"))
+    if cover:
+        item["cover"] = cover
+    return item
+
+
+def fetch_dz_playlists(user):
+    items = [{"id": "dz:fav", "title": "Favorite tracks", "count": None, "subtitle": "Your loved tracks on Deezer"}]
+    mine = deezer(f"user/{user}/playlists", {"limit": 100}).get("data") or []
+    items += [i for i in (dz_playlist_item(p) for p in mine if not p.get("is_loved_track")) if i]
+    items.append({"id": "dz:chart", "title": "Top tracks", "count": None, "subtitle": "Deezer's chart right now"})
+    try:
+        charts = deezer("chart/0/playlists", {"limit": 20}).get("data") or []
+        items += [i for i in (dz_playlist_item(p, "Deezer chart") for p in charts) if i]
+    except RuntimeError:
+        pass
+    return {"items": items}
+
+
+def deezer_search(query):
+    items = [t for t in (dz_track(r) for r in deezer("search", {"q": query, "limit": 50}).get("data") or []) if t]
+    remember_dz_tracks(items)
+    write_json_atomic(tracks_cache_path("dz:search", "none"),
+                      {"title": query, "items": items, "fetchedAt": int(time.time())})
+    return items
+
+
+# ---- Mixcloud and Audius ---------------------------------------------------------
+# Two open catalogs, no account or key. Mixcloud: DJ mixes and radio shows,
+# "mc:<user>/<slug>", played by yt-dlp from the mix's page like SoundCloud;
+# lists "mc:hot:<genre>" (popular in a genre) and "mc:search". Audius:
+# independent artists, "au:<id>", streamed from Audius' own API
+# (ytmusic-audius://<id>, resolved here); lists "au:trending",
+# "au:trending:<genre>", "au:search". Audius artwork lives on community
+# nodes, so the helper fetches it into the covers folder.
+
+AUDIUS_SCHEME = "ytmusic-audius://"
+AUDIUS_API = "https://api.audius.co/v1/"
+AUDIUS_APP = "omarchy-music-player"
+MC_KEY_RE = re.compile(r"^mc:([A-Za-z0-9_-]{1,100})/([A-Za-z0-9%_.-]{1,300})$")
+MC_GENRES = ["house", "techno", "deep-house", "drum-and-bass", "ambient", "jazz", "hip-hop", "electronica",
+             "chillout", "soul", "funk", "disco", "dubstep", "trance", "lo-fi"]
+AU_GENRES = ["Electronic", "Hip-Hop/Rap", "Pop", "Alternative", "Ambient", "Drum & Bass", "House", "Techno",
+             "Lo-Fi", "Rock", "R&B/Soul", "Jazz", "Experimental"]
+
+
+def mc_url(key):
+    m = MC_KEY_RE.match(key)
+    return f"https://www.mixcloud.com/{m.group(1)}/{m.group(2)}/" if m else ""
+
+
+def mc_track(c):
+    if not isinstance(c, dict):
+        return None
+    m = re.match(r"^/([A-Za-z0-9_-]{1,100})/([A-Za-z0-9%_.-]{1,300})/$", str(c.get("key") or ""))
+    if not m:
+        return None
+    t = {"id": f"mc:{m.group(1)}/{m.group(2)}", "title": clean_text(c.get("name"), 200) or m.group(2),
+         "artist": clean_text((c.get("user") or {}).get("name"), 120),
+         "duration": c.get("audio_length") if isinstance(c.get("audio_length"), int) and 0 < c["audio_length"] < 86400 else None}
+    pic = str((c.get("pictures") or {}).get("large") or (c.get("pictures") or {}).get("medium") or "")
+    if re.match(r"^https://thumbnailer\.mixcloud\.com/unsafe/[0-9x]{3,9}/[A-Za-z0-9_./-]{1,300}$", pic):
+        t["cover"] = pic
+    return t
+
+
+def mixcloud(path, params=None):
+    url = "https://api.mixcloud.com/" + path + ("?" + urllib.parse.urlencode(params) if params else "")
+    try:
+        return http_json(url, timeout=15)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("Mixcloud can't be reached") from exc
+
+
+def fetch_mc_tracks(list_id):
+    m = re.match(r"^mc:hot:([a-z0-9-]{1,40})$", list_id)
+    if not m:
+        raise RuntimeError("unknown Mixcloud list")
+    data = mixcloud(f"discover/{m.group(1)}/popular/", {"limit": 50})
+    items = [t for t in (mc_track(c) for c in data.get("data") or []) if t]
+    return {"title": m.group(1).replace("-", " ").title() + " mixes", "items": items}
+
+
+def mixcloud_search(query):
+    data = mixcloud("search/", {"q": query, "type": "cloudcast", "limit": 50})
+    items = [t for t in (mc_track(c) for c in data.get("data") or []) if t]
+    write_json_atomic(tracks_cache_path("mc:search", "none"), {"title": query, "items": items, "fetchedAt": int(time.time())})
+    return items
+
+
+def mc_lists():
+    return [{"id": f"mc:hot:{g}", "title": g.replace("-", " ").title(), "count": None, "subtitle": "Popular mixes"}
+            for g in MC_GENRES]
+
+
+def audius(path, params=None):
+    url = AUDIUS_API + path + "?" + urllib.parse.urlencode(dict(params or {}, app_name=AUDIUS_APP))
+    try:
+        return http_json(url, timeout=15)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("Audius can't be reached") from exc
+
+
+def au_cover_path(au_id):
+    return os.path.join(COVERS_DIR, f"au-{au_id}.jpg")
+
+
+def au_track(d):
+    if not isinstance(d, dict) or not re.match(r"^[A-Za-z0-9]{1,16}$", str(d.get("id") or "")):
+        return None
+    if d.get("is_streamable") is False or d.get("is_delete"):
+        return None
+    t = {"id": "au:" + d["id"], "title": clean_text(d.get("title"), 200) or d["id"],
+         "artist": clean_text((d.get("user") or {}).get("name"), 120),
+         "duration": d.get("duration") if isinstance(d.get("duration"), int) and 0 < d["duration"] < 86400 else None}
+    art = (d.get("artwork") or {}).get("150x150") if isinstance(d.get("artwork"), dict) else None
+    if isinstance(art, str) and re.match(r"^https://[A-Za-z0-9.-]{1,100}/content/[A-Za-z0-9]{10,100}/150x150\.jpg$", art):
+        t["art"] = art
+    return t
+
+
+def with_au_covers(items):
+    """Each song's artwork as a local file (fetched once, in parallel)."""
+    import concurrent.futures
+    todo = [t for t in items if t.get("art") and not os.path.isfile(au_cover_path(t["id"][3:]))]
+    with concurrent.futures.ThreadPoolExecutor(8) as pool:
+        list(pool.map(lambda t: save_remote_cover(au_cover_path(t["id"][3:]), t["art"], 150), todo[:60]))
+    out = []
+    for t in items:
+        t = {k: v for k, v in t.items() if k != "art"}
+        if os.path.isfile(au_cover_path(t["id"][3:])):
+            t["cover"] = au_cover_path(t["id"][3:])
+        out.append(t)
+    return out
+
+
+def fetch_au_tracks(list_id):
+    m = re.match(r"^au:trending(?::([A-Za-z0-9-]{1,40}))?$", list_id)
+    if not m:
+        raise RuntimeError("unknown Audius list")
+    genre = next((g for g in AU_GENRES if au_slug(g) == m.group(1)), None) if m.group(1) else None
+    params = {"limit": 50, "time": "week"}
+    if genre:
+        params["genre"] = genre
+    data = audius("tracks/trending", params)
+    items = [t for t in (au_track(d) for d in data.get("data") or []) if t]
+    return {"title": f"Trending {genre}" if genre else "Trending on Audius", "items": with_au_covers(items)}
+
+
+def au_slug(genre):
+    return re.sub(r"[^a-z0-9]+", "-", genre.lower()).strip("-")
+
+
+def audius_search(query):
+    data = audius("tracks/search", {"query": query, "limit": 50})
+    items = with_au_covers([t for t in (au_track(d) for d in data.get("data") or []) if t])
+    write_json_atomic(tracks_cache_path("au:search", "none"), {"title": query, "items": items, "fetchedAt": int(time.time())})
+    return items
+
+
+def au_lists():
+    return ([{"id": "au:trending", "title": "Trending", "count": None, "subtitle": "This week on Audius"}]
+            + [{"id": f"au:trending:{au_slug(g)}", "title": g, "count": None, "subtitle": "Trending this week"} for g in AU_GENRES])
+
+
+def audius_stream_url(key):
+    if not re.match(r"^au:[A-Za-z0-9]{1,16}$", key):
+        raise RuntimeError("not an Audius song")
+    return f"{AUDIUS_API}tracks/{key[3:]}/stream?app_name={AUDIUS_APP}"
+
+
+# ---- scrobbling: Last.fm and ListenBrainz --------------------------------------------
+# A song played long enough (half of it, or 4 minutes; songs over 30 s) is
+# sent to Last.fm and/or ListenBrainz when its play is noted (history-add).
+# Radio and podcasts aren't. ListenBrainz needs your user token; Last.fm an
+# API account of your own (key and secret) and a sign-in in the browser,
+# which gives a session key. They live owner-only in scrobble.json, and come
+# to the helper on stdin, never on a command line.
+
+SCROBBLE_PATH = os.path.join(DATA_DIR, "scrobble.json")
+LASTFM_API = "https://ws.audioscrobbler.com/2.0/"
+LISTENBRAINZ_API = "https://api.listenbrainz.org/1/"
+SCROBBLE_KEY_RE = re.compile(r"^[A-Za-z0-9-]{8,64}$")
+
+
+def scrobble_config():
+    data = read_json(SCROBBLE_PATH)
+    return data if isinstance(data, dict) else {}
+
+
+def write_scrobble_config(cfg):
+    os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
+    write_json_atomic(SCROBBLE_PATH, cfg)
+    os.chmod(SCROBBLE_PATH, 0o600)
+
+
+def scrobble_status(cfg=None):
+    cfg = scrobble_config() if cfg is None else cfg
+    lb, lf = cfg.get("listenbrainz") or {}, cfg.get("lastfm") or {}
+    return {"type": "scrobble", "listenbrainz": clean_text(lb.get("user"), 80) if lb.get("token") else "",
+            "lastfm": clean_text(lf.get("user"), 80) if lf.get("session") else ""}
+
+
+def lastfm_sig(params, secret):
+    text = "".join(k + str(params[k]) for k in sorted(params) if k not in ("format", "callback")) + secret
+    return hashlib.md5(text.encode("utf-8")).hexdigest()
+
+
+def lastfm_call(method, params, key, secret, post=False):
+    params = dict(params, method=method, api_key=key)
+    params["api_sig"] = lastfm_sig(params, secret)
+    params["format"] = "json"
+    data = urllib.parse.urlencode(params).encode()
+    request = urllib.request.Request(LASTFM_API if post else LASTFM_API + "?" + data.decode(),
+                                     data=data if post else None, headers={"User-Agent": "omarchy-music-player"})
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            out = json.loads(response.read(1024 * 1024))
+    except urllib.error.HTTPError as exc:
+        try:
+            out = json.loads(exc.read(1024 * 1024))
+        except ValueError:
+            raise RuntimeError(f"Last.fm answered {exc.code}") from exc
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("Last.fm can't be reached") from exc
+    if isinstance(out, dict) and out.get("error"):
+        raise RuntimeError("Last.fm: " + clean_text(out.get("message"), 160))
+    return out
+
+
+def listenbrainz_call(path, token, payload=None):
+    request = urllib.request.Request(LISTENBRAINZ_API + path, data=json.dumps(payload).encode() if payload else None,
+                                     headers={"Authorization": "Token " + token, "Content-Type": "application/json",
+                                              "User-Agent": "omarchy-music-player"})
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            return json.loads(response.read(1024 * 1024) or b"{}")
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError("ListenBrainz refused it: check your token" if exc.code in (400, 401) else
+                           f"ListenBrainz answered {exc.code}") from exc
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("ListenBrainz can't be reached") from exc
+
+
+def scrobble_names(title, artist):
+    """(artist, title) to scrobble: YouTube titles lose "(Official Video)"
+    and the like; "Artist - Title" is split when the channel isn't the artist."""
+    pairs = lyric_names(title, artist)
+    clean_artist = re.sub(r"\s*-\s*Topic$|VEVO$", "", clean_text(artist, 200), flags=re.I).strip()
+    title = clean_text(title, 200)
+    # "Song - Remastered 2011" is the song's own title; "Band - Song" names the band.
+    version = re.search(r" - .*\b(remaster(ed)?|live|version|edit|mix|acoustic|demo|mono|stereo|instrumental)\b",
+                        title, flags=re.I)
+    if clean_artist and (version or " - " not in title):
+        mine = [p for p in pairs if p[0] == clean_artist]
+        if mine:
+            return mine[0]
+    return pairs[0] if pairs else ("", "")
+
+
+def scrobble(track, played, duration, started):
+    """Send one listen where scrobbling is set up; failures are only logged."""
+    cfg = scrobble_config()
+    if not (cfg.get("listenbrainz") or {}).get("token") and not (cfg.get("lastfm") or {}).get("session"):
+        return
+    if duration and duration <= 30:
+        return
+    if not (played >= 240 or (duration and played >= duration / 2)):
+        return
+    artist, title = scrobble_names(track.get("title"), track.get("artist"))
+    if not artist or not title:
+        return
+    album = clean_text(track.get("album"), 200)
+    lb = cfg.get("listenbrainz") or {}
+    if lb.get("token"):
+        meta = {"artist_name": artist, "track_name": title,
+                "additional_info": {"submission_client": "Omarchy Music Player", "media_player": "mpv"}}
+        if album:
+            meta["release_name"] = album
+        if duration:
+            meta["additional_info"]["duration_ms"] = int(duration * 1000)
+        try:
+            listenbrainz_call("submit-listens", lb["token"],
+                              {"listen_type": "single", "payload": [{"listened_at": started, "track_metadata": meta}]})
+        except RuntimeError as exc:
+            log_scrobble_error("listenbrainz", str(exc))
+    lf = cfg.get("lastfm") or {}
+    if lf.get("session"):
+        params = {"artist": artist, "track": title, "timestamp": started, "sk": lf["session"]}
+        if album:
+            params["album"] = album
+        if duration:
+            params["duration"] = int(duration)
+        try:
+            lastfm_call("track.scrobble", params, lf["key"], lf["secret"], post=True)
+        except RuntimeError as exc:
+            log_scrobble_error("lastfm", str(exc))
+
+
+def log_scrobble_error(where, message):
+    try:
+        os.makedirs(CACHE_DIR, mode=0o700, exist_ok=True)
+        with open(API_LOG, "a", encoding="utf-8") as fh:
+            fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {where}: {clean_text(message, 200)}\n")
+    except OSError:
+        pass
+
+
+def cmd_scrobble(args):
+    """scrobble [--remove listenbrainz|lastfm]: shows what's connected.
+    scrobble --set: connects one; the form comes as JSON on stdin:
+    {"service": "listenbrainz", "token"} or {"service": "lastfm", "key", "secret"}
+    (Last.fm then opens its sign-in in the browser and waits for it)."""
+    cfg = scrobble_config()
+    removing = opt(args, "--remove", "")
+    if removing in ("listenbrainz", "lastfm"):
+        cfg.pop(removing, None)
+        write_scrobble_config(cfg)
+    elif "--set" in args:
+        try:
+            form = json.loads(sys.stdin.readline(16 * 1024) or "{}")
+        except ValueError:
+            form = {}
+        service = form.get("service") if isinstance(form, dict) else None
+        if service == "listenbrainz":
+            token = str(form.get("token") or "").strip()
+            if not SCROBBLE_KEY_RE.match(token):
+                fail("That isn't a ListenBrainz token: copy it from listenbrainz.org/settings")
+            try:
+                check = listenbrainz_call("validate-token", token)
+            except RuntimeError as exc:
+                fail(str(exc))
+            if not check.get("valid"):
+                fail("ListenBrainz doesn't know this token: copy it again from listenbrainz.org/settings")
+            cfg["listenbrainz"] = {"token": token, "user": clean_text(check.get("user_name"), 80)}
+        elif service == "lastfm":
+            key, secret = str(form.get("key") or "").strip(), str(form.get("secret") or "").strip()
+            if not (re.match(r"^[a-f0-9]{32}$", key) and re.match(r"^[a-f0-9]{32}$", secret)):
+                fail("Paste your Last.fm API key and shared secret (32 letters and digits each)")
+            try:
+                token = lastfm_call("auth.getToken", {}, key, secret).get("token")
+                if not re.match(r"^[A-Za-z0-9]{16,64}$", str(token or "")):
+                    fail("Last.fm didn't start the sign-in")
+                emit({"type": "scrobbleWaiting", "service": "lastfm"})
+                subprocess.Popen(["xdg-open", f"https://www.last.fm/api/auth/?api_key={key}&token={token}"],
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 start_new_session=True)
+                session = None
+                for _ in range(60):
+                    time.sleep(3)
+                    try:
+                        session = lastfm_call("auth.getSession", {"token": token}, key, secret).get("session")
+                        break
+                    except RuntimeError as exc:
+                        if "unauthorized" not in str(exc).lower() and "not been authorized" not in str(exc).lower():
+                            raise
+                if not isinstance(session, dict) or not session.get("key"):
+                    fail("Last.fm's sign-in wasn't finished in time: try again")
+            except RuntimeError as exc:
+                fail(str(exc))
+            cfg["lastfm"] = {"key": key, "secret": secret, "session": str(session["key"]),
+                             "user": clean_text(session.get("name"), 80)}
+        else:
+            fail("scrobble --set needs a service")
+        write_scrobble_config(cfg)
+    emit(scrobble_status(cfg))
+
+
+# ---- Apple Music ------------------------------------------------------------------
+# Without an account: Apple Music's charts for your country (Apple's public
+# feeds), its catalog search (the iTunes Search API), and public playlists
+# and albums you add by their share link (a playlist's own page is read).
+# Apple's audio is DRM-protected, so like Spotify and Deezer the songs play
+# from their YouTube Music match (resolve_spotify). A song is "am:<id>";
+# lists are "am:top", "am:al:<id>", "am:pl:<pl.id>" and "am:search".
+
+AM_TRACKS_PATH = os.path.join(CACHE_DIR, "applemusic-tracks.json")
+AM_MATCH_PATH = os.path.join(CACHE_DIR, "applemusic-matches.json")
+AM_LISTS_PATH = os.path.join(DATA_DIR, "applemusic.json")
+AM_LINK_RE = re.compile(r"^https://(?:embed\.)?music\.apple\.com/([a-z]{2})/(playlist|album)/[^/?#\s]{0,200}/?(pl\.[A-Za-z0-9-]{8,64}|[0-9]{3,15})(?:[?#][^\s]*)?$")
+
+
+def am_country():
+    return (radio_country() or "US").lower()
+
+
+def am_art(url, size=300):
+    url = str(url or "")
+    m = re.match(r"^(https://is[0-9]-ssl\.mzstatic\.com/image/thumb/[A-Za-z0-9_./=%-]{1,400}?)/(?:\{w\}x\{h\}|[0-9]{2,4}x[0-9]{2,4})(?:[a-z]{0,4}|\{c\})\.(?:jpg|png|webp|\{f\})$", url)
+    return f"{m.group(1)}/{size}x{size}bb.jpg" if m else None
+
+
+def am_song(track_id, title, artist, duration_ms=None, art=None, album=""):
+    if not re.match(r"^[0-9]{1,15}$", str(track_id or "")):
+        return None
+    t = {"id": f"am:{track_id}", "title": clean_text(title, 200) or str(track_id), "artist": clean_text(artist, 120),
+         "duration": int(duration_ms / 1000) if isinstance(duration_ms, (int, float)) and 0 < duration_ms < 86400000 else None}
+    if album:
+        t["album"] = clean_text(album, 150)
+    cover = am_art(art)
+    if cover:
+        t["cover"] = cover
+    return t
+
+
+def remember_am_tracks(tracks):
+    known = read_json(AM_TRACKS_PATH)
+    known = known if isinstance(known, dict) else {}
+    for t in tracks:
+        known[t["id"]] = {k: t.get(k) for k in ("title", "artist", "duration", "cover") if t.get(k)}
+    if len(known) > 20000:
+        known = dict(list(known.items())[-20000:])
+    write_json_atomic(AM_TRACKS_PATH, known)
+
+
+def itunes_songs(results):
+    return [t for t in (am_song(r.get("trackId"), r.get("trackName"), r.get("artistName"), r.get("trackTimeMillis"),
+                                r.get("artworkUrl100"), r.get("collectionName"))
+                        for r in results or [] if isinstance(r, dict) and r.get("wrapperType") == "track"
+                        and r.get("kind", "song") == "song") if t]
+
+
+def apple_feed(kind, limit):
+    try:
+        data = http_json(f"https://rss.marketingtools.apple.com/api/v2/{am_country()}/music/most-played/{limit}/{kind}.json")
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("Apple Music's charts can't be reached") from exc
+    return [r for r in (data.get("feed") or {}).get("results") or [] if isinstance(r, dict) and str(r.get("id", "")).isdigit()]
+
+
+def am_top():
+    rows = apple_feed("songs", 100)
+    ids = [r["id"] for r in rows]
+    # The chart has no lengths; a lookup adds them (they help find the match).
+    looked = {}
+    for i in range(0, len(ids), 100):
+        try:
+            res = itunes("lookup", {"id": ",".join(ids[i:i + 100]), "country": am_country()}).get("results")
+        except (OSError, ValueError):
+            res = []
+        looked.update({str(t["id"][3:]): t for t in itunes_songs(res)})
+    items = [looked.get(r["id"]) or am_song(r["id"], r.get("name"), r.get("artistName"), None, r.get("artworkUrl100"))
+             for r in rows]
+    return [t for t in items if t]
+
+
+def am_album(album_id):
+    try:
+        res = itunes("lookup", {"id": album_id, "entity": "song", "country": am_country(), "limit": 200}).get("results") or []
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("Apple Music can't be reached") from exc
+    head = next((r for r in res if r.get("wrapperType") == "collection"), {})
+    title = clean_text(head.get("collectionName"), 150) or "Album"
+    return title, itunes_songs(res)
+
+
+def am_playlist_page(url):
+    """A public playlist's title and songs, from the data its page carries."""
+    try:
+        body, _ = http_get(url, 8 * 1024 * 1024, timeout=20, accept="text/html")
+    except (OSError, RuntimeError) as exc:
+        raise RuntimeError("Apple Music can't be reached") from exc
+    m = re.search(rb'<script[^>]*id="serialized-server-data"[^>]*>(.*?)</script>', body, re.S)
+    if not m:
+        raise RuntimeError("This playlist's page can't be read (is it public?)")
+    try:
+        data = json.loads(m.group(1))
+    except ValueError as exc:
+        raise RuntimeError("This playlist's page can't be read") from exc
+    songs, seen = [], set()
+
+    def walk(o, depth=0):
+        if depth > 40 or len(songs) >= MAX_TRACKS:
+            return
+        if isinstance(o, dict):
+            cd = o.get("contentDescriptor")
+            if isinstance(cd, dict) and cd.get("kind") == "song" and "title" in o:
+                sid = str((cd.get("identifiers") or {}).get("storeAdamID") or "")
+                art = (o.get("artwork") or {}).get("dictionary", {}).get("url") if isinstance(o.get("artwork"), dict) else None
+                t = am_song(sid, o.get("title"), o.get("artistName"), o.get("duration"), art)
+                if t and t["id"] not in seen:
+                    seen.add(t["id"])
+                    songs.append(t)
+                return
+            for v in o.values():
+                walk(v, depth + 1)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v, depth + 1)
+
+    walk(data)
+    title = ""
+    tm = re.search(rb"<title>(.*?)</title>", body, re.S)
+    if tm:
+        import html
+        title = clean_text(re.sub(r"[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]", "",
+                                  html.unescape(tm.group(1).decode("utf-8", "replace"))).split(" - ")[0], 150)
+    return title or "Playlist", songs
+
+
+def am_saved():
+    data = read_json(AM_LISTS_PATH)
+    items = data.get("lists") if isinstance(data, dict) else None
+    return [x for x in items or [] if isinstance(x, dict) and re.match(r"^am:(?:pl:pl\.[A-Za-z0-9-]{8,64}|al:[0-9]{3,15})$", str(x.get("id", "")))
+            and AM_LINK_RE.match(str(x.get("url", "")))]
+
+
+def fetch_am_tracks(list_id):
+    if list_id == "am:top":
+        title, items = "Top songs", am_top()
+    elif list_id.startswith("am:al:"):
+        title, items = am_album(list_id[6:])
+    elif list_id.startswith("am:pl:"):
+        saved = next((x for x in am_saved() if x["id"] == list_id), None)
+        if not saved:
+            raise RuntimeError("Add this playlist again by its link")
+        title, items = am_playlist_page(saved["url"])
+    else:
+        raise RuntimeError("unknown Apple Music list")
+    remember_am_tracks(items)
+    return {"title": title, "items": items}
+
+
+def am_lists():
+    items = [{"id": "am:top", "title": "Top songs", "count": None,
+              "subtitle": "Apple Music's chart in " + country_name(am_country().upper())}]
+    items += [{"id": x["id"], "title": clean_text(x.get("title"), 150) or "Playlist", "count": x.get("count"),
+               "subtitle": "Your playlist" if x["id"].startswith("am:pl:") else "Your album",
+               **({"cover": x["cover"]} if am_art(x.get("cover")) else {})} for x in am_saved()]
+    try:
+        for r in apple_feed("albums", 25):
+            item = {"id": f"am:al:{r['id']}", "title": clean_text(r.get("name"), 150) or "Album", "count": None,
+                    "subtitle": "Top album · " + clean_text(r.get("artistName"), 80)}
+            if am_art(r.get("artworkUrl100")):
+                item["cover"] = am_art(r.get("artworkUrl100"))
+            items.append(item)
+    except RuntimeError:
+        pass
+    return items
+
+
+def apple_music_search(query):
+    params = {"media": "music", "entity": "song", "limit": 50, "term": query, "country": am_country()}
+    try:
+        items = itunes_songs(itunes("search", params).get("results"))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("Apple Music can't be reached") from exc
+    remember_am_tracks(items)
+    write_json_atomic(tracks_cache_path("am:search", "none"), {"title": query, "items": items, "fetchedAt": int(time.time())})
+    return items
+
+
+def cmd_am_add(args):
+    """am-add <share link> | --remove <am:pl:…|am:al:…>: keep a public Apple
+    Music playlist or album in the Apple Music tab."""
+    data = {"lists": am_saved()}
+    removing = opt(args, "--remove", "")
+    if removing:
+        data["lists"] = [x for x in data["lists"] if x["id"] != removing]
+    else:
+        url = (args[0] if args else "").strip()
+        m = AM_LINK_RE.match(url)
+        if not m:
+            fail("That isn't an Apple Music playlist or album link: in Apple Music, Share → Copy Link")
+        kind, ident = m.group(2), m.group(3)
+        try:
+            if kind == "playlist":
+                list_id = "am:pl:" + ident
+                title, songs = am_playlist_page(url.split("?")[0])
+            else:
+                list_id = "am:al:" + ident
+                title, songs = am_album(ident)
+        except RuntimeError as exc:
+            fail(str(exc))
+        if not songs:
+            fail("No songs found there: is the playlist public?")
+        remember_am_tracks(songs)
+        entry = {"id": list_id, "url": url.split("?")[0], "title": title, "count": len(songs),
+                 "cover": next((t["cover"] for t in songs if t.get("cover")), "")}
+        data["lists"] = [entry] + [x for x in data["lists"] if x["id"] != list_id]
+        emit({"type": "amAdded", "id": list_id, "title": title, "count": len(songs)})
+    os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
+    write_json_atomic(AM_LISTS_PATH, data)
+    emit({"type": "playlists", "stale": False, "service": "am", "items": am_lists()})
+
+
+# ---- podcasts ---------------------------------------------------------------------
+# Apple Podcasts' public directory (search and the top shows, no account) finds
+# shows; each show is its own RSS feed, read here. Subscriptions, and where you
+# stopped in each episode, live in podcasts.json. An episode is
+# "pc:<show>/<episode>" (hashes of the feed URL and the episode's guid); lists
+# are "pc:new" (new episodes of your shows), "pc:<show>" and "pc:search". mpv
+# gets ytmusic-podcast://<show>/<episode>, which mpv/ytmusic.lua resolves here
+# to the episode's file, with where you stopped.
+
+PODCAST_SCHEME = "ytmusic-podcast://"
+PODCASTS_PATH = os.path.join(DATA_DIR, "podcasts.json")
+PODCAST_SHOWS_PATH = os.path.join(CACHE_DIR, "podcast-shows.json")
+PODCAST_DIR = os.path.join(CACHE_DIR, "podcasts")
+PODCAST_KEY_RE = re.compile(r"^pc:([a-f0-9]{16})/([a-f0-9]{16})$")
+PODCAST_FEED_RE = re.compile(r"^https?://[^\s<>\"]{4,2000}$")
+PODCAST_ART_RE = re.compile(r"^https://is[0-9]-ssl\.mzstatic\.com/image/thumb/[A-Za-z0-9_./=%-]{1,400}$")
+ITUNES_NS = "{http://www.itunes.com/dtds/podcast-1.0.dtd}"
+PODCAST_FEED_MAX = 20 * 1024 * 1024
+PODCAST_EPISODES = 300
+
+
+def podcast_hash(text):
+    return hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def podcast_state():
+    data = read_json(PODCASTS_PATH)
+    data = data if isinstance(data, dict) else {}
+    subs = [s for s in data.get("subs") or [] if isinstance(s, dict) and PODCAST_FEED_RE.match(str(s.get("feed", "")))]
+    progress = {k: v for k, v in (data.get("progress") or {}).items()
+                if PODCAST_KEY_RE.match(str(k)) and isinstance(v, (int, float)) and 0 < v < 86400}
+    done = [k for k in data.get("done") or [] if PODCAST_KEY_RE.match(str(k))]
+    return {"subs": subs, "progress": progress, "done": done}
+
+
+def write_podcast_state(state):
+    os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
+    write_json_atomic(PODCASTS_PATH, state)
+    os.chmod(PODCASTS_PATH, 0o600)
+
+
+def podcast_show(feed, title, author="", art=""):
+    return {"h": podcast_hash(feed), "feed": feed, "title": clean_text(title, 150) or "Podcast",
+            "author": clean_text(author, 120), "art": art if PODCAST_ART_RE.match(art or "") else ""}
+
+
+def known_shows():
+    data = read_json(PODCAST_SHOWS_PATH)
+    return data if isinstance(data, dict) else {}
+
+
+def remember_shows(shows):
+    known = known_shows()
+    for s in shows:
+        known[s["h"]] = s
+    if len(known) > 2000:
+        known = dict(list(known.items())[-2000:])
+    write_json_atomic(PODCAST_SHOWS_PATH, known)
+
+
+def find_show(h):
+    for s in podcast_state()["subs"]:
+        if s.get("h") == h:
+            return s
+    s = known_shows().get(h)
+    return s if isinstance(s, dict) and PODCAST_FEED_RE.match(str(s.get("feed", ""))) else None
+
+
+def podcast_cover_path(h):
+    return os.path.join(COVERS_DIR, f"pc-{h}.jpg")
+
+
+def podcast_cover(show):
+    path = podcast_cover_path(show["h"])
+    return path if os.path.isfile(path) else (show.get("art") or None)
+
+
+def save_podcast_cover(h, url):
+    """A show's artwork, made a local JPEG (feed images live on any host)."""
+    save_remote_cover(podcast_cover_path(h), url, 300)
+
+
+def save_remote_cover(path, url, size):
+    """A picture from any host, made a small local JPEG for the panel."""
+    if os.path.isfile(path) or not re.match(r"^https?://", url or ""):
+        return
+    os.makedirs(COVERS_DIR, mode=0o700, exist_ok=True)
+    try:
+        body, response = http_get(url, 8 * 1024 * 1024, timeout=10, accept="image/*")
+    except Exception:
+        return
+    if not response.headers.get_content_type().startswith("image/") or b"<svg" in body[:400].lower():
+        return
+    tmp = path + ".src"
+    try:
+        with open(tmp, "wb") as fh:
+            fh.write(body)
+        subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", tmp, "-frames:v", "1",
+                        "-vf", f"scale={size}:{size}:force_original_aspect_ratio=decrease", path],
+                       capture_output=True, timeout=20, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def podcast_list_item(show, subtitle=None):
+    return {"id": "pc:" + show["h"], "title": show["title"], "count": None,
+            "subtitle": subtitle if subtitle is not None else show.get("author", ""), "cover": podcast_cover(show)}
+
+
+def itunes(path, params):
+    return http_json("https://itunes.apple.com/" + path + "?" + urllib.parse.urlencode(params), timeout=15)
+
+
+def itunes_shows(results):
+    out = []
+    for r in results or []:
+        if isinstance(r, dict) and PODCAST_FEED_RE.match(str(r.get("feedUrl") or "")):
+            out.append(podcast_show(r["feedUrl"], r.get("collectionName"), r.get("artistName"),
+                                    str(r.get("artworkUrl600") or "")))
+    return out
+
+
+def podcast_search(query):
+    if re.match(r"^https?://", query):
+        show = podcast_feed(podcast_show(query, query), max_age=0)["show"]
+        found = [show]
+    else:
+        params = {"media": "podcast", "entity": "podcast", "limit": 40, "term": query}
+        if radio_country():
+            params["country"] = radio_country()
+        try:
+            found = itunes_shows(itunes("search", params).get("results"))
+        except (OSError, ValueError) as exc:
+            raise RuntimeError("Apple Podcasts can't be reached") from exc
+    remember_shows(found)
+    return found
+
+
+def podcast_top(max_age=86400):
+    country = (radio_country() or "us").lower()
+    path = os.path.join(PODCAST_DIR, f"top-{country}.json")
+    cached = read_json(path)
+    if isinstance(cached, dict) and time.time() - float(cached.get("fetchedAt") or 0) < max_age:
+        return [s for s in cached.get("shows") or [] if isinstance(s, dict) and s.get("h")]
+    try:
+        feed = http_json(f"https://rss.marketingtools.apple.com/api/v2/{country}/podcasts/top/30/podcasts.json")
+        ids = [str(r.get("id")) for r in feed.get("feed", {}).get("results", []) if str(r.get("id", "")).isdigit()]
+        shows = itunes_shows(itunes("lookup", {"id": ",".join(ids[:30]), "entity": "podcast"}).get("results")) if ids else []
+    except (OSError, ValueError, AttributeError):
+        return [s for s in (cached or {}).get("shows") or [] if isinstance(s, dict) and s.get("h")] if isinstance(cached, dict) else []
+    os.makedirs(PODCAST_DIR, mode=0o700, exist_ok=True)
+    write_json_atomic(path, {"fetchedAt": int(time.time()), "shows": shows})
+    remember_shows(shows)
+    return shows
+
+
+def parse_duration(text):
+    text = str(text or "").strip()
+    if re.match(r"^\d+$", text):
+        return int(text)
+    m = re.match(r"^(?:(\d+):)?(\d{1,2}):(\d{1,2})$", text)
+    if m:
+        return int(m.group(1) or 0) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
+    return None
+
+
+def parse_feed(body, show):
+    """A podcast's RSS: the show (title, author, artwork) and its episodes
+    with an audio file, newest first."""
+    import email.utils
+    import xml.etree.ElementTree as ET
+    if b"<!ENTITY" in body[:20000]:
+        raise RuntimeError("This feed can't be read")
+    try:
+        channel = ET.fromstring(body).find("channel")
+    except ET.ParseError as exc:
+        raise RuntimeError("This isn't a podcast feed") from exc
+    if channel is None:
+        raise RuntimeError("This isn't a podcast feed")
+    image = channel.find(ITUNES_NS + "image")
+    art = image.get("href", "") if image is not None else (channel.findtext("image/url") or "")
+    show = dict(show, title=clean_text(channel.findtext("title"), 150) or show["title"],
+                author=clean_text(channel.findtext(ITUNES_NS + "author"), 120) or show.get("author", ""),
+                image=art.strip())
+    episodes = []
+    for item in channel.findall("item"):
+        enc = item.find("enclosure")
+        url = (enc.get("url", "") if enc is not None else "").strip()
+        kind = (enc.get("type", "") if enc is not None else "")
+        if not PODCAST_FEED_RE.match(url) or (kind and not kind.startswith(("audio/", "video/"))):
+            continue
+        guid = (item.findtext("guid") or url).strip()
+        try:
+            date = int(email.utils.parsedate_to_datetime(item.findtext("pubDate") or "").timestamp())
+        except (TypeError, ValueError, IndexError):
+            date = 0
+        duration = parse_duration(item.findtext(ITUNES_NS + "duration"))
+        episodes.append({"e": podcast_hash(guid), "title": clean_text(item.findtext("title"), 200) or "Episode",
+                         "url": url, "date": date, "duration": duration if duration and duration < 86400 else None})
+    episodes.sort(key=lambda e: -e["date"])
+    return show, episodes[:PODCAST_EPISODES]
+
+
+def podcast_feed(show, max_age=3600):
+    path = os.path.join(PODCAST_DIR, show["h"] + ".json")
+    cached = read_json(path)
+    if isinstance(cached, dict) and time.time() - float(cached.get("fetchedAt") or 0) < max_age:
+        return cached
+    try:
+        body, _ = http_get(show["feed"], PODCAST_FEED_MAX, timeout=20,
+                           accept="application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5")
+        show, episodes = parse_feed(body, show)
+    except (OSError, RuntimeError) as exc:
+        if isinstance(cached, dict):
+            return cached
+        raise RuntimeError(str(exc) if isinstance(exc, RuntimeError) else "The podcast's feed can't be reached") from exc
+    save_podcast_cover(show["h"], show.get("art") or show.get("image"))
+    data = {"fetchedAt": int(time.time()), "show": {k: show[k] for k in ("h", "feed", "title", "author", "art")},
+            "episodes": episodes}
+    os.makedirs(PODCAST_DIR, mode=0o700, exist_ok=True)
+    write_json_atomic(path, data)
+    return data
+
+
+def episode_note(key, ep, state):
+    parts = [time.strftime("%-d %b %Y", time.localtime(ep["date"]))] if ep.get("date") else []
+    if key in state["done"]:
+        parts.append("Played")
+    elif key in state["progress"] and ep.get("duration"):
+        parts.append("%d min left" % max(1, round((ep["duration"] - state["progress"][key]) / 60)))
+    return " · ".join(parts)
+
+
+def episode_tracks(feed, state, episodes=None):
+    show = feed["show"]
+    cover = podcast_cover(show)
+    out = []
+    for ep in episodes if episodes is not None else feed.get("episodes") or []:
+        key = f"pc:{show['h']}/{ep['e']}"
+        t = {"id": key, "title": ep["title"], "artist": show["title"], "duration": ep.get("duration"),
+             "note": episode_note(key, ep, state), "date": ep.get("date", 0)}
+        if cover:
+            t["cover"] = cover
+        out.append(t)
+    return out
+
+
+def podcast_tracks(list_id):
+    state = podcast_state()
+    if list_id == "pc:new":
+        import concurrent.futures
+        def latest(show):
+            try:
+                feed = podcast_feed(show, 3 * 3600)
+            except RuntimeError:
+                return []
+            recent = [e for e in feed.get("episodes") or [] if e.get("date", 0) > time.time() - 30 * 86400]
+            return episode_tracks(feed, state, recent[:3])
+        with concurrent.futures.ThreadPoolExecutor(6) as pool:
+            items = [t for ts in pool.map(latest, state["subs"][:60]) for t in ts]
+        items.sort(key=lambda t: -t.get("date", 0))
+        return {"title": "New episodes", "items": items[:100]}
+    show = find_show(list_id[3:])
+    if not show:
+        raise RuntimeError("This podcast isn't known any more: search for it again")
+    feed = podcast_feed(show)
+    return {"title": feed["show"]["title"], "items": episode_tracks(feed, state)}
+
+
+def podcast_lists():
+    state = podcast_state()
+    items = []
+    if state["subs"]:
+        items.append({"id": "pc:new", "title": "New episodes", "count": None, "subtitle": "From your podcasts"})
+        items += [podcast_list_item(s) for s in state["subs"]]
+    subscribed = {s["h"] for s in state["subs"]}
+    items += [podcast_list_item(s, "Top podcast · " + s.get("author", "")) for s in podcast_top() if s["h"] not in subscribed]
+    return items
+
+
+def podcast_episode(key):
+    m = PODCAST_KEY_RE.match(key)
+    show = find_show(m.group(1)) if m else None
+    if not show:
+        raise RuntimeError("This episode's podcast isn't known any more")
+    for max_age in (None, 0):
+        feed = podcast_feed(show, max_age=86400 * 365 if max_age is None else 0)
+        ep = next((e for e in feed.get("episodes") or [] if e["e"] == m.group(2)), None)
+        if ep:
+            return ep
+    raise RuntimeError("This episode isn't in the podcast's feed any more")
+
+
+def podcast_stream(key):
+    """The episode's file, and where you stopped in it."""
+    ep = podcast_episode(key)
+    state = podcast_state()
+    start = 0 if key in state["done"] else state["progress"].get(key, 0)
+    return ep["url"], max(0, int(start) - 5) if start > 30 else 0
+
+
+def note_podcast_progress(key, played, duration, reason):
+    state = podcast_state()
+    finished = reason == "eof" or (duration and played >= duration - 60)
+    if finished:
+        state["progress"].pop(key, None)
+        if key not in state["done"]:
+            state["done"] = (state["done"] + [key])[-3000:]
+    elif played >= 30:
+        state["progress"][key] = int(played)
+        if len(state["progress"]) > 500:
+            state["progress"] = dict(list(state["progress"].items())[-500:])
+    else:
+        return
+    write_podcast_state(state)
+
+
+def cmd_podcast_sub(args):
+    """podcast-sub [<pc:show> [--remove 1]]: subscribe to a show (or stop);
+    without a show, lists the subscriptions."""
+    state = podcast_state()
+    if args and not args[0].startswith("--"):
+        m = re.match(r"^pc:([a-f0-9]{16})$", args[0])
+        show = find_show(m.group(1)) if m else None
+        if not show:
+            fail("This podcast isn't known any more")
+        state["subs"] = [s for s in state["subs"] if s["h"] != show["h"]]
+        if opt(args, "--remove", "0") != "1":
+            state["subs"].insert(0, {k: show.get(k, "") for k in ("h", "feed", "title", "author", "art")})
+        write_podcast_state(state)
+    emit({"type": "podcastSubs", "ids": ["pc:" + s["h"] for s in state["subs"]]})
+
+
+# ---- media servers: Navidrome / Subsonic, Jellyfin, Plex ---------------------------
+# Your own music server, in the Files tab: its recently added albums (with
+# their covers), playlists, favorites and a random mix. Signing in keeps a
+# token, never the password: Subsonic's salted token (md5 of password and
+# salt), Jellyfin's access token, Plex's token from its PIN sign-in in the
+# browser. Tokens live owner-only in servers.json.
+#
+# A song is "ms:<source>/<id>"; lists are "ms:<source>:al:<id>" (an album),
+# "ms:<source>:pl:<id>" (a playlist), "ms:<source>:fav" and "ms:<source>:rnd".
+# mpv gets ytmusic-server://<source>/<id>, resolved here to a stream URL.
+
+SERVER_KINDS = ("subsonic", "jellyfin", "plex")
+SERVER_SECRETS_PATH = os.path.join(DATA_DIR, "servers.json")
+SERVER_SCHEME = "ytmusic-server://"
+SERVER_KEY_RE = re.compile(r"^ms:([a-f0-9]{8})/([A-Za-z0-9_-]{1,64})$")
+SERVER_LIST_RE = re.compile(r"^ms:([a-f0-9]{8}):(fav|rnd|al:[A-Za-z0-9_-]{1,64}|pl:[A-Za-z0-9_-]{1,64})$")
+SERVER_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+SERVER_URL_RE = re.compile(r"^https?://[A-Za-z0-9.\[\]:_-]{1,253}(?::[0-9]{1,5})?(?:/[A-Za-z0-9._~/%-]{0,200})?$")
+SUBSONIC_CLIENT = "OmarchyMusicPlayer"
+PLEX_PRODUCT = "Omarchy Music Player"
+SERVER_ALBUMS = 60
+
+
+def server_secrets():
+    data = read_json(SERVER_SECRETS_PATH)
+    return data if isinstance(data, dict) else {}
+
+
+def save_server_secret(src_id, secret):
+    data = server_secrets()
+    if secret is None:
+        data.pop(src_id, None)
+    else:
+        data[src_id] = secret
+    os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
+    fd = os.open(SERVER_SECRETS_PATH + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        json.dump(data, fh)
+    os.replace(SERVER_SECRETS_PATH + ".tmp", SERVER_SECRETS_PATH)
+
+
+def server_request(url, headers=None, method="GET", body=None, timeout=15):
+    data = json.dumps(body).encode() if body is not None else None
+    hdrs = {"Accept": "application/json", "User-Agent": LRCLIB_UA, **(headers or {})}
+    if data is not None:
+        hdrs["Content-Type"] = "application/json"
+    request = urllib.request.Request(url, data=data, method=method, headers=hdrs)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read(16 * 1024 * 1024)
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            raise RuntimeError("the server refused the sign-in (check the user name and password)")
+        raise RuntimeError(f"the server answered {exc.code}")
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"couldn't reach the server: {getattr(exc, 'reason', exc)}")
+    try:
+        return json.loads(raw or b"{}")
+    except ValueError:
+        raise RuntimeError("the server's answer wasn't JSON (is this the right address?)")
+
+
+def server_base(raw):
+    url = str(raw or "").strip().rstrip("/")
+    if url and "://" not in url:
+        url = "http://" + url
+    if not SERVER_URL_RE.match(url):
+        raise RuntimeError("That server address doesn't look right")
+    return url
+
+
+# -- Subsonic (Navidrome, Airsonic, Gonic …)
+
+def subsonic_params(secret, **extra):
+    return urllib.parse.urlencode({"u": secret["user"], "t": secret["token"], "s": secret["salt"],
+                                   "v": "1.16.1", "c": SUBSONIC_CLIENT, "f": "json", **extra})
+
+
+def subsonic(src, secret, method, **params):
+    data = server_request(f"{src['path']}/rest/{method}?" + subsonic_params(secret, **params))
+    body = data.get("subsonic-response") if isinstance(data, dict) else None
+    if not isinstance(body, dict):
+        raise RuntimeError("that doesn't look like a Subsonic server")
+    if body.get("status") != "ok":
+        err = body.get("error") or {}
+        if err.get("code") in (40, 41, 50):
+            raise RuntimeError("the server refused the sign-in (check the user name and password)")
+        raise RuntimeError(clean_text(err.get("message") or "the server said no", 200))
+    return body
+
+
+def subsonic_song(src_id, s):
+    if not isinstance(s, dict) or not SERVER_ID_RE.match(str(s.get("id", ""))):
+        return None
+    return {"id": f"ms:{src_id}/{s['id']}", "title": clean_text(s.get("title"), 200) or str(s["id"]),
+            "artist": clean_text(s.get("artist"), 200), "album": clean_text(s.get("album"), 200),
+            "duration": int(s["duration"]) if isinstance(s.get("duration"), (int, float)) and s["duration"] > 0 else None,
+            "_art": s.get("coverArt") or s.get("albumId")}
+
+
+# -- Jellyfin
+
+def jellyfin_headers(secret=None):
+    auth = (f'MediaBrowser Client="{PLEX_PRODUCT}", Device="Omarchy", '
+            f'DeviceId="{(secret or {}).get("device") or "omarchy"}", Version="1"')
+    if secret and secret.get("token"):
+        auth += f', Token="{secret["token"]}"'
+    return {"Authorization": auth, "X-Emby-Authorization": auth}
+
+
+def jellyfin(src, secret, path, **params):
+    query = ("?" + urllib.parse.urlencode(params)) if params else ""
+    return server_request(f"{src['path']}{path}{query}", jellyfin_headers(secret))
+
+
+def jellyfin_song(src_id, it):
+    if not isinstance(it, dict) or not SERVER_ID_RE.match(str(it.get("Id", ""))):
+        return None
+    ticks = it.get("RunTimeTicks")
+    artists = it.get("Artists") if isinstance(it.get("Artists"), list) else []
+    return {"id": f"ms:{src_id}/{it['Id']}", "title": clean_text(it.get("Name"), 200) or it["Id"],
+            "artist": clean_text(", ".join(str(a) for a in artists[:3]) or it.get("AlbumArtist"), 200),
+            "album": clean_text(it.get("Album"), 200),
+            "duration": int(ticks / 10_000_000) if isinstance(ticks, (int, float)) and ticks > 0 else None,
+            "_art": it.get("AlbumId") or it["Id"]}
+
+
+# -- Plex
+
+def plex_headers(secret):
+    return {"X-Plex-Token": secret["token"], "X-Plex-Client-Identifier": secret["client"],
+            "X-Plex-Product": PLEX_PRODUCT}
+
+
+def plex(src, secret, path, **params):
+    query = ("?" + urllib.parse.urlencode(params)) if params else ""
+    data = server_request(f"{src['path']}{path}{query}", plex_headers(secret))
+    container = data.get("MediaContainer") if isinstance(data, dict) else None
+    if not isinstance(container, dict):
+        raise RuntimeError("that doesn't look like a Plex server")
+    return container
+
+
+def plex_music_sections(src, secret):
+    dirs = plex(src, secret, "/library/sections").get("Directory") or []
+    return [d["key"] for d in dirs if isinstance(d, dict) and d.get("type") == "artist" and SERVER_ID_RE.match(str(d.get("key", "")))]
+
+
+def plex_song(src_id, m):
+    if not isinstance(m, dict) or not SERVER_ID_RE.match(str(m.get("ratingKey", ""))):
+        return None
+    dur = m.get("duration")
+    return {"id": f"ms:{src_id}/{m['ratingKey']}", "title": clean_text(m.get("title"), 200) or m["ratingKey"],
+            "artist": clean_text(m.get("originalTitle") or m.get("grandparentTitle"), 200),
+            "album": clean_text(m.get("parentTitle"), 200),
+            "duration": int(dur / 1000) if isinstance(dur, (int, float)) and dur > 0 else None,
+            "_art": m.get("parentThumb") or m.get("thumb")}
+
+
+# -- signing in (from cloud-add)
+
+def add_media_server(kind, form):
+    """Sign in to a server and keep it as a source of the Files tab."""
+    fields = form.get("fields") if isinstance(form.get("fields"), dict) else {}
+    src_id = os.urandom(4).hex()
+    if kind == "plex":
+        base, secret, title = plex_sign_in()
+    else:
+        try:
+            base = server_base(fields.get("url"))
+        except RuntimeError as exc:
+            fail(str(exc))
+        user = clean_text(fields.get("user"), 200)
+        password = str(fields.get("pass") or "")
+        if not user:
+            fail("user is needed")
+        emit({"type": "cloud", "state": "checking"})
+        src = {"id": src_id, "path": base}
+        try:
+            if kind == "subsonic":
+                salt = os.urandom(8).hex()
+                secret = {"user": user, "salt": salt, "token": hashlib.md5((password + salt).encode()).hexdigest()}
+                subsonic(src, secret, "ping")
+                title = "Navidrome" if "navidrome" in base.lower() else "Subsonic"
+            else:
+                device = os.urandom(8).hex()
+                auth = server_request(f"{base}/Users/AuthenticateByName", jellyfin_headers({"device": device}),
+                                      method="POST", body={"Username": user, "Pw": password})
+                token, uid = auth.get("AccessToken"), (auth.get("User") or {}).get("Id")
+                if not isinstance(token, str) or not SERVER_ID_RE.match(str(uid or "")):
+                    raise RuntimeError("Jellyfin didn't sign us in")
+                secret = {"token": token, "user": uid, "device": device}
+                title = "Jellyfin"
+        except RuntimeError as exc:
+            fail(f"Couldn't sign in: {exc}")
+    title = clean_text(form.get("title"), 80) or title
+    sources = read_cloud()
+    sources.append({"id": src_id, "remote": "", "path": base, "kind": kind, "title": title, "created": False})
+    save_server_secret(src_id, secret)
+    write_cloud(sources)
+    emit({"type": "cloud", "state": "added", "id": src_id, "title": title})
+
+
+def plex_sign_in():
+    """Plex's PIN sign-in: the browser opens plex.tv, the user allows it,
+    and Plex hands over a token; then the first server with music."""
+    client = os.urandom(12).hex()
+    head = {"X-Plex-Client-Identifier": client, "X-Plex-Product": PLEX_PRODUCT}
+    try:
+        pin = server_request("https://plex.tv/api/v2/pins?strong=true", head, method="POST", body={})
+    except RuntimeError as exc:
+        fail(f"Couldn't reach plex.tv: {exc}")
+    if not isinstance(pin.get("id"), int) or not isinstance(pin.get("code"), str):
+        fail("Plex didn't start the sign-in")
+    url = "https://app.plex.tv/auth#?" + urllib.parse.urlencode(
+        {"clientID": client, "code": pin["code"], "context[device][product]": PLEX_PRODUCT})
+    emit({"type": "cloud", "state": "waiting", "kind": "plex"})
+    opener = shutil_which("xdg-open")
+    if opener:
+        subprocess.Popen([opener, url], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    token = None
+    for _ in range(150):                       # five minutes
+        time.sleep(2)
+        try:
+            state = server_request(f"https://plex.tv/api/v2/pins/{pin['id']}", head)
+        except RuntimeError:
+            continue
+        if isinstance(state.get("authToken"), str) and state["authToken"]:
+            token = state["authToken"]
+            break
+    if not token:
+        fail("The Plex sign-in didn't finish")
+    emit({"type": "cloud", "state": "checking"})
+    secret = {"token": token, "client": client}
+    try:
+        resources = server_request("https://plex.tv/api/v2/resources?includeHttps=1", plex_headers(secret))
+    except RuntimeError as exc:
+        fail(f"Couldn't list your Plex servers: {exc}")
+    for res in resources if isinstance(resources, list) else []:
+        if not isinstance(res, dict) or "server" not in str(res.get("provides", "")):
+            continue
+        secret = {"token": res.get("accessToken") or token, "client": client}
+        conns = sorted((c for c in res.get("connections") or [] if isinstance(c, dict)),
+                       key=lambda c: (not c.get("local"), c.get("relay") is True))
+        for c in conns:
+            try:
+                base = server_base(c.get("uri"))
+                if plex_music_sections({"path": base}, secret):
+                    return base, secret, clean_text(res.get("name"), 60) or "Plex"
+            except RuntimeError:
+                continue
+    fail("No Plex server with a music library answered")
+
+
+# -- lists, songs, streams
+
+def server_secret(src):
+    secret = server_secrets().get(src["id"])
+    if not isinstance(secret, dict):
+        raise RuntimeError("Sign in to this server again (remove it and add it)")
+    return secret
+
+
+def server_cover_path(src_id, art):
+    return os.path.join(COVERS_DIR, f"ms-{src_id}-{hashlib.sha1(str(art).encode()).hexdigest()[:16]}.jpg")
+
+
+def server_cover_url(src, secret, art):
+    if src["kind"] == "subsonic":
+        return f"{src['path']}/rest/getCoverArt?" + subsonic_params(secret, id=art, size=300)
+    if src["kind"] == "jellyfin":
+        return f"{src['path']}/Items/{urllib.parse.quote(str(art))}/Images/Primary?maxWidth=300&quality=85"
+    return (f"{src['path']}/photo/:/transcode?" + urllib.parse.urlencode(
+        {"width": 300, "height": 300, "minSize": 1, "url": art, "X-Plex-Token": secret["token"]}))
+
+
+def fetch_server_covers(src, secret, arts):
+    """The covers, made local files (the panel shows only local ones)."""
+    import concurrent.futures
+    os.makedirs(COVERS_DIR, mode=0o700, exist_ok=True)
+    headers = jellyfin_headers(secret) if src["kind"] == "jellyfin" else {}
+    def one(art):
+        path = server_cover_path(src["id"], art)
+        if os.path.isfile(path):
+            return
+        try:
+            request = urllib.request.Request(server_cover_url(src, secret, art), headers={"User-Agent": LRCLIB_UA, **headers})
+            with urllib.request.urlopen(request, timeout=10) as response:
+                body = response.read(4 * 1024 * 1024)
+                kind = response.headers.get_content_type()
+        except (OSError, ValueError):
+            return
+        if not kind.startswith("image/"):
+            return
+        if kind == "image/jpeg":
+            with open(path, "wb") as fh:
+                fh.write(body)
+            return
+        tmp = path + ".src"
+        with open(tmp, "wb") as fh:
+            fh.write(body)
+        try:
+            subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", tmp, "-frames:v", "1", path],
+                           capture_output=True, timeout=20, stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+        list(pool.map(one, [a for a in dict.fromkeys(arts) if a][:120]))
+
+
+def with_server_covers(src_id, items):
+    out = []
+    for it in items:
+        it = dict(it)
+        art = it.pop("_art", None)
+        if art and os.path.isfile(server_cover_path(src_id, art)):
+            it["cover"] = server_cover_path(src_id, art)
+        out.append(it)
+    return out
+
+
+def fetch_server_index(src):
+    """A server's lists: favorites, a random mix, playlists, newest albums."""
+    secret = server_secret(src)
+    sid, kind = src["id"], src["kind"]
+    lists = [{"id": f"ms:{sid}:fav", "title": f"{src['title']} · Favorites", "count": None, "subtitle": "Songs you starred"},
+             {"id": f"ms:{sid}:rnd", "title": f"{src['title']} · Random mix", "count": None, "subtitle": "New every time"}]
+    albums, playlists = [], []
+    if kind == "subsonic":
+        for p in (subsonic(src, secret, "getPlaylists").get("playlists") or {}).get("playlist") or []:
+            if SERVER_ID_RE.match(str(p.get("id", ""))):
+                playlists.append({"id": f"ms:{sid}:pl:{p['id']}", "title": clean_text(p.get("name"), 120), "count": p.get("songCount"),
+                                  "subtitle": "Playlist", "_art": p.get("coverArt")})
+        for a in (subsonic(src, secret, "getAlbumList2", type="newest", size=SERVER_ALBUMS).get("albumList2") or {}).get("album") or []:
+            if SERVER_ID_RE.match(str(a.get("id", ""))):
+                albums.append({"id": f"ms:{sid}:al:{a['id']}", "title": clean_text(a.get("name"), 120), "count": a.get("songCount"),
+                               "subtitle": clean_text(a.get("artist"), 120), "_art": a.get("coverArt") or a["id"]})
+    elif kind == "jellyfin":
+        uid = secret["user"]
+        for p in jellyfin(src, secret, f"/Users/{uid}/Items", IncludeItemTypes="Playlist", Recursive="true",
+                          Fields="ChildCount").get("Items") or []:
+            if SERVER_ID_RE.match(str(p.get("Id", ""))) and p.get("MediaType") in (None, "Audio"):
+                playlists.append({"id": f"ms:{sid}:pl:{p['Id']}", "title": clean_text(p.get("Name"), 120), "count": p.get("ChildCount"),
+                                  "subtitle": "Playlist", "_art": p["Id"]})
+        for a in jellyfin(src, secret, f"/Users/{uid}/Items", IncludeItemTypes="MusicAlbum", Recursive="true",
+                          SortBy="DateCreated", SortOrder="Descending", Limit=SERVER_ALBUMS, Fields="ChildCount").get("Items") or []:
+            if SERVER_ID_RE.match(str(a.get("Id", ""))):
+                albums.append({"id": f"ms:{sid}:al:{a['Id']}", "title": clean_text(a.get("Name"), 120), "count": a.get("ChildCount"),
+                               "subtitle": clean_text(a.get("AlbumArtist"), 120), "_art": a["Id"]})
+    else:
+        for p in plex(src, secret, "/playlists", playlistType="audio").get("Metadata") or []:
+            if SERVER_ID_RE.match(str(p.get("ratingKey", ""))):
+                playlists.append({"id": f"ms:{sid}:pl:{p['ratingKey']}", "title": clean_text(p.get("title"), 120),
+                                  "count": p.get("leafCount"), "subtitle": "Playlist", "_art": p.get("composite") or p.get("thumb")})
+        for section in plex_music_sections(src, secret)[:3]:
+            for a in plex(src, secret, f"/library/sections/{section}/all", type=9, sort="addedAt:desc",
+                          **{"X-Plex-Container-Start": 0, "X-Plex-Container-Size": SERVER_ALBUMS}).get("Metadata") or []:
+                if SERVER_ID_RE.match(str(a.get("ratingKey", ""))):
+                    albums.append({"id": f"ms:{sid}:al:{a['ratingKey']}", "title": clean_text(a.get("title"), 120),
+                                   "count": a.get("leafCount"), "subtitle": clean_text(a.get("parentTitle"), 120), "_art": a.get("thumb")})
+        lists = lists[1:]                       # Plex has no starred songs
+    fetch_server_covers(src, secret, [i.get("_art") for i in playlists + albums])
+    return {"lists": lists + with_server_covers(sid, playlists) + with_server_covers(sid, albums[:SERVER_ALBUMS])}
+
+
+def server_lists(src, index):
+    return [dict(l) for l in index.get("lists") or [] if isinstance(l, dict)]
+
+
+def fetch_server_tracks(list_id):
+    m = SERVER_LIST_RE.match(list_id)
+    src = cloud_source(m.group(1)) if m else None
+    if not src or src["kind"] not in SERVER_KINDS:
+        raise RuntimeError("That server isn't connected any more")
+    secret = server_secret(src)
+    sid, what = src["id"], m.group(2)
+    songs = []
+    if src["kind"] == "subsonic":
+        if what == "fav":
+            raw = (subsonic(src, secret, "getStarred2").get("starred2") or {}).get("song") or []
+        elif what == "rnd":
+            raw = (subsonic(src, secret, "getRandomSongs", size=100).get("randomSongs") or {}).get("song") or []
+        elif what.startswith("al:"):
+            raw = (subsonic(src, secret, "getAlbum", id=what[3:]).get("album") or {}).get("song") or []
+        else:
+            raw = (subsonic(src, secret, "getPlaylist", id=what[3:]).get("playlist") or {}).get("entry") or []
+        songs = [subsonic_song(sid, s) for s in raw]
+    elif src["kind"] == "jellyfin":
+        uid = secret["user"]
+        common = {"IncludeItemTypes": "Audio", "Recursive": "true", "Limit": 500}
+        if what == "fav":
+            raw = jellyfin(src, secret, f"/Users/{uid}/Items", Filters="IsFavorite", **common).get("Items") or []
+        elif what == "rnd":
+            raw = jellyfin(src, secret, f"/Users/{uid}/Items", SortBy="Random", **dict(common, Limit=100)).get("Items") or []
+        elif what.startswith("al:"):
+            raw = jellyfin(src, secret, f"/Users/{uid}/Items", ParentId=what[3:], SortBy="ParentIndexNumber,IndexNumber",
+                           **common).get("Items") or []
+        else:
+            raw = jellyfin(src, secret, f"/Playlists/{what[3:]}/Items", UserId=uid).get("Items") or []
+        songs = [jellyfin_song(sid, s) for s in raw]
+    else:
+        if what == "rnd":
+            raw = []
+            for section in plex_music_sections(src, secret)[:1]:
+                raw = plex(src, secret, f"/library/sections/{section}/all", type=10, sort="random",
+                           **{"X-Plex-Container-Start": 0, "X-Plex-Container-Size": 100}).get("Metadata") or []
+        elif what.startswith("al:"):
+            raw = plex(src, secret, f"/library/metadata/{what[3:]}/children").get("Metadata") or []
+        elif what.startswith("pl:"):
+            raw = plex(src, secret, f"/playlists/{what[3:]}/items").get("Metadata") or []
+        else:
+            raw = []
+        songs = [plex_song(sid, s) for s in raw]
+    songs = [s for s in songs if s][:MAX_TRACKS]
+    fetch_server_covers(src, secret, [s.get("_art") for s in songs])
+    return {"title": "", "items": with_server_covers(sid, songs)}
+
+
+def server_stream_url(key):
+    m = SERVER_KEY_RE.match(key or "")
+    src = cloud_source(m.group(1)) if m else None
+    if not src or src["kind"] not in SERVER_KINDS:
+        raise RuntimeError("That server isn't connected any more")
+    secret, item = server_secret(src), m.group(2)
+    if src["kind"] == "subsonic":
+        return f"{src['path']}/rest/stream?" + subsonic_params(secret, id=item)
+    if src["kind"] == "jellyfin":
+        return f"{src['path']}/Audio/{item}/stream?" + urllib.parse.urlencode({"static": "true", "api_key": secret["token"]})
+    meta = (plex(src, secret, f"/library/metadata/{item}").get("Metadata") or [{}])[0]
+    part = (((meta.get("Media") or [{}])[0].get("Part")) or [{}])[0].get("key")
+    if not isinstance(part, str) or not part.startswith("/library/parts/"):
+        raise RuntimeError("Plex didn't say where the song's file is")
+    return f"{src['path']}{part}?" + urllib.parse.urlencode({"X-Plex-Token": secret["token"]})
+
+
+def download_server_audio(key, name):
+    """A server song into the audio cache (peak mix, downloads)."""
+    url = server_stream_url(key)
+    os.makedirs(MIX_DIR, mode=0o700, exist_ok=True)
+    tmp = os.path.join(MIX_DIR, f".audio-{name}.part")
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": LRCLIB_UA}), timeout=30) as response:
+            kind = response.headers.get_content_type()
+            ext = {"audio/mpeg": "mp3", "audio/flac": "flac", "audio/x-flac": "flac", "audio/ogg": "ogg", "audio/opus": "opus",
+                   "audio/mp4": "m4a", "audio/aac": "m4a", "audio/x-m4a": "m4a", "audio/wav": "wav", "audio/x-wav": "wav",
+                   "audio/webm": "webm"}.get(kind, "audio")
+            total = 0
+            with open(tmp, "wb") as fh:
+                while True:
+                    chunk = response.read(1 << 16)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > 200 * 1024 * 1024:
+                        raise RuntimeError("the file is too big")
+                    fh.write(chunk)
+    except (OSError, ValueError) as exc:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise RuntimeError(f"couldn't fetch the song from the server: {exc}")
+    if ext == "audio":
+        ext = "mka"
+    target = os.path.join(MIX_DIR, f"audio-{name}.{ext}")
+    os.replace(tmp, target)
+    meta = {"audio": os.path.basename(target), "heatmap": [], "usedAt": int(time.time())}
+    write_json_atomic(os.path.join(MIX_DIR, f"{name}.json"), meta)
+    return meta
+
+
+# ---- listening history and the AI Mix -----------------------------------------------
+# The player notes each song that played (mpv/ytmusic.lua → history-add):
+# how long of how long, and whether it ran to its end or was skipped. The
+# history stays on this machine (history.jsonl). From it, and the likes in
+# every service, `taste` sums up what you listen to; `ai-mix` (only when
+# turned on) gives that summary to the AI agent Omarchy uses (Claude, Codex
+# or OpenCode, from `omarchy default agent`) and asks it for songs you may
+# like. Each one is looked up on YouTube Music; songs it can't find (an AI
+# can invent some) are dropped. The mix is the list "ai:mix".
+
+HISTORY_PATH = os.path.join(DATA_DIR, "history.jsonl")
+HISTORY_MAX = 5000
+AI_MIX_PATH = os.path.join(DATA_DIR, "ai-mix.json")
+AI_SONGS = 30
+AGENT_FILE = os.path.join(HOME, ".config", "omarchy", "defaults", "agent")
+
+
+def session_track(key):
+    data = read_json(SESSION_PATH)
+    for t in (data.get("tracks") if isinstance(data, dict) else None) or []:
+        if isinstance(t, dict) and t.get("id") == key:
+            return t
+    return None
+
+
+def cmd_history_add(args):
+    """history-add <mpv entry> --played S --duration S --reason R"""
+    name = args[0] if args else ""
+    key = None
+    if os.path.isabs(name):
+        key = next((t["id"] for t in downloaded_tracks() if t.get("path") == name), None)
+    if not key:
+        key, _ = mix_entry(name)
+    if not key or not TRACK_KEY_RE.match(key) or key.startswith("rd:"):
+        return
+    try:
+        played = max(0, min(86400, int(float(opt(args, "--played", "0")))))
+        duration = max(0, min(86400, int(float(opt(args, "--duration", "0")))))
+    except ValueError:
+        return
+    reason = opt(args, "--reason", "")
+    if key.startswith("pc:"):
+        # Episodes keep where you stopped; they aren't music taste.
+        note_podcast_progress(key, played, duration, reason)
+        return
+    track = session_track(key) or next((t for t in downloaded_tracks() if t["id"] == key), {})
+    finished = reason == "eof" and (duration == 0 or played >= duration * 0.8)
+    # Skipped: moved on to another song early ("stop"). Starting another
+    # playlist ("quit") says nothing about the song.
+    skipped = reason == "stop" and played < min(30, max(10, duration * 0.4))
+    entry = {"t": int(time.time()), "id": key, "title": clean_text(track.get("title"), 200),
+             "artist": clean_text(track.get("artist"), 200), "played": played, "duration": duration,
+             "finished": finished, "skipped": skipped}
+    if valid_cover(track.get("cover")):
+        entry["cover"] = valid_cover(track.get("cover"))
+    os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
+    with open(HISTORY_PATH, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    try:
+        if os.path.getsize(HISTORY_PATH) > HISTORY_MAX * 400:
+            lines = open(HISTORY_PATH, encoding="utf-8").read().splitlines()[-HISTORY_MAX:]
+            write_lines = "\n".join(lines) + "\n"
+            with open(HISTORY_PATH + ".tmp", "w", encoding="utf-8") as fh:
+                fh.write(write_lines)
+            os.replace(HISTORY_PATH + ".tmp", HISTORY_PATH)
+    except OSError:
+        pass
+    scrobble(dict(track, title=entry["title"], artist=entry["artist"]), played, duration, int(time.time()) - played)
+
+
+def read_history(limit=HISTORY_MAX):
+    try:
+        lines = open(HISTORY_PATH, encoding="utf-8").read().splitlines()[-limit:]
+    except OSError:
+        return []
+    out = []
+    for line in lines:
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(e, dict) and TRACK_KEY_RE.match(str(e.get("id", ""))):
+            out.append(e)
+    return out
+
+
+def recent_tracks(limit=100):
+    """Songs played lately, newest first, each once."""
+    seen, out = set(), []
+    for e in reversed(read_history()):
+        if e["id"] in seen or e.get("skipped"):
+            continue
+        seen.add(e["id"])
+        t = {"id": e["id"], "title": e.get("title") or e["id"], "artist": e.get("artist") or "", "duration": e.get("duration") or None}
+        cover = valid_cover(e.get("cover")) or known_cover(e["id"])
+        if cover:
+            t["cover"] = cover
+        out.append(t)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def artist_of_track(t):
+    """The artist, or for a YouTube upload titled "Artist - Song" that part."""
+    artist = clean_text(t.get("artist"), 120)
+    title = clean_text(t.get("title"), 200)
+    m = re.match(r"^(.{2,60}?)\s+[-–]\s+.+", title)
+    if m and (not artist or artist.lower() in ("various artists", "release - topic")):
+        return m.group(1).strip()
+    return artist
+
+
+def taste_profile(browser="none"):
+    """What you listen to, summed up small enough to hand to an AI."""
+    history = read_history()
+    score, songs, skipped_artists = {}, {}, {}
+    for e in history:
+        a = artist_of_track(e)
+        w = 2.0 if e.get("finished") else (-1.5 if e.get("skipped") else 0.5)
+        if a:
+            score[a] = score.get(a, 0) + w
+            if e.get("skipped"):
+                skipped_artists[a] = skipped_artists.get(a, 0) + 1
+        label = f"{a} - {e.get('title')}" if a and a.lower() not in str(e.get("title", "")).lower() else str(e.get("title"))
+        if label.strip():
+            songs[label] = songs.get(label, 0) + w
+    likes = []
+    for list_id in liked_list_ids():
+        cached = read_json(tracks_cache_path(list_id, browser))
+        for t in (cached.get("items") if isinstance(cached, dict) else None) or []:
+            if isinstance(t, dict) and t.get("title"):
+                likes.append(t)
+                a = artist_of_track(t)
+                if a:
+                    score[a] = score.get(a, 0) + 1.5
+    top_artists = [a for a, s in sorted(score.items(), key=lambda kv: -kv[1]) if s > 0][:40]
+    loved = [s for s, v in sorted(songs.items(), key=lambda kv: -kv[1]) if v > 0][:40]
+    liked = [f"{artist_of_track(t)} - {t['title']}".strip(" -") for t in likes[:60]]
+    disliked = [a for a, n in sorted(skipped_artists.items(), key=lambda kv: -kv[1]) if n >= 2 and score.get(a, 0) <= 0][:15]
+    return {"topArtists": top_artists, "mostPlayed": loved, "liked": liked, "oftenSkipped": disliked,
+            "plays": len(history), "likes": len(likes)}
+
+
+def agent_command():
+    """How to ask Omarchy's AI agent one question without tools, and its name."""
+    try:
+        chosen = open(AGENT_FILE, encoding="utf-8").readline().strip()
+    except OSError:
+        chosen = ""
+    order = [chosen] + ["claude", "codex", "opencode"]
+    for name in order:
+        if name == "claude" and shutil_which("claude"):
+            return ["claude", "-p", "--tools", "", "--no-session-persistence", "--strict-mcp-config",
+                    "--setting-sources", ""], "Claude", True
+        if name == "codex" and shutil_which("codex"):
+            return ["codex", "exec", "--skip-git-repo-check", "-"], "Codex", True
+        if name == "opencode" and shutil_which("opencode"):
+            return ["opencode", "run"], "OpenCode", False
+    return None, "", False
+
+
+AI_PROMPT = """You are a music curator making one personal playlist.
+Here is what this listener plays (from their own player; "liked" are songs they liked, "oftenSkipped" artists they tend to skip):
+
+{profile}
+
+{wish}
+
+Pick {count} real, existing songs (exact artist and title as released) this listener will probably love:
+- about a third close to what they play most (other songs by those artists, or very near),
+- the rest new discoveries in the same spirit that they have most likely not heard,
+- no song from the lists above, no artist from oftenSkipped, at most two songs per artist.
+Give a short title for the playlist (2-5 words) and, for each song, one short reason (under 12 words) tied to their taste.
+Answer with JSON only, nothing else:
+{{"title": "...", "about": "one sentence", "songs": [{{"artist": "...", "title": "...", "why": "..."}}]}}"""
+
+
+def ask_agent(prompt):
+    cmd, name, stdin_ok = agent_command()
+    if not cmd:
+        raise RuntimeError("No AI agent is set up (omarchy default agent claude, codex or opencode)")
+    workdir = tempfile.mkdtemp(prefix="ai-mix-")
+    try:
+        proc = subprocess.run(cmd if stdin_ok else cmd + [prompt], input=prompt if stdin_ok else None,
+                              stdin=None if stdin_ok else subprocess.DEVNULL, capture_output=True, text=True,
+                              timeout=240, cwd=workdir)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"{name} took too long to answer")
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+    text = proc.stdout or ""
+    start, end = text.find("{"), text.rfind("}")
+    if proc.returncode != 0 or start < 0 or end <= start:
+        raise RuntimeError(f"{name} didn't answer with a playlist: {(proc.stderr or text).strip()[-200:]}")
+    try:
+        data = json.loads(text[start:end + 1])
+    except ValueError:
+        raise RuntimeError(f"{name}'s answer wasn't readable")
+    if not isinstance(data, dict) or not isinstance(data.get("songs"), list):
+        raise RuntimeError(f"{name}'s answer had no songs")
+    return data, name
+
+
+def find_on_youtube(song):
+    """The YouTube Music song for an AI's pick, or None if there is none."""
+    want = {"title": clean_text(song.get("title"), 200), "artist": clean_text(song.get("artist"), 200)}
+    if not want["title"]:
+        return None
+    try:
+        data = music_public("search", {"query": f"{want['artist']} {want['title']}".strip(), "params": SONGS_FILTER})
+    except RuntimeError:
+        return None
+    best, best_score = None, 3.0
+    for r in find_renderers(data, "musicResponsiveListItemRenderer", [])[:8]:
+        cand = explore_item({"musicResponsiveListItemRenderer": r})
+        if cand and cand.get("kind") == "song":
+            score = match_score(want, cand)
+            if score > best_score:
+                best, best_score = cand, score
+    return best
+
+
+def cmd_ai_mix(args):
+    """ai-mix [--prompt TEXT] [--browser B]: a new AI Mix."""
+    browser = check_browser(opt(args, "--browser", "none"))
+    wish = clean_text(opt(args, "--prompt", ""), 300)
+    # --if-older S (the daily remake): nothing to do while the mix is newer.
+    if_older = opt(args, "--if-older", "")
+    if if_older.isdigit():
+        mix = read_json(AI_MIX_PATH)
+        if isinstance(mix, dict) and time.time() - float(mix.get("createdAt") or 0) < int(if_older):
+            emit({"type": "aiMix", "state": "fresh"})
+            return
+    profile = taste_profile(browser)
+    if profile["plays"] + profile["likes"] < 5:
+        fail("Listen to a few more songs first (or like some): the AI needs something to go on")
+    emit({"type": "aiMix", "state": "asking"})
+    known = set(s.lower() for s in profile["mostPlayed"] + profile["liked"])
+    prompt = AI_PROMPT.format(profile=json.dumps({k: v for k, v in profile.items() if k not in ("plays", "likes")},
+                                                 ensure_ascii=False, indent=1),
+                              wish=f"They asked for: {wish}" if wish else "Make it a mix for everyday listening.",
+                              count=AI_SONGS)
+    try:
+        answer, agent = ask_agent(prompt)
+    except RuntimeError as exc:
+        fail(str(exc))
+    emit({"type": "aiMix", "state": "finding", "agent": agent})
+    picks = [s for s in answer["songs"] if isinstance(s, dict)][:AI_SONGS + 10]
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+        found = list(pool.map(find_on_youtube, picks))
+    items, seen = [], set()
+    for pick, hit in zip(picks, found):
+        if not hit or hit["id"] in seen or f"{hit.get('artist')} - {hit.get('title')}".lower() in known:
+            continue
+        seen.add(hit["id"])
+        items.append({"id": hit["id"], "title": hit["title"], "artist": hit.get("artist") or clean_text(pick.get("artist"), 120),
+                      "duration": hit.get("duration"), "note": clean_text(pick.get("why"), 160)})
+    if len(items) < 5:
+        fail("The AI's picks couldn't be found on YouTube Music; try again")
+    mix = {"title": clean_text(answer.get("title"), 60) or "AI Mix", "about": clean_text(answer.get("about"), 200),
+           "prompt": wish, "agent": agent, "createdAt": int(time.time()), "items": items[:AI_SONGS]}
+    os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
+    write_json_atomic(AI_MIX_PATH, mix)
+    emit({"type": "aiMix", "state": "done", "title": mix["title"], "count": len(mix["items"]), "agent": agent})
+
+
+def ai_mix_tracks():
+    mix = read_json(AI_MIX_PATH)
+    if not isinstance(mix, dict):
+        return {"title": "AI Mix", "items": []}
+    return {"title": clean_text(mix.get("title"), 60) or "AI Mix", "items": playable(mix.get("items"))}
+
+
+def cmd_taste(_args):
+    """taste: what the AI Mix would send, to show it before turning it on."""
+    emit({"type": "taste", **taste_profile()})
+
+
 # ---- problem reports ------------------------------------------------------------
 # One click in the panel: everything about the error is gathered here and
 # opened as a filled-in GitHub issue in the browser, so the user only presses
@@ -3790,6 +6264,9 @@ REPORT_MAX_URL = 7500
 
 def redact(text):
     text = str(text or "")
+    # A media server's sign-in in a stream URL (Subsonic's u/t/s, Jellyfin's
+    # api_key, Plex's token).
+    text = re.sub(r"([?&](?:u|t|s|p|api_key|X-Plex-Token)=)[^&\s\"']+", r"\1<hidden>", text)
     # The local cloud server's credentials and which file it served.
     text = re.sub(r"https?://[^/\s:@]+:[^/\s@]+@127\.0\.0\.1:[0-9]+/[^\s\"']*", "http://<cloud>/<file>", text)
     text = re.sub(r"ytmusic-cloud://[a-f0-9/]+", "ytmusic-cloud://<song>", text)
@@ -4016,6 +6493,15 @@ def main():
         "mixes": cmd_mixes,
         "resolve": cmd_resolve,
         "lyrics": cmd_lyrics,
+        "radio-fav": cmd_radio_fav,
+        "history-add": cmd_history_add,
+        "taste": cmd_taste,
+        "ai-mix": cmd_ai_mix,
+        "radio-countries": cmd_radio_countries,
+        "radio-favs": cmd_radio_favs,
+        "podcast-sub": cmd_podcast_sub,
+        "scrobble": cmd_scrobble,
+        "am-add": cmd_am_add,
         "chords": cmd_chords,
         "scores": cmd_scores,
         "open-score": cmd_open_score,

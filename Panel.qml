@@ -33,6 +33,12 @@ Panel {
   readonly property real fadeOut: Model.seconds(setting("fadeOut", 0), 0, 30, 0)
   readonly property string transitionMode: setting("transition", "Off") === "Peak mix" ? "peak" : "off"
   readonly property real crossfade: Model.seconds(setting("crossfade", 6), 2, 16, 6)
+  // Pausing fades the song away over this long (milliseconds in settings).
+  readonly property real pauseFade: Model.seconds(Number(setting("pauseFade", 600)) / 1000, 0, 3, 0.6)
+  onPauseFadeChanged: sendPlayerSetting("pause_fade", pauseFade)
+  // The running player's script knows `ytmusic-toggle-pause` (one started by
+  // an older version doesn't: it pauses at once).
+  property bool pauseFadeSupported: false
   onFadeInChanged: sendPlayerSetting("fade_in", fadeIn)
   onFadeOutChanged: sendPlayerSetting("fade_out", fadeOut)
   onTransitionModeChanged: sendPlayerSetting("transition", transitionMode)
@@ -63,8 +69,12 @@ Panel {
   readonly property var libraryRows: service === "yt" ? [exploreEntry].concat(playlists)
     : service === "sc" ? (svc.sc.setup ? [] : [scSearchEntry].concat(svc.sc.items))
     : service === "cl" ? (svc.cl.setup || cloudFormOpen ? [] : svc.cl.items.concat([cloudAddEntry]))
+    : service === "rd" ? [radioCountryEntry].concat(svc.rd.items)
+    : service === "am" ? svc.am.items.concat([amAddEntry])
+    : service === "my" ? (svc.my.setup ? [] : [aiEntry].concat(svc.my.items))
     : svc[service].setup ? [] : svc[service].items
-  readonly property var rows: view === "settings" || view === "download" ? []
+  readonly property var rows: view === "settings" || view === "download" || view === "services" || view === "ai" ? []
+    : view === "countries" ? countryRows
     : view === "explore" ? exploreRowsData
     : view === "playlists" ? libraryRows
     : view === "tracks" ? tracks
@@ -112,21 +122,52 @@ Panel {
   property string service: "yt"
   readonly property var serviceTabs: [
     { id: "yt", glyph: Model.GLYPH.youtube, color: "#FF0033", label: strings.t("tab.yt") },
+    { id: "am", glyph: Model.GLYPH.apple, color: "#FA2D48", label: strings.t("tab.am") },
     { id: "sp", glyph: Model.GLYPH.spotify, color: "#1ED760", label: strings.t("tab.sp") },
+    { id: "dz", glyph: Model.GLYPH.deezer, color: "#A238FF", label: strings.t("tab.dz") },
     { id: "sc", glyph: Model.GLYPH.soundcloud, color: "#FF5500", label: strings.t("tab.sc") },
+    { id: "mc", glyph: Model.GLYPH.mixcloud, color: "#5B6CFF", label: strings.t("tab.mc") },
+    { id: "au", glyph: Model.GLYPH.audius, color: "#CC0FE0", label: strings.t("tab.au") },
     { id: "cl", glyph: Model.GLYPH.cloud, color: "#4FA3FF", label: strings.t("tab.cl") },
+    { id: "rd", glyph: Model.GLYPH.radioService, color: "#B388FF", label: strings.t("tab.rd") },
+    { id: "pc", glyph: Model.GLYPH.podcast, color: "#D56DFB", label: strings.t("tab.pc") },
     { id: "my", glyph: Model.GLYPH.supermix, color: Commons.Color.accent, label: strings.t("tab.my") }
   ]
   // Per service: { items, loading, error, setup } ("setup": needs connecting).
   property var svc: ({ sp: { items: [], loading: false, error: "", setup: "" },
+                       dz: { items: [], loading: false, error: "", setup: "" },
+                       am: { items: [], loading: false, error: "", setup: "" },
+                       mc: { items: [], loading: false, error: "", setup: "" },
+                       au: { items: [], loading: false, error: "", setup: "" },
                        sc: { items: [], loading: false, error: "", setup: "" },
                        cl: { items: [], loading: false, error: "", setup: "" },
+                       rd: { items: [], loading: false, error: "", setup: "" },
+                       pc: { items: [], loading: false, error: "", setup: "" },
                        my: { items: [], loading: false, error: "", setup: "" } })
   readonly property string spClientId: String(setting("spotifyClientId", "") || "")
   readonly property string scUserSetting: String(setting("soundcloudUser", "") || "")
+  readonly property string dzUserSetting: String(setting("deezerUser", "") || "")
   property bool spotifyWaiting: false
   readonly property var scSearchEntry: ({ kind: "explore", id: "__scsearch", title: strings.t("sc.searchEntry"),
     artist: strings.t("sc.searchHint") })
+
+  // The tabs the user keeps (setting "tabs"; the "+" tab picks them).
+  readonly property var shownTabs: {
+    var ids = Model.visibleTabs(setting("tabs", Model.DEFAULT_TABS))
+    return serviceTabs.filter(function(t) { return ids.indexOf(t.id) >= 0 })
+  }
+  function setTabShown(id, on) {
+    var ids = Model.visibleTabs(setting("tabs", Model.DEFAULT_TABS)).filter(function(x) { return x !== id })
+    if (on) ids.push(id)
+    saveSettings({ tabs: Model.SERVICES.filter(function(x) { return ids.indexOf(x) >= 0 }).join(",") })
+    if (!on && service === id) switchService("yt")
+  }
+  function openServices() {
+    if (view !== "services") viewBeforeSettings = view === "addTo" ? "playlists" : view
+    view = "services"
+    cursorIndex = -1
+    if (!opened) open()
+  }
 
   function setSvc(name, changes) {
     var next = Object.assign({}, svc)
@@ -140,6 +181,7 @@ Panel {
     view = "playlists"
     cursorIndex = -1
     if (name === "cl") loadCloud()
+    if (name === "rd" && radioCountries.length === 0 && !countriesProc.running) countriesProc.running = true
     if (name !== "yt" && svc[name].items.length === 0 && !svc[name].loading) loadPlaylists(false)
   }
 
@@ -149,6 +191,10 @@ Panel {
   property var cloudSources: []
   property var cloudRemotes: []
   property bool rcloneInstalled: true
+  // The form can be used: a folder on this computer needs no rclone.
+  readonly property bool cloudFormUsable: rcloneInstalled || cloudKind === "local" || cloudKindSpec.server === true
+  // ~/Music, when it's there and not added yet: offered in one click.
+  property string cloudMusicDir: ""
   property bool cloudFormOpen: false
   property string cloudKind: "drive"
   property bool cloudKindTouched: false
@@ -157,12 +203,51 @@ Panel {
   property string cloudBusy: ""              // "" | "waiting" (browser sign-in) | "checking"
   property string cloudError: ""
   property bool cloudTyping: false
+  // Fields inside the panel's content (set by it when it's made).
+  property Item searchInput: null
+  property Item cloudPathInput: null
+  property Item cloudTitleInput: null
+  function focusSearch() { if (searchInput) searchInput.forceActiveFocus() }
+  function setSearchText(text) { if (searchInput) searchInput.text = text }
   // Bumped to clear the form's fields (their delegates are made again).
   property int cloudFormEpoch: 0
   readonly property bool cloudFormShown: view === "playlists" && service === "cl" && (svc.cl.setup !== "" || cloudFormOpen)
   readonly property var cloudKindSpec: {
     for (var i = 0; i < Model.CLOUD_KINDS.length; i++) if (Model.CLOUD_KINDS[i].id === cloudKind) return Model.CLOUD_KINDS[i]
     return Model.CLOUD_KINDS[0]
+  }
+  // Apple Music: keep a public playlist or album by its share link, taken
+  // from the clipboard (Share → Copy Link in Apple Music).
+  readonly property var amAddEntry: ({ kind: "explore", id: "__amadd", title: strings.t("am.addEntry"),
+    artist: strings.t("am.addHint") })
+  function addAppleMusicLink() {
+    if (amPasteProc.running || amAddProc.running) return
+    amPasteProc.running = true
+  }
+  Process {
+    id: amPasteProc
+    command: ["wl-paste", "--no-newline", "--type", "text/plain"]
+    stdout: StdioCollector {
+      onStreamFinished: {
+        var link = String(text || "").trim().split("\n")[0].slice(0, 400)
+        if (!/^https:\/\/(embed\.)?music\.apple\.com\//.test(link)) { root.showNotice(strings.t("am.pasteNothing")); return }
+        root.showNotice(strings.t("am.adding"))
+        amAddProc.command = root.helper(["am-add", link])
+        amAddProc.running = true
+      }
+    }
+  }
+  Process {
+    id: amAddProc
+    stdout: SplitParser {
+      onRead: function(line) {
+        var msg = Model.parseLine(line)
+        if (msg && msg.type === "amAdded") {
+          root.showNotice(strings.t("am.added").arg(msg.title))
+          root.openList({ id: msg.id, title: msg.title, count: msg.count })
+        } else root.handleHelperLine(line, "amAdd")
+      }
+    }
   }
   readonly property var cloudAddEntry: ({ kind: "explore", id: "__cloudadd", title: strings.t("cloud.addEntry"),
     artist: strings.t("cloud.addHint") })
@@ -192,7 +277,8 @@ Panel {
     if (cloudAddProc.running) return
     if (cloudKind === "remote" && cloudRemote === "") { cloudError = strings.t("cloud.pickRemote"); return }
     var form = Model.cloudForm(cloudKind, cloudValues, cloudRemote,
-      path !== undefined ? path : cloudPathField.text, title !== undefined ? title : cloudTitleField.text)
+      path !== undefined ? path : (cloudPathInput ? cloudPathInput.text : ""),
+      title !== undefined ? title : (cloudTitleInput ? cloudTitleInput.text : ""))
     if (!form) return
     cloudError = ""
     cloudBusy = cloudKindSpec.oauth ? "waiting" : "checking"
@@ -206,6 +292,11 @@ Panel {
     installProc.command = ["omarchy-launch-floating-terminal-with-presentation", "omarchy pkg add rclone"]
     installProc.running = true
     close()
+  }
+
+  function addMusicFolder() {
+    cloudKind = "local"
+    connectCloud(cloudMusicDir, "")
   }
 
   function removeCloud(id) {
@@ -326,8 +417,11 @@ Panel {
   readonly property bool playing: connected && !paused
   readonly property var currentTrack: connected && session && playlistPos >= 0 && playlistPos < session.tracks.length
     ? session.tracks[playlistPos] : null
-  readonly property string nowTitle: currentTrack ? currentTrack.title : Model.cleanText(mediaTitle)
-  readonly property string nowArtist: currentTrack ? currentTrack.artist : ""
+  // A station shows the song on air (when the stream says), the station under it.
+  property string onAir: ""
+  readonly property bool onRadio: currentTrack !== null && Model.isRadio(currentTrack.id)
+  readonly property string nowTitle: onRadio && onAir !== "" ? onAir : currentTrack ? currentTrack.title : Model.cleanText(mediaTitle)
+  readonly property string nowArtist: onRadio ? (onAir !== "" ? currentTrack.title : strings.t("rd.live")) : currentTrack ? currentTrack.artist : ""
   readonly property string barLabel: showTitle && connected && !barVertical && nowTitle !== "" ? Model.truncate(nowTitle, 28) : ""
   // Non-empty when autoplay should extend the queue from this song now.
   readonly property string autoplayDueSeed: Model.autoplaySeed({
@@ -406,6 +500,33 @@ Panel {
       if (msg.key === chordsProc.key) chordsStage = msg.stage
     } else if (msg.type === "scores") {
       if (msg.key === scoresProc.key) scores = msg
+    } else if (msg.type === "aiMix") {
+      if (msg.state === "asking" || msg.state === "finding") { aiState = msg.state; if (msg.agent) aiAgent = msg.agent }
+      else if (msg.state === "done") {
+        aiState = ""
+        loadService("my", true)
+        // A desktop notification: making one takes half a minute, and the
+        // panel has usually been closed by then.
+        notifyAiMix(msg.title, msg.count)
+        if (!aiProc.auto) {
+          showNotice(strings.t("ai.ready").arg(msg.title).arg(msg.count))
+          openList({ id: "ai:mix", title: msg.title, count: msg.count })
+        }
+      }
+    } else if (msg.type === "radioCountries") {
+      radioCountries = msg.items
+      radioCountry = msg.current
+    } else if (msg.type === "podcastSubs") {
+      var subs = {}
+      for (var si = 0; si < msg.ids.length; si++) subs[msg.ids[si]] = true
+      podcastSubs = subs
+      if (source === "podcastSub" && service === "pc") loadService("pc", true)
+    } else if (msg.type === "radioFavs") {
+      var set = {}
+      for (var fi = 0; fi < msg.ids.length; fi++) set[msg.ids[fi]] = true
+      radioFavs = set
+      if (view === "tracks" && openPlaylist && openPlaylist.id === "rd:fav") loadTracks(true)
+      if (service === "rd") loadService("rd", true)
     } else if (msg.type === "lyrics") {
       if (msg.key === lyricsProc.key) { lyrics = msg; lyricsLoading = false }
     } else if (msg.type === "cloud") {
@@ -413,9 +534,11 @@ Panel {
         cloudSources = msg.sources
         cloudRemotes = msg.remotes
         rcloneInstalled = msg.rclone
+        cloudMusicDir = msg.musicDir
         if (cloudRemote === "" && msg.remotes.length > 0) cloudRemote = msg.remotes[0].name
         // rclone already knows a storage: offer it first, nothing to type.
-        if (!cloudKindTouched && msg.remotes.length > 0) cloudKind = "remote"
+        if (!cloudKindTouched && msg.musicDir !== "" && msg.sources.length === 0) cloudKind = "local"
+        else if (!cloudKindTouched && msg.remotes.length > 0) cloudKind = "remote"
       } else if (msg.state === "waiting" || msg.state === "checking") {
         cloudBusy = msg.state
       } else if (msg.state === "added") {
@@ -423,8 +546,8 @@ Panel {
         cloudFormOpen = false
         cloudValues = ({})
         cloudFormEpoch++
-        cloudPathField.text = ""
-        cloudTitleField.text = ""
+        if (cloudPathInput) cloudPathInput.text = ""
+        if (cloudTitleInput) cloudTitleInput.text = ""
         showNotice(strings.t("cloud.added").arg(msg.title))
         setSvc("cl", { setup: "", error: "", items: [] })
         loadCloud()
@@ -448,6 +571,8 @@ Panel {
     } else if (msg.type === "playlists") {
       playlists = msg.items
       if (!msg.stale) playlistsLoading = false
+    } else if (msg.type === "tracks" && source === "recent") {
+      recentTracks = msg.items.slice(0, 30)
     } else if (msg.type === "tracks") {
       // A fresh Liked Music list is the truth about what's liked.
       if (msg.playlistId === "LM" && !msg.stale) likedIds = Model.likedSet(msg.items.map(function(t) { return t.id }))
@@ -521,6 +646,8 @@ Panel {
       else if (source === "signin") showNotice(msg.message)
       else if (source === "service") setSvc(servicePlaylistsProc.target, { loading: false, error: msg.setup ? "" : msg.message, setup: msg.setup })
       else if (source === "spotify") { spotifyWaiting = false; showNotice(msg.message, false, true) }
+      else if (source === "countries") showNotice(strings.t("notice.failed").arg(msg.message))
+      else if (source === "ai") { aiState = ""; if (!aiProc.auto) aiError = msg.message }
       else if (source === "chords") { chordsStage = ""; chordsError = msg.message; numpyMissing = msg.setup === "numpy" }
       else if (source === "scores" || source === "openScore") { if (source === "openScore") showNotice(msg.message) }
       else if (source === "lyrics") { lyricsLoading = false; lyrics = { key: lyricsProc.key, lines: [], none: true, synced: false } }
@@ -662,6 +789,46 @@ Panel {
 
   Process { id: installProc }
 
+  // ---- scrobbling: Last.fm and ListenBrainz ------------------------------------------
+  // Who's connected ("" when not); the form open in settings, if any.
+  property var scrobbleState: ({ listenbrainz: "", lastfm: "" })
+  property string scrobbleForm: ""
+  property bool scrobbleWaiting: false
+  function connectScrobble(service, values) {
+    if (scrobbleProc.running) return
+    scrobbleProc.form = JSON.stringify(Object.assign({ service: service }, values))
+    scrobbleProc.command = helper(["scrobble", "--set"])
+    scrobbleProc.running = true
+  }
+  function disconnectScrobble(service) {
+    if (scrobbleProc.running) return
+    scrobbleProc.form = ""
+    scrobbleProc.command = helper(["scrobble", "--remove", service])
+    scrobbleProc.running = true
+  }
+  Process {
+    id: scrobbleProc
+    property string form: ""
+    stdinEnabled: true
+    onStarted: write(form + "\n")
+    stdout: SplitParser {
+      onRead: function(line) {
+        var msg = Model.parseLine(line)
+        if (!msg) return
+        if (msg.type === "scrobbleWaiting") { root.scrobbleWaiting = true; root.showNotice(strings.t("scrobble.approve")) }
+        else if (msg.type === "error") root.showNotice(msg.message, false, true)
+        else if (msg.type === "scrobble") {
+          root.scrobbleState = { listenbrainz: msg.listenbrainz, lastfm: msg.lastfm }
+          if (scrobbleProc.form !== "") {
+            root.scrobbleForm = ""
+            root.showNotice(strings.t("scrobble.connected"))
+          }
+        }
+      }
+    }
+    onExited: { root.scrobbleWaiting = false; form = "" }
+  }
+
   Process {
     id: cloudRemoveProc
     stdout: SplitParser { onRead: function(line) { root.handleHelperLine(line, "cloud") } }
@@ -778,7 +945,6 @@ Panel {
 
   Process {
     id: signinProc
-    command: root.helper(["signin", "--browser", root.browser])
     stdout: SplitParser { onRead: function(line) { root.handleHelperLine(line, "signin") } }
   }
 
@@ -913,6 +1079,7 @@ Panel {
     var v = String(value || "").trim()
     if (v === "") return
     if (name === "sc") saveSettings({ soundcloudUser: v })
+    else if (name === "dz") saveSettings({ deezerUser: v })
     else if (name === "sp") saveSettings({ spotifyClientId: v })
     setSvc(name, { setup: "", error: "", items: [] })
     Qt.callLater(function() { loadService(name, true) })
@@ -928,7 +1095,8 @@ Panel {
   function addToMix(target) {
     if (!addTrack || mixAddProc.running) return
     var t = { id: addTrack.id, title: addTrack.title || "", artist: addTrack.artist || "", duration: addTrack.duration || null }
-    if (addTrack.cover && String(addTrack.cover).indexOf("https://") === 0) t.cover = addTrack.cover
+    // Any cover the list showed; the helper keeps only allowed hosts and its own files.
+    if (addTrack.cover) t.cover = String(addTrack.cover)
     mixAddProc.command = helper(["mix-add", target.id, "--track", JSON.stringify(t)])
     mixAddProc.running = true
     closeAddTo()
@@ -971,6 +1139,84 @@ Panel {
       queued = null
       if (next) Qt.callLater(function() { root.loadLyrics(next) })
     }
+  }
+
+  // ---- AI Mix ----------------------------------------------------------------------
+  // A mix your AI agent makes from what you listen to (bin/ytmusic-mpv
+  // ai-mix). Off until turned on: it sends a summary of your taste to the
+  // agent. When on, a mix older than a day is remade by itself.
+  readonly property bool aiEnabled: setting("aiMix", "Off") === "On"
+  property string aiState: ""                 // "" | "asking" | "finding"
+  property string aiAgent: ""
+  property string aiError: ""
+  readonly property var aiEntry: ({ kind: "explore", id: "__aimake", title: strings.t("ai.make"), artist: strings.t("ai.makeHint") })
+
+  // Recently played, for the player window's home.
+  property var recentTracks: []
+  Process {
+    id: recentProc
+    command: root.helper(["tracks", "hist:recent"])
+    stdout: SplitParser { onRead: function(line) { root.handleHelperLine(line, "recent") } }
+  }
+  onFullOpenChanged: if (fullOpen && !recentProc.running) recentProc.running = true
+
+  function openAiMaker() {
+    aiError = ""
+    if (service !== "my") switchService("my")
+    view = "ai"
+    cursorIndex = -1
+    if (!opened) open()
+  }
+
+  function makeAiMix(wish, auto) {
+    if (aiProc.running) return
+    if (!aiEnabled) saveSettings({ aiMix: "On" })
+    aiError = ""
+    aiState = "asking"
+    aiProc.auto = auto === true
+    aiProc.command = helper(["ai-mix", "--browser", browser].concat(wish ? ["--prompt", wish] : [])
+      .concat(auto ? ["--if-older", "86400"] : []))
+    aiProc.running = true
+  }
+
+  function notifyAiMix(title, count) {
+    if (aiNotifyProc.running) return
+    var peers = bar && typeof bar.moduleWidgets === "function" ? bar.moduleWidgets(moduleName) : []
+    if (peers.length > 0 && peers[0] !== root) return
+    aiNotifyProc.title = title
+    aiNotifyProc.command = ["notify-send", "--app-name=Omarchy Music Player", "--icon=audio-x-generic",
+      "--action=play=" + strings.t("ai.notifyPlay"), "--action=open=" + strings.t("ai.notifyOpen"),
+      strings.t("ai.notifyTitle").arg(title), strings.t("ai.notifyBody").arg(count)]
+    aiNotifyProc.running = true
+  }
+  Process {
+    id: aiNotifyProc
+    property string title: ""
+    stdout: SplitParser {
+      onRead: function(line) {
+        var action = String(line).trim()
+        if (action !== "play" && action !== "open") return
+        if (root.service !== "my") root.switchService("my")
+        root.openList({ id: "ai:mix", title: aiNotifyProc.title, count: null })
+        if (action === "play") root.play(0, false)
+        else root.open()
+      }
+    }
+  }
+
+  Process {
+    id: aiProc
+    property bool auto: false
+    stdout: SplitParser { onRead: function(line) { root.handleHelperLine(line, "ai") } }
+    onExited: root.aiState = ""
+  }
+  // Remade by itself once a day while it's on (and only then).
+  Timer {
+    interval: 3 * 3600 * 1000
+    repeat: true
+    triggeredOnStart: true
+    running: root.aiEnabled
+    onTriggered: root.makeAiMix("", true)
   }
 
   // ---- notes: chords and scores -----------------------------------------------------
@@ -1084,7 +1330,7 @@ Panel {
     exploreTitle = strings.t("sc.searchTitle")
     exploreRowsData = []
     exploreError = ""
-    searchField.forceActiveFocus()
+    focusSearch()
   }
 
   // The search field under the tabs: results right away, wherever the panel
@@ -1092,11 +1338,17 @@ Panel {
   property string searchReturnView: ""
   function searchFromBar(text) {
     var q = String(text || "").trim()
+    // In the country list the field narrows it; Enter picks the only match.
+    if (view === "countries") {
+      countryFilter = q
+      if (countryRows.length === 1) chooseCountry(countryRows[0])
+      return
+    }
     if (q === "") return
     if (view !== "explore") {
       if (view === "addTo") closeAddTo()
       searchReturnView = view === "settings" || view === "download" ? "playlists" : view
-      exploreService = service === "sc" ? "sc" : "yt"
+      exploreService = ["sc", "rd", "pc", "dz", "mc", "au", "am"].indexOf(service) >= 0 ? service : "yt"
     }
     view = "explore"
     runSearch(q)
@@ -1157,7 +1409,7 @@ Panel {
     // A SoundCloud result plays with the other results after it.
     if (item.kind === "song" && !Model.isYouTube(item.id)) {
       var at = exploreRowsData.indexOf(item)
-      openPlaylist = { id: "sc:search", title: exploreTitle, count: null }
+      openPlaylist = { id: exploreService + ":search", title: exploreTitle, count: null }
       tracks = exploreRowsData
       tracksFromExplore = true
       play(at >= 0 ? at : Math.max(0, cursorIndex), false)
@@ -1177,7 +1429,7 @@ Panel {
 
   // ---- download --------------------------------------------------------------
   function openDownload(track) {
-    if (!track || !Model.TRACK_KEY_RE.test(String(track.id))) return
+    if (!track || !Model.canDownload(track.id)) return
     downloadTrack = { id: track.id, title: track.title, artist: track.artist || "" }
     if (view !== "download") viewBeforeDownload = view === "addTo" || view === "settings" ? "playlists" : view
     view = "download"
@@ -1388,6 +1640,7 @@ Panel {
     case "duration": duration = typeof data === "number" && isFinite(data) ? data : 0; break
     case "playlist-pos":
       playlistPos = typeof data === "number" ? data : -1
+      onAir = ""
       position = 0
       break
     case "playlist-count":
@@ -1424,6 +1677,8 @@ Panel {
       }
       break
     }
+    case "user-data/ytmusic/features": pauseFadeSupported = !!data && data.pause_fade === true; break
+    case "metadata/by-key/icy-title": onAir = typeof data === "string" ? Model.cleanText(data, 200) : ""; break
     case "seeking": seekingRaw = data; break
     case "paused-for-cache": pausedForCache = data === true; break
     case "loop-file":
@@ -1439,6 +1694,7 @@ Panel {
 
   function resetPlayer() {
     paused = false
+    pauseFadeSupported = false
     mediaTitle = ""
     duration = 0
     position = 0
@@ -1492,7 +1748,7 @@ Panel {
   }
 
   function playerArgs() {
-    return ["--fade-in", String(fadeIn), "--fade-out", String(fadeOut),
+    return ["--fade-in", String(fadeIn), "--fade-out", String(fadeOut), "--pause-fade", String(pauseFade),
       "--transition", transitionMode, "--xfade", String(crossfade)]
   }
 
@@ -1504,6 +1760,7 @@ Panel {
     sendPlayerSetting("fade_in", fadeIn)
     sendPlayerSetting("fade_out", fadeOut)
     sendPlayerSetting("xfade", crossfade)
+    sendPlayerSetting("pause_fade", pauseFade)
     sendPlayerSetting("transition", transitionMode)
   }
 
@@ -1518,11 +1775,14 @@ Panel {
   // ---- settings screen -----------------------------------------------------
   readonly property var fadeChoices: [0, 1, 2, 3, 5, 8]
   readonly property var crossfadeChoices: [4, 6, 8, 12]
+  readonly property var pauseFadeChoices: [0, 0.3, 0.6, 1, 2]
   readonly property var settingsItems: [
     { key: "fadeIn", kind: "choice", section: strings.t("settings.playback"), label: strings.t("settings.fadeIn"),
       hint: strings.t("settings.fadeInHint"), choices: fadeChoices, value: fadeIn, enabled: true },
     { key: "fadeOut", kind: "choice", section: "", label: strings.t("settings.fadeOut"),
       hint: strings.t("settings.fadeOutHint"), choices: fadeChoices, value: fadeOut, enabled: true },
+    { key: "pauseFade", kind: "choice", section: "", label: strings.t("settings.pauseFade"),
+      hint: strings.t("settings.pauseFadeHint"), choices: pauseFadeChoices, value: pauseFade, enabled: true },
     { key: "transition", kind: "toggle", section: "", label: strings.t("settings.peakMix"),
       hint: strings.t("settings.peakMixHint"), checked: transitionMode === "peak", enabled: true },
     { key: "crossfade", kind: "choice", section: "", label: strings.t("settings.crossfade"),
@@ -1535,6 +1795,8 @@ Panel {
       hint: strings.t("settings.mirrorsHint"), checked: setting("backupMirrors", "Off") === "On", enabled: true },
     { key: "updateCheck", kind: "toggle", section: "", label: strings.t("settings.updates"),
       hint: strings.t("settings.updatesHint"), checked: updateCheckOn, enabled: true },
+    { key: "aiMix", kind: "toggle", section: strings.t("settings.ai"), label: strings.t("ai.setting"),
+      hint: strings.t("ai.settingHint"), checked: aiEnabled, enabled: true },
     { key: "showCovers", kind: "toggle", section: strings.t("settings.display"), label: strings.t("settings.covers"),
       hint: strings.t("settings.coversHint"), checked: showCovers, enabled: true },
     { key: "showTitle", kind: "toggle", section: "", label: strings.t("settings.barTitle"),
@@ -1553,7 +1815,8 @@ Panel {
 
   function setChoice(key, seconds) {
     var changes = {}
-    changes[key] = Number(seconds)
+    // The pause fade is kept in milliseconds (the settings schema has whole numbers).
+    changes[key] = key === "pauseFade" ? Math.round(Number(seconds) * 1000) : Number(seconds)
     saveSettings(changes)
   }
 
@@ -1625,7 +1888,34 @@ Panel {
 
   // Opens YouTube's sign-in page in the browser the cookies come from.
   function signIn() {
-    if (!signinProc.running) signinProc.running = true
+    openServicePage("yt")
+  }
+  // A service's sign-in page, or your own page there ("sc-profile" …), in
+  // that same browser.
+  function openServicePage(page) {
+    if (signinProc.running) return
+    signinProc.command = helper(["signin", "--browser", browser, "--service", page])
+    signinProc.running = true
+  }
+  // "Paste link": the profile link you copied, from the clipboard, so
+  // nothing has to be typed.
+  function pasteSetup(target) {
+    if (pasteProc.running) return
+    pasteProc.target = target
+    pasteProc.running = true
+  }
+  Process {
+    id: pasteProc
+    property string target: ""
+    command: ["wl-paste", "--no-newline", "--type", "text/plain"]
+    stdout: StdioCollector { onStreamFinished: root.usePasted(pasteProc.target, text) }
+  }
+  function usePasted(target, text) {
+    var link = String(text || "").trim().split("\n")[0].slice(0, 300)
+    var ok = target === "sc" ? /soundcloud\.com\/[A-Za-z0-9_-]+/.test(link)
+      : target === "dz" ? /deezer\.(com|page\.link)\/|^[0-9]{3,15}$/.test(link) : false
+    if (ok) saveSetup(target, link)
+    else showNotice(strings.t("setup.pasteNothing").arg(strings.t("tab." + target)))
   }
 
   function playlistTitleById(id) {
@@ -1633,11 +1923,93 @@ Panel {
     return id
   }
 
-  function isLiked(id) { return !!(id && likedIds[id]) }
+  function isLiked(id) { return !!(id && (Model.isRadio(id) ? radioFavs[id] : likedIds[id])) }
+  // Can be liked: a YouTube song, or a station (a favorite).
+  function canLike(id) { return Model.isYouTube(id) || Model.isRadio(id) }
+
+  // Favorite stations, as a lookup.
+  property var radioFavs: ({})
+
+  // The Radio tab's country: chosen from a list (the "countries" view),
+  // typed into the search field to narrow it.
+  property var radioCountries: []
+  property string radioCountry: ""
+  property string countryFilter: ""
+  readonly property var radioCountryEntry: ({ kind: "explore", id: "__rdcountry", title: strings.t("rd.chooseCountry"),
+    artist: radioCountryName !== "" ? strings.t("rd.countryNow").arg(radioCountryName) : strings.t("rd.countryHint") })
+  readonly property string radioCountryName: {
+    for (var i = 0; i < radioCountries.length; i++) if (radioCountries[i].id === radioCountry) return radioCountries[i].title
+    return radioCountry
+  }
+  readonly property var countryRows: {
+    var q = countryFilter.trim().toLowerCase()
+    return q === "" ? radioCountries : radioCountries.filter(function(c) {
+      return c.title.toLowerCase().indexOf(q) >= 0 || c.id.toLowerCase() === q
+    })
+  }
+  Process {
+    id: countriesProc
+    command: root.helper(["radio-countries"])
+    stdout: SplitParser { onRead: function(line) { root.handleHelperLine(line, "countries") } }
+  }
+  function openCountries() {
+    countryFilter = ""
+    setSearchText("")
+    view = "countries"
+    cursorIndex = -1
+    if (!countriesProc.running) countriesProc.running = true
+    if (!opened) open()
+  }
+  function chooseCountry(row) {
+    if (!row) return
+    saveSettings({ radioCountry: row.id })
+    radioCountry = row.id
+    countryFilter = ""
+    setSearchText("")
+    view = "playlists"
+    loadService("rd", true)
+    openList({ id: "rd:country:" + row.id, title: strings.t("rd.stationsIn").arg(row.title), count: null })
+  }
+  Process {
+    id: radioFavProc
+    stdout: SplitParser { onRead: function(line) { root.handleHelperLine(line, "radioFav") } }
+  }
+
+  // ---- podcasts --------------------------------------------------------------------
+  // Subscribed shows ({ "pc:<show>": true }); their new episodes are a list.
+  property var podcastSubs: ({})
+  readonly property bool podcastOpen: view === "tracks" && openPlaylist !== null && Model.isPodcastShow(openPlaylist.id)
+  function toggleSubscribe(id) {
+    if (!Model.isPodcastShow(id) || podcastSubProc.running) return
+    var on = !podcastSubs[id]
+    var next = Object.assign({}, podcastSubs)
+    if (on) next[id] = true
+    else delete next[id]
+    podcastSubs = next
+    podcastSubProc.command = helper(["podcast-sub", id].concat(on ? [] : ["--remove", "1"]))
+    podcastSubProc.running = true
+    showNotice(strings.t(on ? "pc.subscribed" : "pc.unsubscribed"))
+  }
+  Process {
+    id: podcastSubProc
+    stdout: SplitParser { onRead: function(line) { root.handleHelperLine(line, "podcastSub") } }
+  }
 
   // The heart, like YouTube Music's: likes the song (it goes to Liked Music)
   // or removes the like. Shown at once, rolled back if YouTube refuses.
   function toggleLike(track) {
+    if (track && Model.isRadio(track.id)) {
+      if (radioFavProc.running) return
+      var fav = !isLiked(track.id)
+      var next = Object.assign({}, radioFavs)
+      if (fav) next[track.id] = true
+      else delete next[track.id]
+      radioFavs = next
+      radioFavProc.command = helper(["radio-fav", track.id].concat(fav ? [] : ["--remove", "1"]))
+      radioFavProc.running = true
+      showNotice(strings.t(fav ? "rd.faved" : "rd.unfaved"))
+      return
+    }
     if (!track || !Model.radioListId(track.id) || likeProc.running) return
     var like = !isLiked(track.id)
     likedIds = Model.withLiked(likedIds, track.id, like)
@@ -1720,7 +2092,10 @@ Panel {
     }
   }
 
-  function togglePause() { send(["cycle", "pause"]) }
+  function togglePause() {
+    if (pauseFadeSupported) send(["script-message", "ytmusic-toggle-pause"])
+    else send(["cycle", "pause"])
+  }
   function next() { send(["playlist-next", "weak"]) }
   function previous() {
     // Like most players: restart the track unless we're at its very start.
@@ -1754,6 +2129,9 @@ Panel {
     if (p.kind === "explore") {
       if (p.id === "__scsearch") openSoundCloudSearch()
       else if (p.id === "__cloudadd") openCloudForm()
+      else if (p.id === "__amadd") addAppleMusicLink()
+      else if (p.id === "__rdcountry") openCountries()
+      else if (p.id === "__aimake") openAiMaker()
       else openExplore()
       return
     }
@@ -1780,7 +2158,9 @@ Panel {
       return
     }
     if (view === "tracks" && tracksFromExplore) { view = "explore"; cursorIndex = -1; return }
-    if (view === "settings") {
+    if (view === "countries") { view = "playlists"; countryFilter = ""; cursorIndex = -1; return }
+    if (view === "ai") { view = "playlists"; cursorIndex = -1; return }
+    if (view === "settings" || view === "services") {
       view = viewBeforeSettings === "tracks" && openPlaylist ? "tracks" : "playlists"
       cursorIndex = -1
       return
@@ -1796,7 +2176,7 @@ Panel {
   function refreshList() {
     if (view === "settings" || view === "download") return
     if (view === "explore") {
-      if (exploreMode === "search") runSearch(searchField.text)
+      if (exploreMode === "search") runSearch(searchInput ? searchInput.text : "")
       else if (exploreMode === "home") loadExplore(0)
       return
     }
@@ -1806,6 +2186,7 @@ Panel {
   }
 
   function activateRow(index) {
+    if (view === "countries") { chooseCountry(rows[index]); return }
     if (view === "explore") { activateExplore(rows[index]); return }
     if (view === "tracks") play(index, false)
     else if (view === "addTo") addToPlaylist(rows[index])
@@ -1865,7 +2246,7 @@ Panel {
     case "d": openDownload(cursorOrCurrentTrack()); break
     case "e": openExplore(); break
     case "F": openFull(); break
-    case "/": searchField.forceActiveFocus(); break
+    case "/": focusSearch(); break
     }
   }
 
@@ -1905,6 +2286,7 @@ Panel {
       else if (page === "home" || page === "nowplaying") fullView.go(page)
     }
     function cloud(): void { root.fullOpen ? fullView.addStorage() : root.openCloudForm() }
+    function aiMix(): void { root.openAiMaker() }
   }
 
   onOpenedChanged: {
@@ -1912,7 +2294,7 @@ Panel {
     cursorIndex = -1
     // The keys go to the panel's shortcuts, not the search field, until
     // the field is clicked or "/" is pressed.
-    Qt.callLater(function() { if (searchField.activeFocus) searchField.focus = false; if (panel.loadedContent) panel.loadedContent.forceActiveFocus() })
+    Qt.callLater(function() { if (searchInput && searchInput.activeFocus) searchInput.focus = false; if (panel.loadedContent) panel.loadedContent.forceActiveFocus() })
     if (playlists.length === 0 || !playlistsLoading) loadYouTube(false)
     if (service !== "yt") loadService(service, false)
     if (svc.my.items.length === 0) loadService("my", false)
@@ -1922,6 +2304,12 @@ Panel {
   }
 
   Component.onCompleted: {
+    radioFavProc.command = helper(["radio-favs"])
+    radioFavProc.running = true
+    podcastSubProc.command = helper(["podcast-sub"])
+    podcastSubProc.running = true
+    scrobbleProc.command = helper(["scrobble"])
+    scrobbleProc.running = true
     pathsProc.running = true
     likedProc.running = true
     // Settings may have changed while the shell wasn't running.
@@ -1970,76 +2358,97 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: panel.loadedContent
-    contentWidth: panel.fittedContentWidth(Style.space(470))
+    contentWidth: panel.fittedContentWidth(Style.space(527))
     contentHeight: panel.fittedContentHeight(panel.loadedContentHeight)
 
     content: PanelKeyCatcher {
       anchors.fill: parent
+      // The panel's functions live outside this content and can't see its
+      // ids: hand them the fields they work with.
+      Component.onCompleted: {
+        root.searchInput = searchField
+        root.cloudPathInput = cloudPathField
+        root.cloudTitleInput = cloudTitleField
+      }
       // Typing in the search field goes to the field, not to shortcuts.
       blocked: searchField.activeFocus || setupField.activeFocus || root.cloudTyping
-      implicitHeight: column.implicitHeight
+      implicitHeight: Math.max(column.implicitHeight, rail.implicitHeight + railEnd.implicitHeight + Style.space(24))
       onMoveRequested: function(dx, dy) { root.moveCursor(dx, dy) }
       onActivateRequested: root.activateCursor()
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(text, modifiers) { root.handleKey(text) }
 
+      // ---------- services, down the left side ----------
+      // Each service's logo in its color (its name in a tooltip and in the
+      // header), "+" to pick them; the player window and settings at the foot.
+      Column {
+        id: rail
+        anchors.left: parent.left
+        anchors.top: parent.top
+        width: Style.space(38)
+        spacing: Style.space(6)
+
+        Repeater {
+          model: root.shownTabs
+          ServiceTab {
+            required property var modelData
+            glyph: modelData.glyph
+            brand: modelData.color
+            label: modelData.label
+            selected: root.service === modelData.id && root.view !== "services"
+            onClicked: root.switchService(modelData.id)
+          }
+        }
+        ServiceTab {
+          glyph: Model.GLYPH.plus
+          brand: root.fg
+          label: strings.t("services.title")
+          selected: root.view === "services"
+          onClicked: root.view === "services" ? root.backToPlaylists() : root.openServices()
+        }
+      }
+      Column {
+        id: railEnd
+        anchors.horizontalCenter: rail.horizontalCenter
+        anchors.bottom: parent.bottom
+        spacing: Style.space(4)
+        PanelActionButton {
+          anchors.horizontalCenter: parent.horizontalCenter
+          iconText: Model.GLYPH.fullscreen
+          fontSize: Style.font.title
+          tooltipText: strings.t("full.open")
+          foreground: root.fg
+          fontFamily: root.fontFamily
+          onClicked: root.openFull()
+        }
+        PanelActionButton {
+          anchors.horizontalCenter: parent.horizontalCenter
+          iconText: Model.GLYPH.settings
+          fontSize: Style.font.title
+          tooltipText: strings.t("settings.open")
+          foreground: root.view === "settings" ? Style.selectedStateColor(root.fg, Commons.Color.accent) : root.fg
+          fontFamily: root.fontFamily
+          onClicked: root.view === "settings" ? root.backToPlaylists() : root.openSettings()
+        }
+      }
+      Rectangle {
+        id: railLine
+        anchors.left: rail.right
+        anchors.leftMargin: Style.space(8)
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        width: 1
+        color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.08)
+      }
+
       Column {
         id: column
-        anchors.left: parent.left
+        anchors.left: railLine.right
+        anchors.leftMargin: Style.space(10)
         anchors.right: parent.right
         anchors.top: parent.top
         spacing: Style.space(12)
-
-        // ---------- services: YouTube Music, Spotify, SoundCloud, My Music ----------
-        Item {
-          width: parent.width
-          implicitHeight: Math.max(tabsRow.implicitHeight, settingsButton.implicitHeight)
-
-          Row {
-            id: tabsRow
-            anchors.left: parent.left
-            anchors.verticalCenter: parent.verticalCenter
-            spacing: Style.space(4)
-
-            Repeater {
-              model: root.serviceTabs
-              ServiceTab {
-                required property var modelData
-                glyph: modelData.glyph
-                brand: modelData.color
-                label: modelData.label
-                selected: root.service === modelData.id
-                onClicked: root.switchService(modelData.id)
-              }
-            }
-          }
-
-          // Full screen and settings, in the panel's top right corner.
-          Row {
-            id: settingsButton
-            anchors.right: parent.right
-            anchors.verticalCenter: parent.verticalCenter
-            spacing: Style.space(2)
-
-            PanelActionButton {
-              iconText: Model.GLYPH.fullscreen
-              fontSize: Style.font.title
-              tooltipText: strings.t("full.open")
-              foreground: root.fg
-              fontFamily: root.fontFamily
-              onClicked: root.openFull()
-            }
-            PanelActionButton {
-              iconText: Model.GLYPH.settings
-              fontSize: Style.font.title
-              tooltipText: strings.t("settings.open")
-              foreground: root.view === "settings" ? Style.selectedStateColor(root.fg, Commons.Color.accent) : root.fg
-              fontFamily: root.fontFamily
-              onClicked: root.view === "settings" ? root.backToPlaylists() : root.openSettings()
-            }
-          }
-        }
 
         // ---------- search, across the panel under the tabs ----------
         // YouTube Music's songs (SoundCloud's on its tab); Enter shows them.
@@ -2069,6 +2478,7 @@ Panel {
           }
           TextInput {
             id: searchField
+            onTextEdited: if (root.view === "countries") root.countryFilter = text
             anchors.left: searchIcon.right
             anchors.leftMargin: Style.space(10)
             anchors.right: parent.right
@@ -2079,7 +2489,10 @@ Panel {
             font.family: root.fontFamily
             font.pixelSize: Style.font.subtitle
             selectByMouse: true
-            onAccepted: { root.searchFromBar(text); focus = false }
+            // Enter is taken here: TextInput passes it on after `accepted`,
+            // and the panel would take it as "play the highlighted song".
+            Keys.onReturnPressed: function(event) { root.searchFromBar(text); focus = false; event.accepted = true }
+            Keys.onEnterPressed: function(event) { root.searchFromBar(text); focus = false; event.accepted = true }
             Keys.onEscapePressed: function(event) {
               if (text !== "") text = ""
               else focus = false
@@ -2095,7 +2508,10 @@ Panel {
             anchors.fill: searchField
             verticalAlignment: Text.AlignVCenter
             visible: searchField.text === "" && !searchField.preeditText
-            text: (root.view === "explore" ? root.exploreService === "sc" : root.service === "sc") ? strings.t("sc.searchField") : strings.t("explore.search")
+            readonly property string where: root.view === "explore" ? root.exploreService : root.service
+            text: root.view === "countries" ? strings.t("rd.countryField")
+              : where === "sc" ? strings.t("sc.searchField") : where === "rd" ? strings.t("rd.searchField")
+              : ["pc", "dz", "mc", "au", "am"].indexOf(where) >= 0 ? strings.t(where + ".searchField") : strings.t("explore.search")
             color: root.dim
             font.pixelSize: Style.font.subtitle
           }
@@ -2163,7 +2579,7 @@ Panel {
             visible: root.connected && root.currentTrack !== null
 
             PanelActionButton {
-              visible: root.currentTrack !== null && Model.isYouTube(root.currentTrack.id)
+              visible: root.currentTrack !== null && root.canLike(root.currentTrack.id)
               readonly property bool liked: root.currentTrack !== null && root.isLiked(root.currentTrack.id)
               iconText: liked ? Model.GLYPH.heart : Model.GLYPH.heartOutline
               tooltipText: liked ? strings.t("controls.unlike") : strings.t("controls.like")
@@ -2180,6 +2596,7 @@ Panel {
               onClicked: root.openAddTo(root.currentTrack)
             }
             PanelActionButton {
+              visible: root.currentTrack !== null && Model.canDownload(root.currentTrack.id)
               iconText: Model.GLYPH.download
               tooltipText: strings.t("controls.download")
               foreground: root.fg
@@ -2641,6 +3058,9 @@ Panel {
               width: Math.min(implicitWidth, headerLeft.width - (root.view !== "playlists" ? Style.space(48) : 0))
               elide: Text.ElideRight
               text: root.view === "settings" ? strings.t("settings.title")
+                : root.view === "services" ? strings.t("services.title")
+                : root.view === "countries" ? strings.t("rd.countries")
+                : root.view === "ai" ? strings.t("ai.title")
                 : root.view === "explore" ? root.exploreTitle
                 : root.view === "download" && root.downloadTrack ? strings.t("download.title").arg(root.downloadTrack.title)
                 : root.view === "tracks" ? root.playlistTitle(root.openPlaylist)
@@ -2658,7 +3078,17 @@ Panel {
             spacing: Style.space(6)
 
             Button {
-              visible: root.view === "tracks" && root.tracks.length > 0
+              visible: root.podcastOpen
+              iconText: root.podcastOpen && root.podcastSubs[root.openPlaylist.id] ? Model.GLYPH.check : Model.GLYPH.plus
+              text: strings.t(root.podcastOpen && root.podcastSubs[root.openPlaylist.id] ? "pc.subscribedButton" : "pc.subscribe")
+              fontSize: Style.font.body
+              foreground: root.fg
+              fontFamily: root.fontFamily
+              bordered: true
+              onClicked: root.toggleSubscribe(root.openPlaylist.id)
+            }
+            Button {
+              visible: root.view === "tracks" && root.tracks.length > 0 && !root.podcastOpen
               iconText: Model.GLYPH.play
               text: strings.t("list.playAll")
               fontSize: Style.font.body
@@ -2668,7 +3098,7 @@ Panel {
               onClicked: root.play(0, false)
             }
             Button {
-              visible: root.view === "tracks" && root.tracks.length > 1
+              visible: root.view === "tracks" && root.tracks.length > 1 && !root.podcastOpen
               iconText: Model.GLYPH.shuffle
               text: strings.t("list.shuffle")
               fontSize: Style.font.body
@@ -2678,7 +3108,7 @@ Panel {
               onClicked: root.handleKey("s")
             }
             Button {
-              visible: root.view !== "settings" && root.view !== "download" && !(root.view === "explore" && root.exploreMode === "mood")
+              visible: root.view !== "settings" && root.view !== "download" && root.view !== "services" && root.view !== "ai" && !(root.view === "explore" && root.exploreMode === "mood")
               iconText: Model.GLYPH.refresh
               iconSpinning: root.view === "tracks" ? root.tracksLoading : root.view === "explore" ? root.exploreLoading : root.playlistsLoading
               fontSize: Style.font.title
@@ -2799,10 +3229,10 @@ Panel {
         // ---------- connect Spotify / SoundCloud ----------
         BorderSurface {
           id: setupCard
-          readonly property string target: root.view === "playlists" && (root.service === "sp" || root.service === "sc")
+          readonly property string target: root.view === "playlists" && (root.service === "sp" || root.service === "sc" || root.service === "dz")
             ? root.svc[root.service].setup : ""
           // Spotify with a Client ID but no login only needs the Connect button.
-          readonly property bool needsField: target === "sc" || (target === "sp" && root.spClientId === "")
+          readonly property bool needsField: target === "sc" || target === "dz" || (target === "sp" && root.spClientId === "")
           visible: target !== ""
           width: parent.width
           implicitHeight: setupColumn.implicitHeight + Style.space(24)
@@ -2820,7 +3250,7 @@ Panel {
 
             PlainText {
               width: parent.width
-              text: setupCard.target === "sp" ? strings.t("sp.setupTitle") : strings.t("sc.setupTitle")
+              text: strings.t(setupCard.target + ".setupTitle")
               font.pixelSize: Style.font.title
               font.bold: true
             }
@@ -2828,7 +3258,7 @@ Panel {
               width: parent.width
               text: setupCard.target === "sp"
                 ? (setupCard.needsField ? strings.t("sp.setupBody") : strings.t("sp.connectBody"))
-                : strings.t("sc.setupBody").arg(root.browser)
+                : setupCard.target === "dz" ? strings.t("dz.setupBody") : strings.t("sc.setupBody").arg(root.browser)
               color: root.dim
               wrapMode: Text.Wrap
               elide: Text.ElideNone
@@ -2851,14 +3281,15 @@ Panel {
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.body
                 selectByMouse: true
-                onAccepted: { root.saveSetup(setupCard.target, text); text = ""; focus = false }
+                Keys.onReturnPressed: function(event) { root.saveSetup(setupCard.target, text); text = ""; focus = false; event.accepted = true }
+                Keys.onEnterPressed: function(event) { root.saveSetup(setupCard.target, text); text = ""; focus = false; event.accepted = true }
                 Keys.onEscapePressed: function(event) { focus = false; event.accepted = true }
               }
               PlainText {
                 anchors.fill: setupField
                 verticalAlignment: Text.AlignVCenter
                 visible: setupField.text === ""
-                text: setupCard.target === "sp" ? strings.t("sp.setupField") : strings.t("sc.setupField")
+                text: strings.t(setupCard.target + ".setupField")
                 color: root.dim
               }
               MouseArea {
@@ -2876,6 +3307,40 @@ Panel {
                 fontFamily: root.fontFamily
                 bordered: true
                 onClicked: { root.saveSetup(setupCard.target, setupField.text); setupField.text = "" }
+              }
+            }
+            // The lazy way: sign in, open your profile, copy its link, paste.
+            // (Spotify's buttons follow in the same row.)
+            Flow {
+              readonly property bool profileLink: setupCard.target === "sc" || setupCard.target === "dz"
+              width: parent.width
+              spacing: Style.space(8)
+              Button {
+                visible: parent.profileLink
+                iconText: Model.GLYPH.forward
+                text: strings.t("setup.signin").arg(strings.t("tab." + setupCard.target))
+                foreground: root.fg
+                fontFamily: root.fontFamily
+                bordered: true
+                onClicked: root.openServicePage(setupCard.target)
+              }
+              Button {
+                visible: parent.profileLink
+                iconText: Model.GLYPH.artist
+                text: strings.t("setup.myProfile")
+                foreground: root.fg
+                fontFamily: root.fontFamily
+                bordered: true
+                onClicked: root.openServicePage(setupCard.target + "-profile")
+              }
+              Button {
+                visible: parent.profileLink
+                iconText: Model.GLYPH.check
+                text: strings.t("setup.paste")
+                foreground: root.fg
+                fontFamily: root.fontFamily
+                bordered: true
+                onClicked: root.pasteSetup(setupCard.target)
               }
               Button {
                 visible: setupCard.target === "sp" && setupCard.needsField
@@ -2898,6 +3363,93 @@ Panel {
                 onClicked: root.connectSpotify()
               }
             }
+          }
+        }
+
+        // ---------- AI Mix: make one ----------
+        Column {
+          visible: root.view === "ai"
+          width: parent.width
+          spacing: Style.space(10)
+          PlainText {
+            width: parent.width
+            text: strings.t("ai.body")
+            color: root.dim
+            wrapMode: Text.Wrap
+            elide: Text.ElideNone
+          }
+          CloudField {
+            id: aiWish
+            width: parent.width
+            label: strings.t("ai.wish")
+            onSubmitted: root.makeAiMix(aiWish.text, false)
+          }
+          Button {
+            iconText: root.aiState !== "" ? Model.GLYPH.loading : Model.GLYPH.ai
+            iconSpinning: root.aiState !== ""
+            text: root.aiState === "asking" ? strings.t("ai.asking").arg(root.aiAgent || strings.t("ai.agent"))
+              : root.aiState === "finding" ? strings.t("ai.finding")
+              : root.aiEnabled ? strings.t("ai.go") : strings.t("ai.goFirst")
+            enabled: root.aiState === ""
+            foreground: root.fg
+            fontFamily: root.fontFamily
+            bordered: true
+            onClicked: root.makeAiMix(aiWish.text, false)
+          }
+          PlainText {
+            visible: root.aiError !== ""
+            width: parent.width
+            text: root.aiError
+            color: Commons.Color.urgent
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.Wrap
+            elide: Text.ElideNone
+          }
+          PlainText {
+            width: parent.width
+            text: strings.t("ai.privacy")
+            color: root.dim
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.Wrap
+            elide: Text.ElideNone
+          }
+        }
+
+        // ---------- which services have a tab ----------
+        Column {
+          visible: root.view === "services"
+          width: parent.width
+          spacing: Style.space(6)
+          PlainText {
+            width: parent.width
+            text: strings.t("services.hint")
+            color: root.dim
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.Wrap
+            elide: Text.ElideNone
+          }
+          Repeater {
+            model: root.serviceTabs.filter(function(t) { return t.id !== "yt" && t.id !== "my" })
+            Toggle {
+              required property var modelData
+              width: parent.width
+              label: modelData.glyph + "  " + modelData.label
+              description: strings.t("services.about." + modelData.id)
+              checked: root.shownTabs.some(function(t) { return t.id === modelData.id })
+              foreground: root.fg
+              accent: Commons.Color.accent
+              fontFamily: root.fontFamily
+              onClicked: root.setTabShown(modelData.id, !checked)
+            }
+          }
+          PlainText {
+            width: parent.width
+            topPadding: Style.space(4)
+            text: strings.t("services.soon")
+            color: root.dim
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.Wrap
+            elide: Text.ElideNone
           }
         }
 
@@ -2927,13 +3479,22 @@ Panel {
             }
             PlainText {
               width: parent.width
-              text: root.rcloneInstalled ? strings.t("cloud.body") : strings.t("cloud.noRclone")
+              text: root.cloudFormUsable ? strings.t("cloud.body") : strings.t("cloud.noRclone")
               color: root.dim
               wrapMode: Text.Wrap
               elide: Text.ElideNone
             }
             Button {
-              visible: !root.rcloneInstalled
+              visible: root.cloudMusicDir !== "" && root.cloudBusy === ""
+              iconText: Model.GLYPH.folderMusic
+              text: strings.t("cloud.addMusic").arg(root.cloudMusicDir.replace(root.homeDir, "~"))
+              foreground: root.fg
+              fontFamily: root.fontFamily
+              bordered: true
+              onClicked: root.addMusicFolder()
+            }
+            Button {
+              visible: !root.cloudFormUsable
               iconText: Model.GLYPH.download
               text: strings.t("cloud.installRclone")
               foreground: root.fg
@@ -2943,7 +3504,7 @@ Panel {
             }
 
             Flow {
-              visible: root.rcloneInstalled
+              visible: true
               width: parent.width
               spacing: Style.space(6)
               Repeater {
@@ -2962,7 +3523,7 @@ Panel {
               }
             }
             PlainText {
-              visible: root.rcloneInstalled
+              visible: root.cloudFormUsable
               width: parent.width
               text: strings.t("cloud.hint." + root.cloudKind)
               color: root.dim
@@ -2973,7 +3534,7 @@ Panel {
 
             // A remote rclone already has (`rclone config`).
             Flow {
-              visible: root.rcloneInstalled && root.cloudKind === "remote" && root.cloudRemotes.length > 0
+              visible: root.cloudFormUsable && root.cloudKind === "remote" && root.cloudRemotes.length > 0
               width: parent.width
               spacing: Style.space(6)
               Repeater {
@@ -2991,7 +3552,7 @@ Panel {
               }
             }
             PlainText {
-              visible: root.rcloneInstalled && root.cloudKind === "remote" && root.cloudRemotes.length === 0
+              visible: root.cloudFormUsable && root.cloudKind === "remote" && root.cloudRemotes.length === 0
               width: parent.width
               text: strings.t("cloud.noRemotes")
               color: root.dim
@@ -3001,8 +3562,9 @@ Panel {
             }
 
             Repeater {
-              model: root.rcloneInstalled && root.cloudFormEpoch >= 0 ? root.cloudKindSpec.fields.slice() : []
+              model: root.cloudFormUsable && root.cloudFormEpoch >= 0 ? root.cloudKindSpec.fields.slice() : []
               CloudField {
+                onSubmitted: root.connectCloud()
                 required property var modelData
                 width: cloudColumn.width
                 label: strings.t("cloud.field." + modelData)
@@ -3011,20 +3573,23 @@ Panel {
               }
             }
             CloudField {
+              onSubmitted: root.connectCloud()
               id: cloudPathField
-              visible: root.rcloneInstalled
+              visible: root.cloudFormUsable && root.cloudKindSpec.server !== true
               width: parent.width
-              label: strings.t(root.cloudKind === "s3" ? "cloud.pathS3" : root.cloudKind === "smb" ? "cloud.pathSmb" : "cloud.path")
+              label: strings.t(root.cloudKind === "s3" ? "cloud.pathS3" : root.cloudKind === "smb" ? "cloud.pathSmb"
+                : root.cloudKind === "local" ? "cloud.pathLocal" : "cloud.path")
             }
             CloudField {
+              onSubmitted: root.connectCloud()
               id: cloudTitleField
-              visible: root.rcloneInstalled
+              visible: root.cloudFormUsable
               width: parent.width
               label: strings.t("cloud.name")
             }
 
             Row {
-              visible: root.rcloneInstalled
+              visible: root.cloudFormUsable
               spacing: Style.space(8)
               Button {
                 iconText: root.cloudBusy !== "" ? Model.GLYPH.loading : Model.GLYPH.cloud
@@ -3204,6 +3769,27 @@ Panel {
               }
             }
             Row {
+              visible: root.dzUserSetting !== ""
+              spacing: Style.space(8)
+              PlainText {
+                anchors.verticalCenter: parent.verticalCenter
+                text: Model.GLYPH.deezer + "  " + strings.t("accounts.dz").arg(root.dzUserSetting)
+              }
+              Button {
+                text: strings.t("accounts.change")
+                fontSize: Style.font.bodySmall
+                foreground: root.fg
+                fontFamily: root.fontFamily
+                bordered: true
+                onClicked: {
+                  root.saveSettings({ deezerUser: "" })
+                  root.setSvc("dz", { items: [], setup: "dz" })
+                  root.setTabShown("dz", true)
+                  root.switchService("dz")
+                }
+              }
+            }
+            Row {
               spacing: Style.space(8)
               PlainText {
                 anchors.verticalCenter: parent.verticalCenter
@@ -3221,6 +3807,88 @@ Panel {
                   spotifyLogoutProc.running = true
                   root.saveSettings({ spotifyClientId: "" })
                   root.setSvc("sp", { items: [], setup: "sp" })
+                }
+              }
+            }
+
+            // Scrobbling: Last.fm and ListenBrainz, each connected or with its form.
+            Repeater {
+              model: [{ id: "lastfm", fields: ["key", "secret"], help: "https://www.last.fm/api/account/create" },
+                      { id: "listenbrainz", fields: ["token"], help: "https://listenbrainz.org/settings/" }]
+              Column {
+                id: scrobbleRow
+                required property var modelData
+                readonly property string who: root.scrobbleState[modelData.id] || ""
+                readonly property bool formOpen: root.scrobbleForm === modelData.id && who === ""
+                property var values: ({})
+                width: parent.width
+                spacing: Style.space(6)
+                Row {
+                  spacing: Style.space(8)
+                  PlainText {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: Model.GLYPH.history + "  " + strings.t("scrobble." + scrobbleRow.modelData.id)
+                      .arg(scrobbleRow.who !== "" ? scrobbleRow.who : strings.t("accounts.none"))
+                  }
+                  Button {
+                    text: strings.t(scrobbleRow.who !== "" ? "accounts.disconnect" : scrobbleRow.formOpen ? "scrobble.cancel" : "scrobble.connect")
+                    fontSize: Style.font.bodySmall
+                    foreground: root.fg
+                    fontFamily: root.fontFamily
+                    bordered: true
+                    enabled: !scrobbleProc.running
+                    onClicked: {
+                      if (scrobbleRow.who !== "") root.disconnectScrobble(scrobbleRow.modelData.id)
+                      else root.scrobbleForm = scrobbleRow.formOpen ? "" : scrobbleRow.modelData.id
+                    }
+                  }
+                }
+                PlainText {
+                  visible: scrobbleRow.formOpen
+                  width: parent.width
+                  text: strings.t("scrobble." + scrobbleRow.modelData.id + "Help")
+                  color: root.dim
+                  wrapMode: Text.Wrap
+                  elide: Text.ElideNone
+                }
+                Repeater {
+                  model: scrobbleRow.formOpen ? scrobbleRow.modelData.fields : []
+                  CloudField {
+                    required property var modelData
+                    width: scrobbleRow.width
+                    label: strings.t("scrobble.field." + modelData)
+                    secret: modelData !== "key"
+                    onEdited: function(value) {
+                      var next = Object.assign({}, scrobbleRow.values)
+                      next[modelData] = value
+                      scrobbleRow.values = next
+                    }
+                    onSubmitted: root.connectScrobble(scrobbleRow.modelData.id, scrobbleRow.values)
+                  }
+                }
+                Row {
+                  visible: scrobbleRow.formOpen
+                  spacing: Style.space(8)
+                  Button {
+                    iconText: scrobbleProc.running ? Model.GLYPH.loading : Model.GLYPH.check
+                    iconSpinning: scrobbleProc.running
+                    text: strings.t(root.scrobbleWaiting ? "scrobble.waiting" : "scrobble.connect")
+                    fontSize: Style.font.bodySmall
+                    foreground: root.fg
+                    fontFamily: root.fontFamily
+                    bordered: true
+                    enabled: !scrobbleProc.running
+                    onClicked: root.connectScrobble(scrobbleRow.modelData.id, scrobbleRow.values)
+                  }
+                  Button {
+                    iconText: Model.GLYPH.forward
+                    text: strings.t("scrobble." + scrobbleRow.modelData.id + "Where")
+                    fontSize: Style.font.bodySmall
+                    foreground: root.fg
+                    fontFamily: root.fontFamily
+                    bordered: true
+                    onClicked: { openUrlProc.command = ["xdg-open", scrobbleRow.modelData.help]; openUrlProc.running = true }
+                  }
                 }
               }
             }
@@ -3357,8 +4025,11 @@ Panel {
                 font.pixelSize: rowItem.isTrack && !rowItem.isNow && root.view === "tracks" ? Style.font.body : Style.font.title
                 text: {
                   if (rowItem.isNow) return root.paused ? Model.GLYPH.pause : Model.GLYPH.play
+                  if (rowItem.kind === "country") return rowItem.modelData.id === root.radioCountry ? Model.GLYPH.check : Model.GLYPH.explore
                   if (rowItem.kind === "explore") return rowItem.modelData.id === "__scsearch" ? Model.GLYPH.search
-                    : rowItem.modelData.id === "__cloudadd" ? Model.GLYPH.plus : Model.GLYPH.explore
+                    : rowItem.modelData.id === "__rdcountry" ? Model.GLYPH.explore
+                    : rowItem.modelData.id === "__aimake" ? Model.GLYPH.ai
+                    : rowItem.modelData.id === "__cloudadd" || rowItem.modelData.id === "__amadd" ? Model.GLYPH.plus : Model.GLYPH.explore
                   if (rowItem.kind === "mood") return Model.GLYPH.mood
                   if (!rowItem.isTrack) {
                     if (rowItem.modelData.id === "LM") return Model.GLYPH.heart
@@ -3366,8 +4037,25 @@ Panel {
                     if (rowItem.modelData.id === "new") return Model.GLYPH.playlistAdd
                     if (/^mix:/.test(rowItem.modelData.id) || rowItem.kind === "mixTarget") return Model.GLYPH.supermix
                     if (rowItem.modelData.id === "sp:liked") return Model.GLYPH.spotify
+                    if (rowItem.modelData.id === "dz:fav") return Model.GLYPH.heart
+                    if (rowItem.modelData.id === "dz:chart") return Model.GLYPH.deezer
+                    if (/^mc:/.test(rowItem.modelData.id)) return Model.GLYPH.mixcloud
+                    if (rowItem.modelData.id === "am:top") return Model.GLYPH.apple
+                    if (/^am:al:/.test(rowItem.modelData.id)) return Model.GLYPH.album
+                    if (/^am:pl:/.test(rowItem.modelData.id)) return Model.GLYPH.playlist
+                    if (/^au:/.test(rowItem.modelData.id)) return Model.GLYPH.audius
                     if (/^sc:likes:/.test(rowItem.modelData.id)) return Model.GLYPH.soundcloud
                     if (/^cl:[a-f0-9]{8}$/.test(rowItem.modelData.id)) return Model.GLYPH.cloud
+                    if (rowItem.modelData.id === "rd:fav") return Model.GLYPH.heart
+                    if (rowItem.modelData.id === "ai:mix") return Model.GLYPH.ai
+                    if (rowItem.modelData.id === "hist:recent") return Model.GLYPH.history
+                    if (/^ms:[a-f0-9]{8}:fav$/.test(rowItem.modelData.id)) return Model.GLYPH.heart
+                    if (/^ms:[a-f0-9]{8}:rnd$/.test(rowItem.modelData.id)) return Model.GLYPH.shuffle
+                    if (/^ms:[a-f0-9]{8}:pl:/.test(rowItem.modelData.id)) return Model.GLYPH.playlist
+                    if (/^ms:/.test(rowItem.modelData.id)) return Model.GLYPH.album
+                    if (/^rd:/.test(rowItem.modelData.id)) return Model.GLYPH.radioService
+                    if (rowItem.modelData.id === "pc:new") return Model.GLYPH.history
+                    if (/^pc:/.test(rowItem.modelData.id)) return Model.GLYPH.podcast
                     if (/^cl:/.test(rowItem.modelData.id)) return Model.GLYPH.album
                     if (rowItem.modelData.id === Model.SUPERMIX_ID) return Model.GLYPH.supermix
                     return root.view === "explore" ? Model.GLYPH.album : Model.GLYPH.playlist
@@ -3403,7 +4091,8 @@ Panel {
                 visible: text !== ""
                 color: root.dim
                 font.pixelSize: Style.font.body
-                text: rowItem.modelData.artist || rowItem.modelData.subtitle || ""
+                text: (rowItem.modelData.artist || rowItem.modelData.subtitle || "")
+                  + (rowItem.modelData.note ? "  ·  " + rowItem.modelData.note : "")
               }
             }
 
@@ -3419,6 +4108,8 @@ Panel {
                 var d = rowItem.modelData
                 if (rowItem.kind === "explore" || rowItem.kind === "mood") return rowItem.kind === "explore" ? Model.GLYPH.forward : ""
                 if (rowItem.isTrack) return d.duration !== null && d.duration !== undefined ? Model.formatTime(d.duration, Commons.I18n.formatNumber) : ""
+                if (rowItem.kind === "country") return strings.t("rd.stationCount").arg(Commons.I18n.formatNumber(d.count || 0))
+                if (/^rd:/.test(String(d.id)) && typeof d.count === "number") return strings.t("rd.stationCount").arg(Commons.I18n.formatNumber(d.count))
                 // Add-to view: a check where the song already is.
                 if (root.view === "addTo" && d.contains === true) return Model.GLYPH.check
                 return typeof d.count === "number" ? strings.tn("list.tracks", d.count).arg(Commons.I18n.formatNumber(d.count)) : ""
@@ -3460,7 +4151,7 @@ Panel {
               spacing: Style.space(2)
 
               PanelActionButton {
-                visible: Model.isYouTube(rowItem.modelData.id)
+                visible: root.canLike(rowItem.modelData.id)
                 iconText: rowItem.liked ? Model.GLYPH.heart : Model.GLYPH.heartOutline
                 tooltipText: rowItem.liked ? strings.t("controls.unlike") : strings.t("controls.like")
                 foreground: rowItem.liked ? Style.selectedStateColor(root.fg, Commons.Color.accent) : root.fg
@@ -3485,6 +4176,7 @@ Panel {
                 onClicked: root.startRadio(rowItem.modelData)
               }
               PanelActionButton {
+                visible: Model.canDownload(rowItem.modelData.id)
                 iconText: Model.GLYPH.download
                 tooltipText: strings.t("controls.download")
                 foreground: root.fg
@@ -3511,7 +4203,7 @@ Panel {
           color: root.dim
           font.pixelSize: Style.font.bodySmall
           text: {
-            if (root.view === "settings" || root.view === "download") return ""
+            if (root.view === "settings" || root.view === "download" || root.view === "services" || root.view === "ai") return ""
             if (root.view === "explore") {
               if (root.exploreError !== "") return strings.t("error.prefix").arg(root.exploreError)
               if (root.rows.length > 0) return ""
@@ -3604,7 +4296,8 @@ Panel {
     onClicked: root.reportProblem(where, message)
   }
 
-  // A service tab: its logo in the service's color, its name when selected.
+  // A service in the rail: its logo in the service's color; the selected one
+  // lit and outlined. Its name shows on hover.
   component ServiceTab: BorderSurface {
     id: tab
     property string glyph: ""
@@ -3612,34 +4305,19 @@ Panel {
     property string label: ""
     property bool selected: false
     signal clicked()
-    implicitHeight: Style.space(34)
-    implicitWidth: tabRow.implicitWidth + Style.space(20)
+    implicitWidth: Style.space(38)
+    implicitHeight: Style.space(38)
     radius: Style.cornerRadius
-    color: Style.controlFill(false, selected || tabMouse.containsMouse, root.fg, Commons.Color.accent)
-    borderSpec: Border.controlSpec(selected ? "focus" : (tabMouse.containsMouse ? "hover-cursor" : "normal"), root.fg, Commons.Color.accent)
+    color: selected || tabMouse.containsMouse ? Style.controlFill(false, true, root.fg, Commons.Color.accent) : "transparent"
+    borderSpec: selected ? Border.controlSpec("focus", root.fg, Commons.Color.accent) : Border.flat("transparent", 0)
 
-    Row {
-      id: tabRow
+    Text {
       anchors.centerIn: parent
-      spacing: Style.space(6)
-      Text {
-        textFormat: Text.PlainText
-        text: tab.glyph
-        color: tab.brand
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.title
-        anchors.verticalCenter: parent.verticalCenter
-      }
-      Text {
-        visible: tab.selected
-        textFormat: Text.PlainText
-        text: tab.label
-        color: root.fg
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.body
-        font.bold: true
-        anchors.verticalCenter: parent.verticalCenter
-      }
+      textFormat: Text.PlainText
+      text: tab.glyph
+      color: tab.brand
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.title
     }
     MouseArea {
       id: tabMouse
@@ -3649,7 +4327,7 @@ Panel {
       onClicked: tab.clicked()
     }
     PanelToolTip {
-      visible: tabMouse.containsMouse && !tab.selected
+      visible: tabMouse.containsMouse
       text: tab.label
     }
   }
@@ -3661,6 +4339,7 @@ Panel {
     property bool secret: false
     property alias text: input.text
     signal edited(string value)
+    signal submitted()
     spacing: Style.space(4)
 
     PlainText {
@@ -3695,7 +4374,8 @@ Panel {
         echoMode: field.secret ? TextInput.Password : TextInput.Normal
         onTextEdited: field.edited(text)
         onActiveFocusChanged: root.cloudTyping = activeFocus
-        onAccepted: { focus = false; root.connectCloud() }
+        Keys.onReturnPressed: function(event) { focus = false; field.submitted(); event.accepted = true }
+        Keys.onEnterPressed: function(event) { focus = false; field.submitted(); event.accepted = true }
         Keys.onEscapePressed: function(event) { focus = false; event.accepted = true }
       }
     }

@@ -985,6 +985,608 @@ class Chords(unittest.TestCase):
             self.assertFalse(h.SCORE_URL_RE.match(bad), bad)
 
 
+
+class Radio(unittest.TestCase):
+    UUID = "1c6dcd6f-88c6-4fd4-8191-078435168e85"
+
+    def test_station_as_a_track(self):
+        track, url = h.radio_station({"stationuuid": self.UUID, "name": "BBC Radio 6 Music\n", "url_resolved": "https://a.example/live.aac",
+                                      "tags": "indie,rock,alt,extra", "countrycode": "GB", "codec": "AAC", "bitrate": 128,
+                                      "favicon": "https://a.example/logo.png"})
+        self.assertEqual(track["id"], "rd:" + self.UUID)
+        self.assertEqual(track["title"], "BBC Radio 6 Music")
+        self.assertEqual(track["artist"], "indie, rock, alt · GB · AAC 128")
+        self.assertEqual(url, "https://a.example/live.aac")
+        self.assertTrue(h.TRACK_KEY_RE.match(track["id"]))
+        for bad in ({"stationuuid": "x", "url_resolved": "https://a"}, {"stationuuid": self.UUID, "url_resolved": "javascript:x"},
+                    {"stationuuid": self.UUID, "url_resolved": "https://a b"}):
+            self.assertEqual(h.radio_station(bad), (None, None))
+
+    def test_lists(self):
+        for lid in ("rd:fav", "rd:top", "rd:vote", "rd:search", "rd:country:DE", "rd:tag:hip-hop"):
+            self.assertTrue(h.is_list_id(lid), lid)
+        self.assertFalse(h.is_list_id("rd:tag:../x"))
+        self.assertEqual(h.radio_list_query("rd:tag:hip-hop")[1]["tag"], "hip hop")
+        self.assertEqual(h.radio_list_query("rd:country:DE")[1]["countrycode"], "DE")
+        self.assertEqual(h.track_url({"id": "rd:" + self.UUID}), "ytmusic-radio://" + self.UUID)
+        self.assertEqual(h.source_of("rd:" + self.UUID), "rd")
+
+
+def capture(fn, args):
+    import contextlib
+    import io
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        fn(args)
+    return [json.loads(line) for line in out.getvalue().splitlines()]
+
+
+class SoundCloudCovers(unittest.TestCase):
+    def test_covers_from_search_thumbnails(self):
+        items = h.sc_items({"entries": [{"url": "https://api.soundcloud.com/tracks/soundcloud%3Atracks%3A945191926",
+                                         "title": "X", "uploader": "Lucabn't", "thumbnails": [
+                                             {"id": "mini", "url": "https://i1.sndcdn.com/artworks-Gz-HoUyKA-mini.jpg"},
+                                             {"id": "t300x300", "url": "https://i1.sndcdn.com/artworks-Gz-HoUyKA-t300x300.jpg"}]},
+                                        {"url": "https://soundcloud.com/kggn/skytearer", "title": "skytearer",
+                                         "thumbnails": [{"id": "t300x300", "url": "https://evil.example/x.jpg"}]}]})
+        self.assertEqual(items[0]["cover"], "https://i1.sndcdn.com/artworks-Gz-HoUyKA-t300x300.jpg")
+        self.assertNotIn("cover", items[1])
+
+    def test_likes_get_cover_and_artist_from_oembed_once(self):
+        calls = []
+        saved = (h.SC_META_PATH, h.http_json)
+        with tempfile.TemporaryDirectory() as d:
+            h.SC_META_PATH = os.path.join(d, "meta.json")
+            h.http_json = lambda url, max_bytes=0, timeout=0: calls.append(url) or {
+                "author_name": "kuru", "thumbnail_url": "https://i1.sndcdn.com/artworks-RQH2KPnushgBas2T-epCnaA-t500x500.jpg"}
+            try:
+                items = [{"id": "sc:kggn/skytearer", "title": "skytearer", "artist": "kggn"}]
+                out = h.with_sc_meta(items)
+                self.assertEqual(out[0]["artist"], "kuru")
+                self.assertEqual(out[0]["cover"], "https://i1.sndcdn.com/artworks-RQH2KPnushgBas2T-epCnaA-t300x300.jpg")
+                self.assertIn("url=https%3A%2F%2Fsoundcloud.com%2Fkggn%2Fskytearer", calls[0])
+                h.with_sc_meta(items)
+                self.assertEqual(len(calls), 1)
+            finally:
+                h.SC_META_PATH, h.http_json = saved
+
+
+class CoversEverywhere(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.saved = (h.COVERS_DIR, h.HISTORY_PATH, h.DATA_DIR, h.DZ_TRACKS_PATH)
+        h.COVERS_DIR = os.path.join(self.tmp.name, "covers")
+        os.makedirs(h.COVERS_DIR)
+        h.DATA_DIR = self.tmp.name
+        h.HISTORY_PATH = os.path.join(self.tmp.name, "history.jsonl")
+        h.DZ_TRACKS_PATH = os.path.join(self.tmp.name, "dz.json")
+
+    def tearDown(self):
+        h.COVERS_DIR, h.HISTORY_PATH, h.DATA_DIR, h.DZ_TRACKS_PATH = self.saved
+        self.tmp.cleanup()
+
+    def test_valid_cover(self):
+        local = os.path.join(h.COVERS_DIR, "au-V66vyPP.jpg")
+        pathlib.Path(local).write_bytes(b"x")
+        self.assertEqual(h.valid_cover(local), os.path.realpath(local))
+        self.assertEqual(h.valid_cover("https://cdn-images.dzcdn.net/images/cover/" + "a" * 32 + "/250x250-000000-80-0-0.jpg")[:8], "https://")
+        self.assertEqual(h.valid_cover("https://thumbnailer.mixcloud.com/unsafe/300x300/extaudio/a/b"), "https://thumbnailer.mixcloud.com/unsafe/300x300/extaudio/a/b")
+        outside = os.path.join(self.tmp.name, "x.jpg")
+        pathlib.Path(outside).write_bytes(b"x")
+        for bad in (outside, "https://evil.example/a.jpg", os.path.join(h.COVERS_DIR, "missing.jpg"), None, 3):
+            self.assertEqual(h.valid_cover(bad), "", bad)
+
+    def test_mixes_keep_any_services_cover(self):
+        local = os.path.join(h.COVERS_DIR, "rd-x.png")
+        pathlib.Path(local).write_bytes(b"x")
+        dz = "https://cdn-images.dzcdn.net/images/cover/" + "b" * 32 + "/250x250-000000-80-0-0.jpg"
+        self.assertEqual(h.clean_track({"id": "dz:1", "title": "a", "cover": dz})["cover"], dz)
+        self.assertEqual(h.clean_track({"id": "au:abc", "title": "a", "cover": local})["cover"], os.path.realpath(local))
+        self.assertNotIn("cover", h.clean_track({"id": "au:abc", "title": "a", "cover": "/etc/passwd"}))
+
+    def test_recently_played_has_covers(self):
+        dz = "https://cdn-images.dzcdn.net/images/cover/" + "c" * 32 + "/250x250-000000-80-0-0.jpg"
+        h.write_json_atomic(h.DZ_TRACKS_PATH, {"dz:2": {"title": "old", "cover": dz}})
+        with open(h.HISTORY_PATH, "w") as fh:
+            fh.write(json.dumps({"t": 1, "id": "dz:2", "title": "old", "played": 200, "duration": 200}) + "\n")
+            fh.write(json.dumps({"t": 2, "id": "dz:3", "title": "new", "played": 200, "duration": 200, "cover": dz}) + "\n")
+        recent = {t["id"]: t for t in h.recent_tracks()}
+        self.assertEqual(recent["dz:2"]["cover"], dz)
+        self.assertEqual(recent["dz:3"]["cover"], dz)
+
+    def test_embedded_cover_of_a_local_folder(self):
+        import shutil
+        import subprocess
+        if not shutil.which("ffmpeg"):
+            self.skipTest("ffmpeg")
+        music = os.path.join(self.tmp.name, "music", "Band", "Album")
+        os.makedirs(music)
+        art = os.path.join(self.tmp.name, "art.png")
+        subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=c=red:s=64x64", "-frames:v", "1", art], check=True)
+        subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=duration=1", "-i", art, "-map", "0:a", "-map", "1:v",
+                        "-c:v", "mjpeg", "-disposition:v:0", "attached_pic", os.path.join(music, "01 - Song.mp3")], check=True)
+        src = {"id": "0a1b2c3d", "kind": "local", "remote": "", "path": os.path.join(self.tmp.name, "music")}
+        idx = h.index_entries(src, h.local_entries(src["path"]))
+        self.assertTrue(os.path.isfile(idx["covers"]["Band/Album"]))
+
+
+class AppleMusic(unittest.TestCase):
+    def test_art_ids_and_links(self):
+        self.assertEqual(h.am_art("https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/1d/1b/f9/x/26UMGIM39303.rgb.jpg/{w}x{h}bb.{f}"),
+                         "https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/1d/1b/f9/x/26UMGIM39303.rgb.jpg/300x300bb.jpg")
+        self.assertTrue(h.am_art("https://is1-ssl.mzstatic.com/image/thumb/Music/x/cover.jpg/100x100bb.jpg").endswith("/cover.jpg/300x300bb.jpg"))
+        self.assertIsNone(h.am_art("https://evil.example/x/100x100bb.jpg"))
+        t = h.am_song("1460471576", "Ghost Love Score", "Nightwish", 602000)
+        self.assertEqual((t["id"], t["duration"]), ("am:1460471576", 602))
+        self.assertTrue(h.TRACK_KEY_RE.match(t["id"]))
+        self.assertEqual(h.track_url(t), "ytmusic-apple://1460471576")
+        self.assertEqual(h.mix_entry("ytmusic-apple://1460471576")[0], "am:1460471576")
+        for lid in ("am:top", "am:search", "am:al:1460471435", "am:pl:pl.f4d106fed2bd41149aaacabb233eb5eb"):
+            self.assertTrue(h.is_list_id(lid), lid)
+        self.assertTrue(h.AM_LINK_RE.match("https://music.apple.com/us/playlist/todays-hits/pl.f4d106fed2bd41149aaacabb233eb5eb"))
+        self.assertTrue(h.AM_LINK_RE.match("https://music.apple.com/ru/album/once/1460471435?i=1460471576"))
+        for bad in ("https://evil.example/us/playlist/x/pl.f4d106fed2bd4114", "https://music.apple.com/us/artist/x/123"):
+            self.assertIsNone(h.AM_LINK_RE.match(bad), bad)
+
+    def test_playlist_page(self):
+        page = json.dumps({"data": [{"data": {"sections": [{"items": [
+            {"title": "stupid song", "artistName": "Olivia Rodrigo", "duration": 209680,
+             "contentDescriptor": {"kind": "song", "identifiers": {"storeAdamID": "1889992115"}},
+             "artwork": {"dictionary": {"url": "https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/a/b.jpg/{w}x{h}bb.{f}"}}},
+            {"title": "Album", "contentDescriptor": {"kind": "album", "identifiers": {"storeAdamID": "1"}}}]}]}}]})
+        body = ('<html><title>&lrm;Today&#8217;s Hits - Playlist - Apple Music</title>'
+                '<script type="application/json" id="serialized-server-data">' + page + '</script></html>').encode()
+        saved = h.http_get
+        h.http_get = lambda url, max_bytes, timeout=15, accept="": (body, None)
+        try:
+            title, songs = h.am_playlist_page("https://music.apple.com/us/playlist/x/pl.f4d106fed2bd4114")
+        finally:
+            h.http_get = saved
+        self.assertEqual(title, "Today\u2019s Hits")
+        self.assertEqual([s["id"] for s in songs], ["am:1889992115"])
+        self.assertEqual(songs[0]["duration"], 209)
+        self.assertTrue(songs[0]["cover"].endswith("/300x300bb.jpg"))
+
+
+class ServicePages(unittest.TestCase):
+    def test_fixed_https_pages(self):
+        for name, url in h.SERVICE_PAGES.items():
+            self.assertTrue(url.startswith("https://"), name)
+        for name in ("sc", "sc-profile", "dz", "dz-profile"):
+            self.assertIn(name, h.SERVICE_PAGES)
+
+
+class Deezer(unittest.TestCase):
+    def test_profile_links(self):
+        self.assertEqual(h.deezer_user("123456"), "123456")
+        self.assertEqual(h.deezer_user("https://www.deezer.com/en/profile/987654321"), "987654321")
+        self.assertEqual(h.deezer_user("https://www.deezer.com/profile/5?x=1"), "5")
+        for bad in ("", "evil", "https://evil.example/profile/1x", "javascript:1"):
+            self.assertEqual(h.deezer_user(bad), "", bad)
+
+    def test_track_and_covers(self):
+        t = h.dz_track({"id": 668826392, "title": "Ghost Love Score\n", "duration": 600, "artist": {"name": "Nightwish"},
+                        "album": {"title": "Once", "md5_image": "a" * 32}})
+        self.assertEqual(t["id"], "dz:668826392")
+        self.assertEqual(t["title"], "Ghost Love Score")
+        self.assertEqual(t["cover"], "https://cdn-images.dzcdn.net/images/cover/" + "a" * 32 + "/250x250-000000-80-0-0.jpg")
+        self.assertTrue(h.TRACK_KEY_RE.match(t["id"]))
+        self.assertIsNone(h.dz_track({"id": "x"}))
+        self.assertTrue(h.dz_image("playlist", "-".join(["b" * 32] * 4)))
+        self.assertIsNone(h.dz_image("cover", "../x"))
+
+    def test_lists_queue_and_matches(self):
+        for lid in ("dz:fav", "dz:chart", "dz:search", "dz:pl:276102231"):
+            self.assertTrue(h.is_list_id(lid), lid)
+        self.assertFalse(h.is_list_id("dz:pl:x"))
+        self.assertEqual(h.track_url({"id": "dz:668826392"}), "ytmusic-deezer://668826392")
+        self.assertEqual(h.mix_entry("ytmusic-deezer://668826392")[0], "dz:668826392")
+        self.assertEqual(h.source_of("dz:668826392"), "dz")
+        with tempfile.TemporaryDirectory() as d:
+            saved = h.DZ_MATCH_PATH
+            h.DZ_MATCH_PATH = os.path.join(d, "m.json")
+            try:
+                h.write_json_atomic(h.DZ_MATCH_PATH, {"668826392": "XZcI70MPE5A"})
+                self.assertEqual(h.resolve_spotify("dz:668826392"), "XZcI70MPE5A")
+            finally:
+                h.DZ_MATCH_PATH = saved
+
+
+class MixcloudAudius(unittest.TestCase):
+    def test_mixcloud(self):
+        t = h.mc_track({"key": "/DJJazzyJeff/dj-jazzy-jeff-boiler-room/", "name": "Boiler Room", "audio_length": 3600,
+                        "user": {"name": "DJ Jazzy Jeff"},
+                        "pictures": {"large": "https://thumbnailer.mixcloud.com/unsafe/300x300/extaudio/a/b/c"}})
+        self.assertEqual(t["id"], "mc:DJJazzyJeff/dj-jazzy-jeff-boiler-room")
+        self.assertTrue(h.TRACK_KEY_RE.match(t["id"]))
+        self.assertEqual(h.track_url(t), "https://www.mixcloud.com/DJJazzyJeff/dj-jazzy-jeff-boiler-room/")
+        self.assertEqual(h.mix_entry(h.track_url(t))[0], t["id"])
+        self.assertIsNone(h.mc_track({"key": "/../x/"}))
+        self.assertTrue(h.is_list_id("mc:hot:deep-house") and h.is_list_id("mc:search"))
+
+    def test_audius(self):
+        t = h.au_track({"id": "V66vyPP", "title": "Fragments", "duration": 212, "user": {"name": "Xsetra"},
+                        "artwork": {"150x150": "https://v.example.org/content/baeaaaiqse1234567890/150x150.jpg"}})
+        self.assertEqual(t["id"], "au:V66vyPP")
+        self.assertEqual(t["art"], "https://v.example.org/content/baeaaaiqse1234567890/150x150.jpg")
+        self.assertIsNone(h.au_track({"id": "bad id"}))
+        self.assertIsNone(h.au_track({"id": "abc", "is_streamable": False}))
+        self.assertEqual(h.track_url({"id": "au:V66vyPP"}), "ytmusic-audius://V66vyPP")
+        self.assertEqual(h.mix_entry("ytmusic-audius://V66vyPP")[0], "au:V66vyPP")
+        self.assertEqual(h.audius_stream_url("au:V66vyPP"),
+                         "https://api.audius.co/v1/tracks/V66vyPP/stream?app_name=omarchy-music-player")
+        self.assertTrue(h.is_list_id("au:trending") and h.is_list_id("au:trending:hip-hop-rap"))
+        self.assertEqual(h.au_slug("Hip-Hop/Rap"), "hip-hop-rap")
+        self.assertTrue(h.cache_name("au:V66vyPP").startswith("au") and "-" not in h.cache_name("au:V66vyPP"))
+
+
+class Scrobbling(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.saved = (h.DATA_DIR, h.SCROBBLE_PATH, h.listenbrainz_call, h.lastfm_call)
+        h.DATA_DIR = self.tmp.name
+        h.SCROBBLE_PATH = os.path.join(self.tmp.name, "scrobble.json")
+        self.sent = []
+        h.listenbrainz_call = lambda path, token, payload=None: self.sent.append(("lb", path, token, payload)) or {}
+        h.lastfm_call = lambda method, params, key, secret, post=False: self.sent.append(("lf", method, params)) or {}
+
+    def tearDown(self):
+        h.DATA_DIR, h.SCROBBLE_PATH, h.listenbrainz_call, h.lastfm_call = self.saved
+        self.tmp.cleanup()
+
+    def test_only_long_enough_plays_where_connected(self):
+        song = {"title": "Ghost Love Score (Official Live Video)", "artist": "NightwishVEVO", "album": "Once"}
+        h.scrobble(song, 600, 600, 1000)
+        self.assertEqual(self.sent, [])
+        h.write_scrobble_config({"listenbrainz": {"token": "tok-12345678", "user": "me"},
+                                 "lastfm": {"key": "k", "secret": "s", "session": "sk", "user": "me"}})
+        self.assertEqual(oct(os.stat(h.SCROBBLE_PATH).st_mode & 0o777), "0o600")
+        h.scrobble(song, 100, 600, 1000)
+        h.scrobble(dict(song, title="Jingle"), 25, 25, 1000)
+        self.assertEqual(self.sent, [])
+        h.scrobble(song, 300, 600, 1000)
+        lb = self.sent[0]
+        self.assertEqual(lb[1], "submit-listens")
+        meta = lb[3]["payload"][0]["track_metadata"]
+        self.assertEqual((meta["artist_name"], meta["track_name"], meta["release_name"]), ("Nightwish", "Ghost Love Score", "Once"))
+        self.assertEqual(lb[3]["payload"][0]["listened_at"], 1000)
+        lf = self.sent[1]
+        self.assertEqual((lf[1], lf[2]["artist"], lf[2]["track"], lf[2]["timestamp"], lf[2]["sk"]),
+                         ("track.scrobble", "Nightwish", "Ghost Love Score", 1000, "sk"))
+        self.sent.clear()
+        h.scrobble(dict(song, title="An epic"), 250, 3600, 1000)
+        self.assertEqual(len(self.sent), 2)
+
+    def test_signature_and_status(self):
+        import hashlib
+        sig = h.lastfm_sig({"method": "auth.getSession", "api_key": "k", "token": "t", "format": "json"}, "s")
+        self.assertEqual(sig, hashlib.md5(b"api_keykmethodauth.getSessiontokents").hexdigest())
+        h.write_scrobble_config({"lastfm": {"key": "k", "secret": "s", "session": "sk", "user": "me"}})
+        out = capture(h.cmd_scrobble, [])
+        self.assertEqual(out[-1], {"type": "scrobble", "listenbrainz": "", "lastfm": "me"})
+        out = capture(h.cmd_scrobble, ["--remove", "lastfm"])
+        self.assertEqual(out[-1]["lastfm"], "")
+
+    def test_names(self):
+        self.assertEqual(h.scrobble_names("Song - Remastered 2011", "Queen"), ("Queen", "Song - Remastered 2011"))
+        self.assertEqual(h.scrobble_names("Wardruna - Helvegen", "Some Channel"), ("Wardruna", "Helvegen"))
+        self.assertEqual(h.scrobble_names("Helvegen", "Wardruna - Topic"), ("Wardruna", "Helvegen"))
+
+
+class Podcasts(unittest.TestCase):
+    FEED = b"""<?xml version="1.0"?>
+<rss xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel>
+<title>Show Title</title><itunes:author>Host</itunes:author><itunes:image href="https://x.example/art.jpg"/>
+<item><title>Old</title><guid>g1</guid><pubDate>Mon, 03 Mar 2025 10:00:00 +0000</pubDate>
+  <enclosure url="https://cdn.example/1.mp3" type="audio/mpeg"/><itunes:duration>1:02:03</itunes:duration></item>
+<item><title>New</title><guid>g2</guid><pubDate>Tue, 04 Mar 2025 10:00:00 +0000</pubDate>
+  <enclosure url="https://cdn.example/2.mp3" type="audio/mpeg"/><itunes:duration>600</itunes:duration></item>
+<item><title>A PDF</title><enclosure url="https://cdn.example/x.pdf" type="application/pdf"/></item>
+<item><title>Bad link</title><enclosure url="javascript:alert(1)" type="audio/mpeg"/></item>
+</channel></rss>"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.saved = (h.DATA_DIR, h.PODCASTS_PATH, h.PODCAST_DIR, h.PODCAST_SHOWS_PATH, h.COVERS_DIR)
+        h.DATA_DIR = self.tmp.name
+        h.PODCASTS_PATH = os.path.join(self.tmp.name, "podcasts.json")
+        h.PODCAST_DIR = os.path.join(self.tmp.name, "pc")
+        h.PODCAST_SHOWS_PATH = os.path.join(self.tmp.name, "shows.json")
+        h.COVERS_DIR = os.path.join(self.tmp.name, "covers")
+
+    def tearDown(self):
+        h.DATA_DIR, h.PODCASTS_PATH, h.PODCAST_DIR, h.PODCAST_SHOWS_PATH, h.COVERS_DIR = self.saved
+        self.tmp.cleanup()
+
+    def test_feed_episodes_newest_first_audio_only(self):
+        show = h.podcast_show("https://feed.example/rss", "x")
+        show, eps = h.parse_feed(self.FEED, show)
+        self.assertEqual(show["title"], "Show Title")
+        self.assertEqual(show["author"], "Host")
+        self.assertEqual([e["title"] for e in eps], ["New", "Old"])
+        self.assertEqual(eps[1]["duration"], 3723)
+        self.assertEqual(eps[0]["e"], h.podcast_hash("g2"))
+        with self.assertRaises(RuntimeError):
+            h.parse_feed(b'<!DOCTYPE x [<!ENTITY a "aaaa">]><rss><channel/></rss>', show)
+        with self.assertRaises(RuntimeError):
+            h.parse_feed(b"<html>not a feed", show)
+
+    def test_ids_progress_and_resume(self):
+        show = h.podcast_show("https://feed.example/rss", "Show", "Host")
+        h.remember_shows([show])
+        _, eps = h.parse_feed(self.FEED, show)
+        os.makedirs(h.PODCAST_DIR)
+        h.write_json_atomic(os.path.join(h.PODCAST_DIR, show["h"] + ".json"),
+                            {"fetchedAt": int(time.time()), "show": show, "episodes": eps})
+        key = f"pc:{show['h']}/{eps[1]['e']}"
+        self.assertTrue(h.TRACK_KEY_RE.match(key))
+        self.assertTrue(h.is_list_id("pc:" + show["h"]) and h.is_list_id("pc:new"))
+        self.assertFalse(h.is_list_id("pc:../x"))
+        self.assertEqual(h.track_url({"id": key}), "ytmusic-podcast://" + key[3:])
+        self.assertEqual(h.mix_entry("ytmusic-podcast://" + key[3:])[0], key)
+        self.assertEqual(h.podcast_stream(key), ("https://cdn.example/1.mp3", 0))
+        h.note_podcast_progress(key, 1200, 3723, "quit")
+        self.assertEqual(h.podcast_stream(key), ("https://cdn.example/1.mp3", 1195))
+        items = h.podcast_tracks("pc:" + show["h"])["items"]
+        self.assertIn("42 min left", items[1]["note"])
+        h.note_podcast_progress(key, 3720, 3723, "eof")
+        self.assertEqual(h.podcast_stream(key)[1], 0)
+        self.assertIn("Played", h.podcast_tracks("pc:" + show["h"])["items"][1]["note"])
+        self.assertEqual(oct(os.stat(h.PODCASTS_PATH).st_mode & 0o777), "0o600")
+
+    def test_subscribe(self):
+        show = h.podcast_show("https://feed.example/rss", "Show")
+        h.remember_shows([show])
+        out = capture(h.cmd_podcast_sub, ["pc:" + show["h"]])
+        self.assertEqual(out[-1], {"type": "podcastSubs", "ids": ["pc:" + show["h"]]})
+        out = capture(h.cmd_podcast_sub, ["pc:" + show["h"], "--remove", "1"])
+        self.assertEqual(out[-1]["ids"], [])
+
+
+class LocalFolder(unittest.TestCase):
+    def test_lists_songs_and_never_leaves_the_folder(self):
+        with tempfile.TemporaryDirectory() as d:
+            album = os.path.join(d, "Band", "Album")
+            os.makedirs(album)
+            for name in ("01 - Song.mp3", "cover.jpg", "notes.txt", ".hidden.mp3"):
+                pathlib.Path(album, name).write_bytes(b"x")
+            os.makedirs(os.path.join(d, ".git"))
+            pathlib.Path(d, ".git", "x.mp3").write_bytes(b"x")
+            entries = h.local_entries(d)
+            self.assertEqual(sorted(e["Path"] for e in entries),
+                             ["Band/Album/.hidden.mp3", "Band/Album/01 - Song.mp3", "Band/Album/cover.jpg"])
+            src = {"id": "0a1b2c3d", "kind": "local", "remote": "", "path": d}
+            self.assertTrue(h.local_file(src, "Band/Album/01 - Song.mp3").endswith("01 - Song.mp3"))
+            for bad in ("../etc/passwd", "Band/../../x", "/etc/passwd"):
+                with self.assertRaises(RuntimeError):
+                    h.local_file(src, bad)
+
+
+
+class FakeServer:
+    """A tiny HTTP server answering like Subsonic, Jellyfin or Plex."""
+
+    def __init__(self, routes):
+        import http.server, threading
+        routes_ = routes
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+            def answer(self):
+                path, _, query = self.path.partition("?")
+                params = dict(urllib.parse.parse_qsl(query))
+                length = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(length) or b"{}") if length else {}
+                for prefix, fn in routes_:
+                    if path.startswith(prefix):
+                        status, ctype, data = fn(path, params, body, self.headers)
+                        self.send_response(status)
+                        self.send_header("Content-Type", ctype)
+                        self.end_headers()
+                        self.wfile.write(data if isinstance(data, bytes) else json.dumps(data).encode())
+                        return
+                self.send_response(404)
+                self.end_headers()
+            do_GET = do_POST = answer
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.httpd.server_port}"
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.httpd.shutdown()
+
+
+JPEG = b"\xff\xd8\xff\xe0" + b"0" * 64
+AUDIO = b"ID3" + b"\x00" * 2048
+
+
+class MediaServers(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        d = self.dir.name
+        self.env = dict(os.environ, XDG_DATA_HOME=os.path.join(d, "data"), XDG_CACHE_HOME=os.path.join(d, "cache"),
+                        XDG_RUNTIME_DIR=os.path.join(d, "run"))
+        self.servers = []
+
+    def tearDown(self):
+        for srv in self.servers:
+            srv.close()
+        self.dir.cleanup()
+
+    def run_helper(self, *args, stdin=""):
+        import subprocess
+        proc = subprocess.run([sys.executable, "-I", str(HELPER), *args], input=stdin, capture_output=True, text=True,
+                              env=self.env, timeout=60)
+        return [json.loads(l) for l in proc.stdout.splitlines() if l.startswith("{")]
+
+    def check_server(self, kind, routes, fields):
+        srv = FakeServer(routes)
+        self.servers.append(srv)
+        out = self.run_helper("cloud-add", stdin=json.dumps({"kind": kind, "path": "", "fields": dict(fields, url=srv.url)}) + "\n")
+        self.assertEqual(out[-1].get("state"), "added", out)
+        sid = out[-1]["id"]
+        secrets = pathlib.Path(self.env["XDG_DATA_HOME"], h.PLUGIN_ID, "servers.json")
+        self.assertEqual(oct(secrets.stat().st_mode & 0o777), "0o600")
+        self.assertNotIn("hunter2", secrets.read_text())             # never the password
+        lists = [m for m in self.run_helper("playlists", "--service", "cl", "--max-age", "0") if m["type"] == "playlists"][-1]["items"]
+        ids = [l["id"] for l in lists]
+        self.assertIn(f"ms:{sid}:al:al1", ids)
+        album = next(l for l in lists if l["id"] == f"ms:{sid}:al:al1")
+        self.assertTrue(album["cover"].endswith(".jpg") and os.path.isfile(album["cover"]))
+        tracks = [m for m in self.run_helper("tracks", f"ms:{sid}:al:al1") if m["type"] == "tracks"][-1]["items"]
+        self.assertEqual([t["title"] for t in tracks], ["First", "Second"])
+        self.assertEqual(tracks[0]["duration"], 200)
+        self.assertEqual(tracks[0]["artist"], "Band")
+        key = tracks[0]["id"]
+        self.assertTrue(h.TRACK_KEY_RE.match(key))
+        url = self.run_helper("resolve", key)[-1]["url"]
+        self.assertTrue(url.startswith(srv.url))
+        self.assertNotIn("hunter2", url)
+        self.assertNotIn(url.split("?", 1)[-1], h.redact(url))        # the sign-in is masked in reports
+        return sid, key
+
+    def test_subsonic(self):
+        def rest(path, params, body, headers):
+            ok = params.get("u") == "me" and params.get("t") == __import__("hashlib").md5(("hunter2" + params.get("s", "")).encode()).hexdigest()
+            if not ok:
+                return 200, "application/json", {"subsonic-response": {"status": "failed", "error": {"code": 40, "message": "Wrong"}}}
+            song = lambda i, t: {"id": f"tr{i}", "title": t, "artist": "Band", "album": "Album", "duration": 200, "coverArt": "al1"}
+            data = {"ping": {}, "getPlaylists": {"playlists": {"playlist": [{"id": "pl1", "name": "Mine", "songCount": 2}]}},
+                    "getAlbumList2": {"albumList2": {"album": [{"id": "al1", "name": "Album", "artist": "Band", "songCount": 2, "coverArt": "al1"}]}},
+                    "getAlbum": {"album": {"song": [song(1, "First"), song(2, "Second")]}}}
+            method = path.rsplit("/", 1)[-1]
+            if method == "getCoverArt":
+                return 200, "image/jpeg", JPEG
+            if method == "stream":
+                return 200, "audio/mpeg", AUDIO
+            return 200, "application/json", {"subsonic-response": {"status": "ok", **data.get(method, {})}}
+        sid, key = self.check_server("subsonic", [("/rest/", rest)], {"user": "me", "pass": "hunter2"})
+        bad = self.run_helper("cloud-add", stdin=json.dumps({"kind": "subsonic", "fields": {"url": self.servers[0].url, "user": "me", "pass": "wrong"}}) + "\n")
+        self.assertIn("check the user name and password", bad[-1]["message"])
+
+    def test_jellyfin(self):
+        def route(path, params, body, headers):
+            if path == "/Users/AuthenticateByName":
+                if body.get("Pw") != "hunter2":
+                    return 401, "application/json", {}
+                return 200, "application/json", {"AccessToken": "tok123", "User": {"Id": "u1"}}
+            if "tok123" not in headers.get("Authorization", "") and params.get("api_key") != "tok123":
+                return 401, "application/json", {}
+            if path.startswith("/Items/") and path.endswith("/Images/Primary"):
+                return 200, "image/jpeg", JPEG
+            if path == "/Users/u1/Items" and params.get("IncludeItemTypes") == "MusicAlbum":
+                return 200, "application/json", {"Items": [{"Id": "al1", "Name": "Album", "AlbumArtist": "Band", "ChildCount": 2}]}
+            if path == "/Users/u1/Items" and params.get("ParentId") == "al1":
+                mk = lambda i, t: {"Id": f"tr{i}", "Name": t, "Artists": ["Band"], "Album": "Album", "AlbumId": "al1",
+                                   "RunTimeTicks": 200 * 10_000_000}
+                return 200, "application/json", {"Items": [mk(1, "First"), mk(2, "Second")]}
+            return 200, "application/json", {"Items": []}
+        self.check_server("jellyfin", [("/", route)], {"user": "me", "pass": "hunter2"})
+
+    def test_plex_lists_and_stream(self):
+        def route(path, params, body, headers):
+            if headers.get("X-Plex-Token") != "ptok" and params.get("X-Plex-Token") != "ptok":
+                return 401, "application/json", {}
+            mc = lambda **k: {"MediaContainer": k}
+            if path == "/library/sections":
+                return 200, "application/json", mc(Directory=[{"key": "3", "type": "artist"}])
+            if path == "/library/sections/3/all":
+                return 200, "application/json", mc(Metadata=[{"ratingKey": "al1", "title": "Album", "parentTitle": "Band", "leafCount": 2, "thumb": "/t/1"}])
+            if path == "/playlists":
+                return 200, "application/json", mc(Metadata=[])
+            if path == "/library/metadata/al1/children":
+                mk = lambda i, t: {"ratingKey": f"tr{i}", "title": t, "grandparentTitle": "Band", "parentTitle": "Album",
+                                   "duration": 200000, "parentThumb": "/t/1"}
+                return 200, "application/json", mc(Metadata=[mk(1, "First"), mk(2, "Second")])
+            if path == "/library/metadata/tr1":
+                return 200, "application/json", mc(Metadata=[{"Media": [{"Part": [{"key": "/library/parts/9/file.flac"}]}]}])
+            if path.startswith("/photo/"):
+                return 200, "image/jpeg", JPEG
+            return 200, "application/json", mc()
+        srv = FakeServer([("/", route)])
+        self.servers.append(srv)
+        sid = "0a1b2c3d"
+        data = pathlib.Path(self.env["XDG_DATA_HOME"], h.PLUGIN_ID)
+        data.mkdir(parents=True)
+        (data / "cloud.json").write_text(json.dumps({"sources": [{"id": sid, "remote": "", "path": srv.url, "kind": "plex",
+                                                                    "title": "Plex", "created": False}]}))
+        (data / "servers.json").write_text(json.dumps({sid: {"token": "ptok", "client": "c"}}))
+        lists = [m for m in self.run_helper("playlists", "--service", "cl", "--max-age", "0") if m["type"] == "playlists"][-1]["items"]
+        self.assertIn(f"ms:{sid}:al:al1", [l["id"] for l in lists])
+        tracks = [m for m in self.run_helper("tracks", f"ms:{sid}:al:al1") if m["type"] == "tracks"][-1]["items"]
+        self.assertEqual([t["title"] for t in tracks], ["First", "Second"])
+        url = self.run_helper("resolve", tracks[0]["id"])[-1]["url"]
+        self.assertEqual(url, f"{srv.url}/library/parts/9/file.flac?X-Plex-Token=ptok")
+        self.assertEqual(self.run_helper("cloud-remove", sid)[-1]["state"], "removed")
+        self.assertNotIn(sid, json.loads((data / "servers.json").read_text()))
+
+
+
+class History(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.saved = (h.HISTORY_PATH, h.SESSION_PATH, h.DATA_DIR, h.AI_MIX_PATH, h.ask_agent, h.find_on_youtube, h.tracks_cache_path)
+        d = self.dir.name
+        h.DATA_DIR = d
+        h.HISTORY_PATH = os.path.join(d, "history.jsonl")
+        h.SESSION_PATH = os.path.join(d, "session.json")
+        h.AI_MIX_PATH = os.path.join(d, "ai-mix.json")
+        h.tracks_cache_path = lambda list_id, browser: os.path.join(d, "none.json")
+        h.write_json_atomic(h.SESSION_PATH, {"tracks": [
+            {"id": "dQw4w9WgXcQ", "title": "Never Gonna", "artist": "Rick"},
+            {"id": "kJQP7kiw5Fk", "title": "Despacito", "artist": "Luis Fonsi"}]})
+
+    def tearDown(self):
+        (h.HISTORY_PATH, h.SESSION_PATH, h.DATA_DIR, h.AI_MIX_PATH, h.ask_agent, h.find_on_youtube, h.tracks_cache_path) = self.saved
+        self.dir.cleanup()
+
+    def add(self, vid, played, duration, reason):
+        h.cmd_history_add([f"https://music.youtube.com/watch?v={vid}", "--played", str(played),
+                           "--duration", str(duration), "--reason", reason])
+
+    def test_finished_and_skipped(self):
+        self.add("dQw4w9WgXcQ", 210, 212, "eof")
+        self.add("kJQP7kiw5Fk", 8, 229, "stop")        # too short to note at all? 8 s is noted by the helper
+        self.add("kJQP7kiw5Fk", 15, 229, "stop")
+        e = h.read_history()
+        self.assertTrue(e[0]["finished"] and not e[0]["skipped"])
+        self.assertTrue(e[-1]["skipped"])
+        self.assertEqual(e[0]["artist"], "Rick")
+        recent = h.recent_tracks()
+        self.assertEqual([t["id"] for t in recent], ["dQw4w9WgXcQ"])      # skipped songs aren't "recent"
+        self.add("dQw4w9WgXcQ", 1, 0, "eof")
+        h.cmd_history_add(["ytmusic-radio://1c6dcd6f-88c6-4fd4-8191-078435168e85", "--played", "300", "--reason", "stop"])
+        self.assertEqual(len(h.read_history()), 4)                        # stations aren't songs
+
+    def test_taste_and_a_mix_from_the_agent(self):
+        for _ in range(3):
+            self.add("dQw4w9WgXcQ", 210, 212, "eof")
+        for _ in range(3):
+            self.add("kJQP7kiw5Fk", 12, 229, "stop")
+        taste = h.taste_profile()
+        self.assertEqual(taste["topArtists"], ["Rick"])
+        self.assertIn("Luis Fonsi", taste["oftenSkipped"])
+        asked = {}
+        def agent(prompt):
+            asked["prompt"] = prompt
+            return {"title": "For You", "about": "x", "songs": [{"artist": "A", "title": f"Song {i}", "why": "because"} for i in range(8)]
+                    + [{"artist": "Ghost", "title": "Invented", "why": "?"}]}, "Claude"
+        h.ask_agent = agent
+        h.find_on_youtube = lambda s: None if s["artist"] == "Ghost" else {"id": f"vid{s['title'][-1]}aaaaaaa"[:11], "title": s["title"], "artist": s["artist"], "duration": 100}
+        import io, contextlib
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            h.cmd_ai_mix(["--prompt", "something calm"])
+        self.assertIn("something calm", asked["prompt"])
+        self.assertIn("Rick", asked["prompt"])
+        mix = h.read_json(h.AI_MIX_PATH)
+        self.assertEqual(len(mix["items"]), 8)                            # the invented song is dropped
+        self.assertEqual(mix["items"][0]["note"], "because")
+        self.assertIn('"state":"done"', out.getvalue())
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            h.cmd_ai_mix(["--if-older", "86400"])
+        self.assertIn('"state":"fresh"', out.getvalue())
+
+
 class Reports(unittest.TestCase):
     def test_redact_removes_everything_personal(self):
         home = os.path.expanduser("~")

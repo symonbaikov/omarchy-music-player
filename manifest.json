@@ -2,12 +2,12 @@
   "schemaVersion": 1,
   "id": "io.github.symonbaikov.ytmusic-mpv",
   "name": "Omarchy Music Player",
-  "version": "0.6.0",
+  "version": "1.0.0",
   "author": "Symon Baikov",
   "license": "MIT",
   "homepage": "https://github.com/symonbaikov/omarchy-ytmusic-mpv",
   "repository": "https://github.com/symonbaikov/omarchy-ytmusic-mpv",
-  "description": "The only Apple Music experience on Omarchy you ever need! YouTube Music, Spotify, SoundCloud and your own cloud storage (S3, Google Drive, Dropbox, SFTP, SMB, WebDAV) in one bar widget and a full-screen player, played by mpv without a browser: mixes across services, Peak mix, fades, downloads.",
+  "description": "The only Apple Music experience on Omarchy you ever need! YouTube Music, Spotify, SoundCloud, your own files and music server, 50,000 radio stations and podcasts in one bar widget and a player window, played by mpv without a browser: an AI Mix made from what you listen to, lyrics in time, chords for learning a song, Peak mix, downloads.",
   "keywords": [
     "cloud",
     "mpv",
@@ -40,7 +40,11 @@
       "autoplay": "On",
       "fadeIn": 0,
       "fadeOut": 0,
+      "pauseFade": 600,
+      "aiMix": "Off",
       "transition": "Off",
+      "tabs": "yt,am,sp,sc,cl,rd,pc,my",
+      "radioCountry": "",
       "crossfade": 6,
       "backupMirrors": "Off",
       "mirrors": "",
@@ -49,6 +53,7 @@
       "downloadFormat": "mp3",
       "downloadCover": "On",
       "soundcloudUser": "",
+      "deezerUser": "",
       "spotifyClientId": ""
     },
     "schema": [
@@ -144,6 +149,16 @@
         "description": "Each song fades away over its last seconds. 0 is off."
       },
       {
+        "key": "pauseFade",
+        "type": "integer",
+        "label": "Fade on pause (milliseconds)",
+        "min": 0,
+        "max": 3000,
+        "step": 100,
+        "defaultValue": 600,
+        "description": "Pausing fades the song away over this long, and playing again brings it back the same way. 0 pauses at once."
+      },
+      {
         "key": "transition",
         "type": "enum",
         "label": "Transitions",
@@ -229,6 +244,13 @@
         "label": "SoundCloud profile",
         "defaultValue": "",
         "description": "Your SoundCloud name or profile link, for the SoundCloud tab (likes and playlists)."
+      },
+      {
+        "key": "deezerUser",
+        "type": "string",
+        "label": "Deezer profile",
+        "defaultValue": "",
+        "description": "Your Deezer profile link or number, for the Deezer tab (favorites and playlists)."
       },
       {
         "key": "spotifyClientId",

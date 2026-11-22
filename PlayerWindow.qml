@@ -47,6 +47,7 @@ FloatingWindow {
   readonly property int gutter: Style.space(36)
 
   function t(key) { return p.i18n.t(key) }
+  readonly property bool podcastList: Model.isPodcastShow(p.openPlaylist ? p.openPlaylist.id : "")
 
   // ---- lyrics ----------------------------------------------------------------
   // What Now Playing shows beside the cover: "lyrics", "notes" or "queue".
@@ -153,6 +154,9 @@ FloatingWindow {
     }
     if (item.kind === "explore") {
       if (item.id === "__cloudadd") addStorage()
+      else if (item.id === "__amadd") p.addAppleMusicLink()
+      else if (item.id === "__rdcountry") p.openCountries()
+      else if (item.id === "__aimake") p.openAiMaker()
       else showBrowse()
       return
     }
@@ -192,12 +196,17 @@ FloatingWindow {
     if (item && item.kind === "song") return Model.GLYPH.music
     if (id === "LM") return Model.GLYPH.heart
     if (id === "DOWNLOADS") return Model.GLYPH.download
-    if (id === "__cloudadd") return Model.GLYPH.plus
+    if (id === "__cloudadd" || id === "__amadd") return Model.GLYPH.plus
+    if (id === "ai:mix" || id === "__aimake") return Model.GLYPH.ai
+    if (id === "hist:recent") return Model.GLYPH.history
     if (/^mix:/.test(id) || id === Model.SUPERMIX_ID) return Model.GLYPH.supermix
     if (/^sp:/.test(id)) return Model.GLYPH.spotify
     if (/^sc:/.test(id)) return Model.GLYPH.soundcloud
     if (/^cl:[a-f0-9]{8}$/.test(id)) return Model.GLYPH.cloud
     if (/^cl:/.test(id)) return Model.GLYPH.album
+    if (/^ms:[a-f0-9]{8}:fav$/.test(id)) return Model.GLYPH.heart
+    if (/^ms:[a-f0-9]{8}:rnd$/.test(id)) return Model.GLYPH.shuffle
+    if (/^ms:/.test(id)) return Model.GLYPH.album
     return Model.GLYPH.playlist
   }
 
@@ -207,7 +216,7 @@ FloatingWindow {
 
   readonly property var mixes: p.svc.my.items
   readonly property var libraryCards: p.libraryRows.filter(function(r) {
-    return !(r.kind === "explore" && r.id !== "__cloudadd")
+    return !(r.kind === "explore" && r.id !== "__cloudadd" && r.id !== "__amadd" && r.id !== "__rdcountry" && r.id !== "__aimake")
   })
   readonly property var queue: p.session && p.session.tracks ? p.session.tracks : []
   readonly property string bigCover: p.connected && p.currentTrack
@@ -226,19 +235,31 @@ FloatingWindow {
     id: ambient
     anchors.fill: parent
     visible: win.bigCover !== "" && ambientImage.status === Image.Ready
-    Image {
-      id: ambientImage
+    // The cover cropped to the window's shape, a little larger than the
+    // window so the blur has no dark rim. Cropping happens by clipping, so
+    // the blur gets a clipped layer of it (given the Image itself, it would
+    // take the whole uncropped picture and stretch it).
+    Item {
+      id: ambientBox
       anchors.fill: parent
-      source: win.bigCover
-      sourceSize.width: 160
-      sourceSize.height: 160
-      fillMode: Image.PreserveAspectCrop
-      asynchronous: true
+      anchors.margins: -Style.space(80)
+      clip: true
       visible: false
+      layer.enabled: true
+      Image {
+        id: ambientImage
+        anchors.fill: parent
+        source: win.bigCover
+        sourceSize.width: 160
+        sourceSize.height: 160
+        fillMode: Image.PreserveAspectCrop
+        asynchronous: true
+      }
     }
     MultiEffect {
-      anchors.fill: parent
-      source: ambientImage
+      anchors.fill: ambientBox
+      source: ambientBox
+      autoPaddingEnabled: false
       blurEnabled: true
       blur: 1.0
       blurMax: 64
@@ -372,7 +393,8 @@ FloatingWindow {
             font.family: win.fontFamily
             font.pixelSize: Style.font.subtitle
             selectByMouse: true
-            onAccepted: { win.search(text); keys.forceActiveFocus() }
+            Keys.onReturnPressed: function(event) { win.search(text); keys.forceActiveFocus(); event.accepted = true }
+            Keys.onEnterPressed: function(event) { win.search(text); keys.forceActiveFocus(); event.accepted = true }
             Keys.onEscapePressed: function(event) {
               if (text !== "") text = ""
               else keys.forceActiveFocus()
@@ -391,6 +413,7 @@ FloatingWindow {
       }
 
       Flickable {
+        WheelScroll {}
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.top: sideTop.bottom
@@ -429,7 +452,7 @@ FloatingWindow {
 
           SideHeader { label: win.t("full.library") }
           Repeater {
-            model: win.p.serviceTabs
+            model: win.p.shownTabs
             SideItem {
               required property var modelData
               glyph: modelData.glyph
@@ -488,6 +511,7 @@ FloatingWindow {
       // Listen Now: what's playing, your mixes and every service's lists.
       Flickable {
         id: homePage
+        WheelScroll { }
         visible: win.page === "home"
         anchors.fill: parent
         contentHeight: homeColumn.implicitHeight + win.gutter * 2
@@ -572,7 +596,13 @@ FloatingWindow {
             }
           }
 
-          Shelf { title: win.t("full.mixes"); items: win.mixes }
+          Shelf {
+            title: win.t("ai.madeForYou")
+            glyph: Model.GLYPH.ai
+            items: win.mixes.filter(function(m) { return m.id === "ai:mix" }).concat([win.p.aiEntry])
+          }
+          Shelf { title: win.t("full.recent"); glyph: Model.GLYPH.history; items: win.p.recentTracks }
+          Shelf { title: win.t("full.mixes"); items: win.mixes.filter(function(m) { return m.id !== "ai:mix" && m.id !== "hist:recent" }) }
           Shelf { title: win.t("list.playlists"); glyph: Model.GLYPH.youtube; glyphColor: "#FF0033"; items: win.p.playlists }
           Shelf { title: win.t("tab.sp"); glyph: Model.GLYPH.spotify; glyphColor: "#1ED760"; items: win.p.svc.sp.items }
           Shelf { title: win.t("tab.sc"); glyph: Model.GLYPH.soundcloud; glyphColor: "#FF5500"; items: win.p.svc.sc.items }
@@ -672,6 +702,7 @@ FloatingWindow {
 
         GridView {
           id: grid
+          WheelScroll { }
           visible: count > 0 && !win.cloudFormShown
           anchors.left: parent.left
           anchors.leftMargin: win.gutter - Style.space(10)
@@ -704,6 +735,7 @@ FloatingWindow {
       // Connect a cloud storage, in full screen.
       Flickable {
         id: cloudPage
+        WheelScroll { }
         visible: win.cloudFormShown
         anchors.fill: parent
         anchors.topMargin: win.gutter + Style.space(70)
@@ -726,14 +758,21 @@ FloatingWindow {
           }
           Txt {
             width: parent.width
-            text: win.p.rcloneInstalled ? win.t("cloud.body") : win.t("cloud.noRclone")
+            text: win.p.cloudFormUsable ? win.t("cloud.body") : win.t("cloud.noRclone")
             color: win.dim
             font.pixelSize: Style.font.heading
             wrapMode: Text.Wrap
             elide: Text.ElideNone
           }
           BigButton {
-            visible: !win.p.rcloneInstalled
+            visible: win.p.cloudMusicDir !== "" && win.p.cloudBusy === ""
+            glyph: Model.GLYPH.folderMusic
+            label: win.t("cloud.addMusic").arg(win.p.cloudMusicDir.replace(win.p.homeDir, "~"))
+            filled: true
+            onClicked: win.p.addMusicFolder()
+          }
+          BigButton {
+            visible: !win.p.cloudFormUsable
             glyph: Model.GLYPH.download
             label: win.t("cloud.installRclone")
             filled: true
@@ -741,7 +780,7 @@ FloatingWindow {
           }
 
           Flow {
-            visible: win.p.rcloneInstalled
+            visible: true
             width: parent.width
             spacing: Style.space(10)
             Repeater {
@@ -756,7 +795,7 @@ FloatingWindow {
             }
           }
           Txt {
-            visible: win.p.rcloneInstalled
+            visible: win.p.cloudFormUsable
             width: parent.width
             text: win.t("cloud.hint." + win.p.cloudKind)
             color: win.dim
@@ -767,7 +806,7 @@ FloatingWindow {
 
           // A remote rclone already has.
           Flow {
-            visible: win.p.rcloneInstalled && win.p.cloudKind === "remote" && win.p.cloudRemotes.length > 0
+            visible: win.p.cloudFormUsable && win.p.cloudKind === "remote" && win.p.cloudRemotes.length > 0
             width: parent.width
             spacing: Style.space(10)
             Repeater {
@@ -781,7 +820,7 @@ FloatingWindow {
             }
           }
           Txt {
-            visible: win.p.rcloneInstalled && win.p.cloudKind === "remote" && win.p.cloudRemotes.length === 0
+            visible: win.p.cloudFormUsable && win.p.cloudKind === "remote" && win.p.cloudRemotes.length === 0
             width: parent.width
             text: win.t("cloud.noRemotes")
             color: win.dim
@@ -790,7 +829,7 @@ FloatingWindow {
           }
 
           Repeater {
-            model: win.p.rcloneInstalled && win.p.cloudFormEpoch >= 0 ? win.p.cloudKindSpec.fields.slice() : []
+            model: win.p.cloudFormUsable && win.p.cloudFormEpoch >= 0 ? win.p.cloudKindSpec.fields.slice() : []
             FormField {
               required property var modelData
               width: cloudForm.width
@@ -802,21 +841,22 @@ FloatingWindow {
           }
           FormField {
             id: fullCloudPath
-            visible: win.p.rcloneInstalled
+            visible: win.p.cloudFormUsable && win.p.cloudKindSpec.server !== true
             width: parent.width
-            label: win.t(win.p.cloudKind === "s3" ? "cloud.pathS3" : win.p.cloudKind === "smb" ? "cloud.pathSmb" : "cloud.path")
+            label: win.t(win.p.cloudKind === "s3" ? "cloud.pathS3" : win.p.cloudKind === "smb" ? "cloud.pathSmb"
+              : win.p.cloudKind === "local" ? "cloud.pathLocal" : "cloud.path")
             onSubmitted: win.connectStorage()
           }
           FormField {
             id: fullCloudName
-            visible: win.p.rcloneInstalled
+            visible: win.p.cloudFormUsable
             width: parent.width
             label: win.t("cloud.name")
             onSubmitted: win.connectStorage()
           }
 
           Row {
-            visible: win.p.rcloneInstalled
+            visible: win.p.cloudFormUsable
             spacing: Style.space(12)
             BigButton {
               glyph: win.p.cloudBusy !== "" ? Model.GLYPH.loading : Model.GLYPH.cloud
@@ -854,6 +894,7 @@ FloatingWindow {
       // An open playlist: big artwork, Play and Shuffle, then its songs.
       ListView {
         id: listPage
+        WheelScroll { }
         visible: win.page === "list"
         anchors.fill: parent
         anchors.leftMargin: win.gutter - Style.space(10)
@@ -917,10 +958,19 @@ FloatingWindow {
                   onClicked: win.p.play(0, false)
                 }
                 BigButton {
+                  visible: !win.podcastList
                   glyph: Model.GLYPH.shuffle
                   label: win.t("list.shuffle")
                   enabled: win.p.tracks.length > 1
                   onClicked: win.p.play(Math.floor(Math.random() * win.p.tracks.length), true)
+                }
+                // A podcast: subscribe, and its new episodes come to New episodes.
+                BigButton {
+                  visible: win.podcastList
+                  readonly property bool on: win.podcastList && !!win.p.podcastSubs[win.p.openPlaylist.id]
+                  glyph: on ? Model.GLYPH.check : Model.GLYPH.plus
+                  label: win.t(on ? "pc.subscribedButton" : "pc.subscribe")
+                  onClicked: win.p.toggleSubscribe(win.p.openPlaylist.id)
                 }
               }
               Txt {
@@ -999,6 +1049,7 @@ FloatingWindow {
         // Explore's front page: its shelves.
         Flickable {
           id: browseShelves
+          WheelScroll { }
           visible: win.p.exploreMode === "home"
           anchors.left: parent.left
           anchors.right: parent.right
@@ -1029,6 +1080,7 @@ FloatingWindow {
         // A mood's lists, or search results.
         ListView {
           id: browseList
+          WheelScroll { }
           visible: win.p.exploreMode !== "home"
           anchors.left: parent.left
           anchors.leftMargin: win.gutter - Style.space(10)
@@ -1078,13 +1130,15 @@ FloatingWindow {
 
       // The cover as big as fits with the names and controls under it, also
       // in a small window.
-      readonly property real artSize: Math.max(Style.space(96), Math.min(height - Style.space(300), width * 0.36))
+      readonly property real artSize: Math.max(Style.space(96), Math.min(height - Style.space(400), width * 0.36))
 
       Column {
         id: nowLeft
-        anchors.verticalCenter: parent.verticalCenter
+        // Centered, but always below the back button.
+        y: Math.max(Style.space(72), (parent.height - height) / 2)
         x: Math.max(win.gutter, (parent.width * 0.55 - width) / 2)
-        width: nowPage.artSize
+        // As wide as the cover, but never too narrow for the title.
+        width: Math.max(nowPage.artSize, Math.min(parent.width * 0.5, Style.space(420)))
         spacing: Style.space(18)
 
         Cover {
@@ -1096,6 +1150,8 @@ FloatingWindow {
           shadow: true
           onStatusFailed: if (win.p.currentTrack && String(url).indexOf("maxresdefault") >= 0) win.p.largeCoverFailedFor = win.p.currentTrack.id
         }
+        // Room for the cover's shadow, so the title starts below it.
+        Item { width: 1; height: Style.space(14) }
         Column {
           width: parent.width
           spacing: Style.space(4)
@@ -1144,6 +1200,8 @@ FloatingWindow {
           }
         }
         Row {
+          // In a short window the player along the bottom is enough.
+          visible: nowPage.height >= Style.space(620)
           anchors.horizontalCenter: parent.horizontalCenter
           spacing: Style.space(28)
           Transport { glyph: Model.GLYPH.previous; size: Style.font.displayLarge; onClicked: win.p.previous() }
@@ -1208,6 +1266,7 @@ FloatingWindow {
           }
           ListView {
             id: queueView
+            WheelScroll { }
             width: parent.width
             height: parent.height - (playingFrom.visible ? playingFrom.height + Style.space(12) : 0)
             clip: true
@@ -1240,6 +1299,7 @@ FloatingWindow {
         // the next ones after it), and the sheet music and tabs found for it.
         Flickable {
           id: notesPane
+          WheelScroll { }
           visible: win.side === "notes"
           anchors.left: parent.left
           anchors.right: parent.right
@@ -1327,6 +1387,7 @@ FloatingWindow {
             }
             ListView {
               id: chordStrip
+              WheelScroll { }
               visible: win.chordsReady
               width: parent.width
               height: Style.space(58)
@@ -1517,6 +1578,7 @@ FloatingWindow {
 
           ListView {
             id: lyricView
+            WheelScroll { onScrolled: { lyricView.userScrolled = true; resumeFollow.restart() } }
             anchors.fill: parent
             visible: win.lyricsReady && win.p.lyrics.lines.length > 0
             clip: true
@@ -1723,7 +1785,7 @@ FloatingWindow {
 
         PanelActionButton {
           anchors.verticalCenter: parent.verticalCenter
-          visible: win.p.currentTrack !== null && Model.isYouTube(win.p.currentTrack.id)
+          visible: win.p.currentTrack !== null && win.p.canLike(win.p.currentTrack.id)
           readonly property bool liked: win.p.currentTrack !== null && win.p.isLiked(win.p.currentTrack.id)
           iconText: liked ? Model.GLYPH.heart : Model.GLYPH.heartOutline
           fontSize: Style.font.title
@@ -1909,14 +1971,48 @@ FloatingWindow {
       }
     }
 
-    // Drawn through the effect below, with rounded corners.
-    SizedImage {
-      id: img
+    // A soft shadow under the cover (Now Playing): drawn from a plain shape
+    // of the cover's size, under it.
+    Rectangle {
+      id: shadowShape
       anchors.fill: parent
-      crop: true
-      url: cover.url
+      radius: cover.radius
+      color: "black"
       visible: false
-      onStatusChanged: if (status === Image.Error) cover.statusFailed()
+    }
+    MultiEffect {
+      anchors.fill: parent
+      source: shadowShape
+      visible: cover.shadow && cover.shown
+      shadowEnabled: true
+      shadowBlur: 0.7
+      shadowOpacity: 0.35
+      shadowVerticalOffset: Style.space(6)
+    }
+
+    // The cover itself, cropped square by clipping. Rounded corners come
+    // from an effect on this item's own layer, which holds exactly what
+    // it shows (an effect taking the image as its source would get the
+    // whole, uncropped 16:9 thumbnail and stretch it).
+    Item {
+      id: imgBox
+      anchors.fill: parent
+      visible: cover.shown
+      clip: true
+      layer.enabled: cover.radius > 0
+      layer.effect: MultiEffect {
+        maskEnabled: true
+        maskSource: mask
+        maskThresholdMin: 0.5
+        maskSpreadAtMin: 1.0
+      }
+      SizedImage {
+        id: img
+        anchors.fill: parent
+        crop: true
+        url: cover.url
+        onStatusChanged: if (status === Image.Error) cover.statusFailed()
+      }
     }
     Rectangle {
       id: mask
@@ -1924,19 +2020,6 @@ FloatingWindow {
       radius: cover.radius
       visible: false
       layer.enabled: true
-    }
-    MultiEffect {
-      anchors.fill: parent
-      source: img
-      visible: cover.shown
-      maskEnabled: true
-      maskSource: mask
-      maskThresholdMin: 0.5
-      maskSpreadAtMin: 1.0
-      shadowEnabled: cover.shadow
-      shadowBlur: 0.8
-      shadowOpacity: 0.5
-      shadowVerticalOffset: Style.space(10)
     }
 
     MouseArea {
@@ -2035,6 +2118,7 @@ FloatingWindow {
     }
     ListView {
       id: shelfList
+      WheelScroll { }
       width: shelf.width
       height: win.cardSize + Style.space(64)
       orientation: ListView.Horizontal
@@ -2071,7 +2155,7 @@ FloatingWindow {
       anchors.fill: parent
       radius: Style.cornerRadius
       color: row.now ? Qt.rgba(win.accent.r, win.accent.g, win.accent.b, 0.16)
-        : rowMouse.containsMouse ? Qt.rgba(win.fg.r, win.fg.g, win.fg.b, 0.07) : "transparent"
+        : rowHover.hovered ? Qt.rgba(win.fg.r, win.fg.g, win.fg.b, 0.07) : "transparent"
     }
     Txt {
       id: rowNumber
@@ -2112,7 +2196,7 @@ FloatingWindow {
       Txt {
         width: parent.width
         visible: text !== ""
-        text: row.track ? (row.track.artist || row.track.subtitle || "") : ""
+        text: row.track ? (row.track.artist || row.track.subtitle || "") + (row.track.note ? "  ·  " + row.track.note : "") : ""
         color: win.dim
       }
     }
@@ -2145,13 +2229,16 @@ FloatingWindow {
     MouseArea {
       id: rowMouse
       anchors.fill: parent
-      hoverEnabled: true
       cursorShape: Qt.PointingHandCursor
       onClicked: row.clicked()
     }
+    // Hover over the whole row, its buttons included: a MouseArea's hover
+    // leaves for the button under it, which hid the buttons, which brought
+    // the hover back, over and over.
+    HoverHandler { id: rowHover }
     // Like and radio for a YouTube song, over the row's time while hovered.
     Row {
-      visible: rowMouse.containsMouse && row.isSong && row.track && Model.isYouTube(row.track.id) && !row.compact
+      visible: rowHover.hovered && row.isSong && row.track && Model.isYouTube(row.track.id) && !row.compact
       anchors.right: rowTime.left
       anchors.rightMargin: Style.space(8)
       anchors.verticalCenter: parent.verticalCenter
@@ -2407,9 +2494,66 @@ FloatingWindow {
         selectByMouse: true
         echoMode: field.secret ? TextInput.Password : TextInput.Normal
         onTextEdited: field.edited(text)
-        onAccepted: { keys.forceActiveFocus(); field.submitted() }
+        Keys.onReturnPressed: function(event) { keys.forceActiveFocus(); field.submitted(); event.accepted = true }
+        Keys.onEnterPressed: function(event) { keys.forceActiveFocus(); field.submitted(); event.accepted = true }
         Keys.onEscapePressed: function(event) { keys.forceActiveFocus(); event.accepted = true }
       }
+    }
+  }
+
+  // Wheel and touchpad scrolling for a list: a mouse wheel's notch moves
+  // about three rows, eased; a touchpad moves exactly with the fingers.
+  // (Qt's own wheel scrolling is a slow flick.) Sideways gestures scroll a
+  // row of covers; up and down over one scrolls the page around it.
+  component WheelScroll: WheelHandler {
+    id: wheel
+    signal scrolled()
+    target: null
+    acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+
+    function scrollable(item, sideways) {
+      for (var it = wheel.parent; it; it = it.parent) {
+        if (it.contentY === undefined || it.contentHeight === undefined) continue
+        if (sideways ? it.contentWidth > it.width + 1 : it.contentHeight > it.height + 1) return it
+      }
+      return null
+    }
+
+    property var view: null
+    property bool sideways: false
+    // A handler holds no children: the animation is a property.
+    property NumberAnimation ease: NumberAnimation {
+      target: wheel.view
+      property: wheel.sideways ? "contentX" : "contentY"
+      duration: Style.duration(140)
+      easing.type: Easing.OutCubic
+    }
+
+    onWheel: function(event) {
+      var dx = event.pixelDelta.x !== 0 ? event.pixelDelta.x : event.angleDelta.x / 120 * Style.space(110)
+      var dy = event.pixelDelta.y !== 0 ? event.pixelDelta.y : event.angleDelta.y / 120 * Style.space(110)
+      var side = Math.abs(dx) > Math.abs(dy)
+      var v = scrollable(wheel.parent, side)
+      if (!v) return
+      var touchpad = event.pixelDelta.x !== 0 || event.pixelDelta.y !== 0
+      var from = wheel.ease.running && wheel.view === v && wheel.sideways === side ? wheel.ease.to
+        : (side ? v.contentX : v.contentY)
+      var lo = side ? v.originX : v.originY
+      var hi = side ? v.originX + v.contentWidth - v.width : v.originY + v.contentHeight - v.height
+      var to = Math.max(lo, Math.min(hi, from - (side ? dx : dy)))
+      wheel.ease.stop()
+      if (touchpad || Style.reduceMotion) {
+        if (side) v.contentX = to
+        else v.contentY = to
+      } else {
+        wheel.view = v
+        wheel.sideways = side
+        wheel.ease.from = side ? v.contentX : v.contentY
+        wheel.ease.to = to
+        wheel.ease.start()
+      }
+      event.accepted = true
+      wheel.scrolled()
     }
   }
 

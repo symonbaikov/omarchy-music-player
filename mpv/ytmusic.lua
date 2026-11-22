@@ -30,6 +30,7 @@ local opts = {
     fade_out = 0,
     transition = "off",
     xfade = 6,
+    pause_fade = 0.6,
 }
 require("mp.options").read_options(opts, "ytmusic")
 
@@ -45,6 +46,7 @@ end
 opts.fade_in = clamp(opts.fade_in, 0, 30, 0)
 opts.fade_out = clamp(opts.fade_out, 0, 30, 0)
 opts.xfade = clamp(opts.xfade, 2, 16, 6)
+opts.pause_fade = clamp(opts.pause_fade, 0, 3, 0.6)
 if opts.transition ~= "peak" then opts.transition = "off" end
 
 local function entry_name(i)
@@ -126,6 +128,10 @@ local function prepare()
     if pos < 0 or pos + 1 >= count then return end
     local cur, nxt = entry_name(pos), entry_name(pos + 1)
     if not cur or not nxt or is_segment(nxt) then return end
+    -- A radio station is live: no climax to mix from or into.
+    if cur:sub(1, 16) == "ytmusic-radio://" or nxt:sub(1, 16) == "ytmusic-radio://" then return end
+    -- Nor a podcast: talk has no climax, and an episode isn't cut short.
+    if cur:sub(1, 18) == "ytmusic-podcast://" or nxt:sub(1, 18) == "ytmusic-podcast://" then return end
     if mix and mix.pos == pos and mix.from == cur and mix.to == nxt then return end
     local raw = mp.get_property_native("ytdl-raw-options") or {}
     local job = { pos = pos, from = cur, to = nxt, state = "pending" }
@@ -191,13 +197,81 @@ local function fade_amp()
     return math.max(0, amp)
 end
 
+-- ---- pausing with a fade ------------------------------------------------------
+-- The panel pauses through `script-message ytmusic-toggle-pause`: the song
+-- fades away over pause_fade seconds and then pauses, and comes back the
+-- same way. (Media keys pause mpv directly, at once.)
+local pause_amp = 1
+local pause_ramp = nil          -- { from, to, start, then_pause }
+local pause_timer
+
+local function pause_amp_now()
+    if not pause_ramp then return pause_amp end
+    local k = (mp.get_time() - pause_ramp.start) / math.max(0.01, opts.pause_fade)
+    if k >= 1 then return pause_ramp.to end
+    return pause_ramp.from + (pause_ramp.to - pause_ramp.from) * k
+end
+
 local function tick()
-    if opts.fade_in <= 0 and opts.fade_out <= 0 then
-        set_gain(0)
+    local amp = pause_amp_now()
+    if opts.fade_in > 0 or opts.fade_out > 0 then amp = amp * fade_amp() end
+    set_gain(amp_to_db(amp))
+end
+
+local function pause_step()
+    if not pause_ramp then pause_timer:kill() return end
+    pause_amp = pause_amp_now()
+    tick()
+    if mp.get_time() - pause_ramp.start >= opts.pause_fade then
+        local done = pause_ramp
+        pause_ramp = nil
+        pause_timer:kill()
+        if done.then_pause then
+            mp.set_property_bool("pause", true)
+            -- Full volume again behind the pause, so a media key resumes as before.
+            pause_amp = 1
+            tick()
+        end
+    end
+end
+pause_timer = mp.add_periodic_timer(0.02, pause_step)
+pause_timer:kill()
+
+local function ramp(to, then_pause)
+    pause_ramp = { from = pause_amp_now(), to = to, start = mp.get_time(), then_pause = then_pause }
+    pause_amp = pause_ramp.from
+    pause_timer:resume()
+end
+
+mp.register_script_message("ytmusic-toggle-pause", function()
+    local paused = mp.get_property_bool("pause")
+    if opts.pause_fade <= 0 then
+        mp.set_property_bool("pause", not paused)
         return
     end
-    set_gain(amp_to_db(fade_amp()))
-end
+    if paused then
+        pause_amp = 0
+        tick()
+        mp.set_property_bool("pause", false)
+        ramp(1, false)
+    elseif pause_ramp and pause_ramp.then_pause then
+        ramp(1, false)                -- pressed again while fading: come back
+    else
+        ramp(0, true)
+    end
+end)
+
+-- Paused or resumed some other way (a media key) mid-fade: drop the fade.
+mp.observe_property("pause", "bool", function(_, paused)
+    if pause_ramp and paused and not pause_ramp.then_pause then
+        pause_ramp = nil
+        pause_amp = 1
+        tick()
+    end
+end)
+
+-- What this script can do, for the panel.
+mp.set_property_native("user-data/ytmusic/features", { pause_fade = true })
 
 mp.add_periodic_timer(0.05, tick)
 
@@ -224,6 +298,12 @@ end
 -- cloud songs" below).
 local SPOTIFY = "ytmusic-spotify://"
 local CLOUD = "ytmusic-cloud://"
+local RADIO = "ytmusic-radio://"
+local SERVER = "ytmusic-server://"
+local PODCAST = "ytmusic-podcast://"
+local DEEZER = "ytmusic-deezer://"
+local APPLE = "ytmusic-apple://"
+local AUDIUS = "ytmusic-audius://"
 
 local function watch_id(url)
     return url and url:match("^https://music%.youtube%.com/watch%?v=([%w_-]+)$")
@@ -308,9 +388,46 @@ mp.observe_property("time-pos", "number", function(_, t)
     if t then played_to = t end
 end)
 
+-- ---- listening history ---------------------------------------------------------
+-- Each song that played is noted (how long, of how long, and whether it ran
+-- to its end) by the helper in a local history: "Recently played", and what
+-- the AI Mix learns your taste from. Nothing leaves the machine here.
+local function note_play(entry_id, played, reason)
+    if opts.helper == "" or not entry_id or played < 5 then return end
+    local name
+    for _, item in ipairs(mp.get_property_native("playlist") or {}) do
+        if item.id == entry_id then name = item.filename end
+    end
+    if not name or name:sub(1, #RADIO) == RADIO then return end
+    -- Detached: it outlives this player, which quits when another playlist
+    -- starts (the song playing then is noted too).
+    mp.command_native({
+        name = "subprocess",
+        detach = true,
+        playback_only = false,
+        args = { opts.python, "-I", opts.helper, "history-add", name,
+                 "--played", string.format("%.0f", played),
+                 "--duration", string.format("%.0f", last_duration or 0),
+                 "--reason", tostring(reason) },
+    })
+end
+
+-- Repeat one: mpv starts the song over without ending it, so each time it
+-- comes round from its end it is noted as played through.
+local loop_prev = 0
+mp.observe_property("time-pos", "number", function(_, t)
+    if not t then return end
+    if t < 2 and last_duration > 20 and loop_prev > last_duration - 3
+        and mp.get_property("loop-file", "no") ~= "no" then
+        note_play(loaded_entry, loop_prev, "eof")
+    end
+    loop_prev = t
+end)
+
 mp.register_event("end-file", function(e)
     local t, entry_id = played_to, e.playlist_entry_id
-    played_to = 0
+    played_to, loop_prev = 0, 0
+    if entry_id and entry_id == loaded_entry then note_play(entry_id, t, e.reason) end
     if e.reason ~= "eof" and e.reason ~= "error" then return end
     -- Only a song that opened and played; one that never opened is skipped
     -- (or rescued by the on_load_fail hook above).
@@ -321,18 +438,24 @@ mp.register_event("end-file", function(e)
         if item.id == entry_id then index, entry = i - 1, item end
     end
     local name = entry and entry.filename or ""
-    if not entry or not (watch_id(name) or name:sub(1, #SPOTIFY) == SPOTIFY or name:sub(1, #CLOUD) == CLOUD
+    local radio = name:sub(1, #RADIO) == RADIO
+    if not entry or not (watch_id(name) or name:sub(1, #SPOTIFY) == SPOTIFY or name:sub(1, #DEEZER) == DEEZER
+        or name:sub(1, #APPLE) == APPLE
+        or name:sub(1, #CLOUD) == CLOUD or radio
+        or name:sub(1, #SERVER) == SERVER or name:sub(1, #PODCAST) == PODCAST
+        or name:sub(1, #AUDIUS) == AUDIUS or name:match("^https://www%.mixcloud%.com/")
         or name:match("^https://[%w.]*soundcloud%.com/")) then return end
     -- A mix ending this song early, or the song simply finishing.
     if mix and mix.state == "ready" and mix.pos == index then return end
-    if e.reason == "eof" and (last_duration <= 0 or t > last_duration - 4) then return end
+    -- A station never ends: an end is a dropped stream, always reopened.
+    if not radio and e.reason == "eof" and (last_duration <= 0 or t > last_duration - 4) then return end
     local key = entry.filename .. "@" .. math.floor(t / 30)
     if resumed[key] then return end
     resumed[key] = true
     msg.warn(string.format("stream broke at %.1f s, opening it again", t))
     local title = entry.title or ""
-    local file_opts = string.format("start=%.1f", t)
-    if title ~= "" then file_opts = file_opts .. ",force-media-title=%" .. #title .. "%" .. title end
+    local file_opts = radio and "" or string.format("start=%.1f", t)
+    if title ~= "" and not radio then file_opts = file_opts .. ",force-media-title=%" .. #title .. "%" .. title end
     mp.command_native({ "loadfile", entry.filename, "insert-at", index + 1, file_opts })
     mp.command_native({ "playlist-remove", index })
     mp.command_native({ "playlist-play-index", index })
@@ -345,7 +468,11 @@ end)
 -- the Spotify song's YouTube Music match, or the file on the local rclone
 -- server. The entry keeps its name, so the panel still knows which song it is.
 local function resolved_ok(kind, url)
-    if kind == "sp" then return watch_id(url) ~= nil end
+    if kind == "sp" or kind == "dz" or kind == "am" then return watch_id(url) ~= nil end
+    if kind == "rd" or kind == "ms" or kind == "pc" then return url:match("^https?://[^%s]+$") ~= nil end
+    if kind == "au" then return url:match("^https://api%.audius%.co/v1/tracks/%w+/stream%?app_name=[%w%-]+$") ~= nil end
+    -- A song in a local folder: its file.
+    if kind == "cl" and url:sub(1, 1) == "/" then return true end
     return url:match("^http://[%w]+:[%w]+@127%.0%.0%.1:%d+/") ~= nil
 end
 
@@ -358,10 +485,28 @@ mp.add_hook("on_load", 5, function(hook)
     if url:sub(1, #SPOTIFY) == SPOTIFY then
         kind, key = "sp", url:sub(#SPOTIFY + 1)
         if not key:match("^[%w]+$") then return end
+    elseif url:sub(1, #AUDIUS) == AUDIUS then
+        kind, key = "au", url:sub(#AUDIUS + 1)
+        if not key:match("^%w+$") then return end
+    elseif url:sub(1, #APPLE) == APPLE then
+        kind, key = "am", url:sub(#APPLE + 1)
+        if not key:match("^%d+$") then return end
+    elseif url:sub(1, #DEEZER) == DEEZER then
+        kind, key = "dz", url:sub(#DEEZER + 1)
+        if not key:match("^%d+$") then return end
     elseif url:sub(1, #CLOUD) == CLOUD then
         kind, key = "cl", url:sub(#CLOUD + 1)
         if not key:match("^[%x]+/[%x]+$") then return end
         used_cloud = true
+    elseif url:sub(1, #SERVER) == SERVER then
+        kind, key = "ms", url:sub(#SERVER + 1)
+        if not key:match("^%x+/[%w_%-]+$") then return end
+    elseif url:sub(1, #RADIO) == RADIO then
+        kind, key = "rd", url:sub(#RADIO + 1)
+        if not key:match("^[%x%-]+$") then return end
+    elseif url:sub(1, #PODCAST) == PODCAST then
+        kind, key = "pc", url:sub(#PODCAST + 1)
+        if not key:match("^%x+/%x+$") then return end
     else
         return
     end
@@ -381,7 +526,20 @@ mp.add_hook("on_load", 5, function(hook)
         end
         if out and out.type == "resolved" and type(out.url) == "string" and resolved_ok(kind, out.url) then
             mp.set_property("stream-open-filename", out.url)
-        elseif kind == "sp" then
+            -- A podcast episode carries on where you stopped.
+            if kind == "pc" and type(out.start) == "number" and out.start > 0
+                and (mp.get_property("file-local-options/start") or "none") == "none" then
+                mp.set_property("file-local-options/start", tostring(math.floor(out.start)))
+            end
+        elseif kind == "ms" then
+            msg.error("server song " .. key .. " can't be opened: " .. tostring(out and out.message or "helper failed"))
+        elseif kind == "au" then
+            msg.error("Audius song " .. key .. " can't be opened: " .. tostring(out and out.message or "helper failed"))
+        elseif kind == "pc" then
+            msg.error("podcast episode " .. key .. " can't be opened: " .. tostring(out and out.message or "helper failed"))
+        elseif kind == "rd" then
+            msg.error("radio station " .. key .. " can't be reached: " .. tostring(out and out.message or "helper failed"))
+        elseif kind == "sp" or kind == "dz" or kind == "am" then
             msg.warn("no YouTube Music match for Spotify song " .. key .. ": " .. tostring(out and out.message or "helper failed"))
         else
             msg.error("cloud song " .. key .. " can't be opened: " .. tostring(out and out.message or "helper failed"))
@@ -437,6 +595,8 @@ mp.register_script_message("ytmusic-set", function(key, value)
         opts.fade_out = clamp(value, 0, 30, 0)
     elseif key == "xfade" then
         opts.xfade = clamp(value, 2, 16, 6)
+    elseif key == "pause_fade" then
+        opts.pause_fade = clamp(value, 0, 3, 0.6)
     elseif key == "transition" then
         opts.transition = value == "peak" and "peak" or "off"
         if opts.transition == "peak" then prepare() else cancel_mix() end

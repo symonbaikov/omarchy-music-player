@@ -10,14 +10,34 @@ var MAX_TEXT = 300
 // A list: a YouTube playlist id, or one of the other services' lists
 // (sc:… SoundCloud, sp:… Spotify, mix:… your mixes, cl:… your cloud storage:
 // a source, or one folder in it).
-var PLAYLIST_ID_RE = /^(?:[A-Za-z0-9_-]{2,80}|sc:(?:likes|sets):[A-Za-z0-9_-]{1,100}|sc:set:[A-Za-z0-9_-]{1,100}\/[A-Za-z0-9_-]{1,200}|sc:search|sp:liked|sp:pl:[A-Za-z0-9]{22}|mix:all|mix:[a-f0-9]{8}|cl:[a-f0-9]{8}(?::[a-f0-9]{16})?)$/
+var PLAYLIST_ID_RE = /^(?:[A-Za-z0-9_-]{2,80}|sc:(?:likes|sets):[A-Za-z0-9_-]{1,100}|sc:set:[A-Za-z0-9_-]{1,100}\/[A-Za-z0-9_-]{1,200}|sc:search|sp:liked|sp:pl:[A-Za-z0-9]{22}|mix:all|mix:[a-f0-9]{8}|cl:[a-f0-9]{8}(?::[a-f0-9]{16})?|rd:(?:fav|top|vote|search|country:[A-Z]{2}|tag:[a-z0-9-]{1,40})|ms:[a-f0-9]{8}:(?:fav|rnd|al:[A-Za-z0-9_-]{1,64}|pl:[A-Za-z0-9_-]{1,64})|pc:(?:new|[a-f0-9]{16})|dz:(?:fav|chart|search|pl:[0-9]{1,20})|am:(?:top|search|al:[0-9]{3,15}|pl:pl\.[A-Za-z0-9-]{8,64})|au:(?:search|trending(?::[a-z0-9-]{1,40})?)|mc:(?:search|hot:[a-z0-9-]{1,40})|ai:mix|hist:recent)$/
 var VIDEO_ID_RE = /^[A-Za-z0-9_-]{11}$/
 // A track from any service: a YouTube video id, sc:…, sp:… or cl:….
-var TRACK_KEY_RE = /^(?:[A-Za-z0-9_-]{11}|sc:(?:[0-9]{1,20}|[A-Za-z0-9_-]{1,100}\/[A-Za-z0-9_-]{1,200})|sp:[A-Za-z0-9]{22}|cl:[a-f0-9]{8}\/[a-f0-9]{16})$/
-var SERVICES = ["yt", "sp", "sc", "cl", "my"]
+var TRACK_KEY_RE = /^(?:[A-Za-z0-9_-]{11}|sc:(?:[0-9]{1,20}|[A-Za-z0-9_-]{1,100}\/[A-Za-z0-9_-]{1,200})|sp:[A-Za-z0-9]{22}|cl:[a-f0-9]{8}\/[a-f0-9]{16}|rd:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|ms:[a-f0-9]{8}\/[A-Za-z0-9_-]{1,64}|pc:[a-f0-9]{16}\/[a-f0-9]{16}|dz:[0-9]{1,20}|au:[A-Za-z0-9]{1,16}|am:[0-9]{1,15}|mc:[A-Za-z0-9_-]{1,100}\/[A-Za-z0-9%_.-]{1,300})$/
+var SERVICES = ["yt", "am", "sp", "dz", "sc", "mc", "au", "cl", "rd", "pc", "my"]
+// Tabs shown unless the user picks others (the "+" tab).
+var DEFAULT_TABS = "yt,am,sp,sc,cl,rd,pc,my"
+
+// The tabs to show, from the setting: known services, each once, in the
+// usual order; YouTube Music and My Music always.
+function visibleTabs(setting) {
+  var wanted = String(setting || DEFAULT_TABS).split(",")
+  return SERVICES.filter(function(s) { return s === "yt" || s === "my" || wanted.indexOf(s) >= 0 })
+}
+
+function isRadio(key) { return /^rd:[0-9a-f-]{36}$/.test(String(key || "")) }
+function isPodcast(key) { return /^pc:[a-f0-9]{16}\/[a-f0-9]{16}$/.test(String(key || "")) }
+// A podcast (a list of its episodes), which you can subscribe to.
+function isPodcastShow(id) { return /^pc:[a-f0-9]{16}$/.test(String(id || "")) }
+// A song that can be saved as a file (a live station or an episode can't).
+function canDownload(key) { return TRACK_KEY_RE.test(String(key || "")) && !isRadio(key) && !isPodcast(key) }
 // Kinds of storage the "Connect storage" form offers (see the helper's
 // CLOUD_KINDS), with the fields each asks for.
 var CLOUD_KINDS = [
+  { id: "local", label: "This computer", fields: [] },
+  { id: "subsonic", label: "Navidrome / Subsonic", server: true, fields: ["url", "user", "pass"] },
+  { id: "jellyfin", label: "Jellyfin", server: true, fields: ["url", "user", "pass"] },
+  { id: "plex", label: "Plex", server: true, oauth: true, fields: [] },
   { id: "drive", label: "Google Drive", oauth: true, fields: [] },
   { id: "dropbox", label: "Dropbox", oauth: true, fields: [] },
   { id: "onedrive", label: "OneDrive", oauth: true, fields: [] },
@@ -32,7 +52,8 @@ var SECRET_FIELDS = ["pass", "secret_access_key"]
 
 function serviceOf(key) {
   var k = String(key || "")
-  return k.indexOf("sc:") === 0 ? "sc" : k.indexOf("sp:") === 0 ? "sp" : k.indexOf("cl:") === 0 ? "cl" : "yt"
+  var p = k.slice(0, 3)
+  return p === "sc:" || p === "sp:" || p === "cl:" || p === "rd:" || p === "ms:" || p === "pc:" || p === "dz:" || p === "au:" || p === "mc:" || p === "am:" ? k.slice(0, 2) : "yt"
 }
 
 // Liking, adding to a YouTube playlist and radio are YouTube Music's.
@@ -71,6 +92,10 @@ var GLYPH = {
   settings: String.fromCodePoint(0xF0493),
   youtube: String.fromCodePoint(0xF05C3),
   spotify: String.fromCodePoint(0xF04C7),
+  deezer: String.fromCodePoint(0xF0EA2),
+  apple: String.fromCodePoint(0xF0035),
+  mixcloud: String.fromCodePoint(0xF02CB),
+  audius: String.fromCodePoint(0xF147D),
   soundcloud: String.fromCodePoint(0xF04C0),
   alert: String.fromCodePoint(0xF0026),
   explore: String.fromCodePoint(0xF018B),
@@ -89,6 +114,13 @@ var GLYPH = {
   chevronDown: String.fromCodePoint(0xF0140),
   artist: String.fromCodePoint(0xF0803),
   lyrics: String.fromCodePoint(0xF1021),
+  radioService: String.fromCodePoint(0xF0439),
+  ai: String.fromCodePoint(0xF0674),
+  history: String.fromCodePoint(0xF02DA),
+  folderMusic: String.fromCodePoint(0xF1359),
+  server: String.fromCodePoint(0xF048B),
+  podcast: String.fromCodePoint(0xF0994),
+  plusCircle: String.fromCodePoint(0xF0417),
   notes: String.fromCodePoint(0xF0387),
   guitar: String.fromCodePoint(0xF02A4),
   piano: String.fromCodePoint(0xF0747)
@@ -244,7 +276,7 @@ function repeatCommands(mode) {
 // for a downloaded song saved without one, else YouTube's thumbnail.
 // Spotify's album images and SoundCloud's artwork, the only remote covers
 // besides YouTube's own thumbnails.
-var REMOTE_COVER_RE = /^https:\/\/(?:i\.scdn\.co\/image\/[A-Za-z0-9]{1,100}|i[0-9]?\.sndcdn\.com\/[A-Za-z0-9_.\/-]{1,300}|(?:(?:lh3|yt3)\.googleusercontent\.com|yt3\.ggpht\.com|i[0-9]?\.ytimg\.com)\/[A-Za-z0-9_.\/=%~&?-]{1,500})$/
+var REMOTE_COVER_RE = /^https:\/\/(?:i\.scdn\.co\/image\/[A-Za-z0-9]{1,100}|i[0-9]?\.sndcdn\.com\/[A-Za-z0-9_.\/-]{1,300}|(?:(?:lh3|yt3)\.googleusercontent\.com|yt3\.ggpht\.com|i[0-9]?\.ytimg\.com)\/[A-Za-z0-9_.\/=%~&?-]{1,500}|is[0-9]-ssl\.mzstatic\.com\/image\/thumb\/[A-Za-z0-9_.\/=%-]{1,400}|thumbnailer\.mixcloud\.com\/unsafe\/[0-9x]{3,9}\/[A-Za-z0-9_.\/-]{1,300}|cdn-images\.dzcdn\.net\/images\/(?:cover|playlist|artist)\/[a-f0-9-]{32,131}\/[0-9]{2,4}x[0-9]{2,4}-[0-9a-z-]{1,40}\.jpg)$/
 
 function trackCover(track, size) {
   if (!track) return ""
@@ -338,6 +370,7 @@ function sanitizeTracks(items) {
     if (typeof t.path === "string" && t.path.charAt(0) === "/") track.path = t.path
     if (validCover(t.cover)) track.cover = t.cover
     if (t.album) track.album = cleanText(t.album, 200)
+    if (t.note) track.note = cleanText(t.note, 160)
     out.push(track)
   }
   return out
@@ -352,6 +385,10 @@ function parseLine(line) {
   case "playlists":
     return { type: "playlists", stale: msg.stale === true, items: sanitizePlaylists(msg.items),
       service: SERVICES.indexOf(msg.service) >= 0 ? msg.service : "yt" }
+  case "amAdded":
+    if (!PLAYLIST_ID_RE.test(String(msg.id || ""))) return null
+    return { type: "amAdded", id: String(msg.id), title: cleanText(msg.title, 150),
+      count: typeof msg.count === "number" && msg.count >= 0 ? msg.count : null }
   case "mixAdded":
     if (!/^mix:[a-f0-9]{8}$/.test(String(msg.id || ""))) return null
     return { type: "mixAdded", id: String(msg.id), title: cleanText(msg.title, 80), already: msg.already === true }
@@ -386,12 +423,31 @@ function parseLine(line) {
     // `auth`: a sign-in problem, so the panel offers a "Sign in" button.
     // `setup`: a service that needs connecting first (sp, sc).
     return { type: "error", message: cleanText(msg.message), auth: msg.auth === true,
-      setup: ["sp", "sc", "cl", "rclone", "numpy"].indexOf(msg.setup) >= 0 ? msg.setup : "",
+      setup: ["sp", "dz", "sc", "cl", "rclone", "numpy"].indexOf(msg.setup) >= 0 ? msg.setup : "",
       service: SERVICES.indexOf(msg.service) >= 0 ? msg.service : "" }
   case "cloud":
     return sanitizeCloud(msg)
+  case "scrobble":
+    return { type: "scrobble", listenbrainz: cleanText(msg.listenbrainz, 80), lastfm: cleanText(msg.lastfm, 80) }
+  case "scrobbleWaiting":
+    return { type: "scrobbleWaiting" }
   case "lyrics":
     return sanitizeLyrics(msg)
+  case "radioCountries": {
+    var cs = Array.isArray(msg.items) ? msg.items : []
+    var out = []
+    for (var ci = 0; ci < cs.length && out.length < 300; ci++) {
+      var c = cs[ci]
+      if (!c || !/^[A-Z]{2}$/.test(String(c.code || ""))) continue
+      out.push({ kind: "country", id: String(c.code), title: cleanText(c.name, 80) || String(c.code),
+        count: validCount(c.count), section: "" })
+    }
+    return { type: "radioCountries", items: out, current: /^[A-Z]{2}$/.test(String(msg.current || "")) ? String(msg.current) : "" }
+  }
+  case "radioFavs":
+    return { type: "radioFavs", ids: Array.isArray(msg.ids) ? msg.ids.filter(isRadio).slice(0, 500) : [] }
+  case "podcastSubs":
+    return { type: "podcastSubs", ids: Array.isArray(msg.ids) ? msg.ids.filter(isPodcastShow).slice(0, 500) : [] }
   case "chords":
     return sanitizeChords(msg)
   case "chordsProgress":
@@ -583,6 +639,7 @@ function mpvCommand(args, requestId) {
 // user-data/ytmusic/*: set by the player's own script (mpv/ytmusic.lua)
 // when a song came from a backup source, and when songs keep failing.
 var OBSERVED = ["user-data/ytmusic/fallback", "user-data/ytmusic/health", "user-data/ytmusic/unplayable",
+  "user-data/ytmusic/features", "metadata/by-key/icy-title",
   "pause", "media-title", "duration", "playlist-pos", "playlist-count", "volume", "idle-active",
   "loop-file", "loop-playlist", "seeking", "paused-for-cache"]
 
@@ -596,7 +653,8 @@ function sanitizeCloud(msg) {
   if (!state) return null
   var out = { type: "cloud", state: state, rclone: msg.rclone !== false, sources: [], remotes: [],
     id: /^[a-f0-9]{8}$/.test(String(msg.id || "")) ? String(msg.id) : "", title: cleanText(msg.title, 80),
-    kind: cleanText(msg.kind, 20) }
+    kind: cleanText(msg.kind, 20),
+    musicDir: typeof msg.musicDir === "string" && msg.musicDir.charAt(0) === "/" ? cleanText(msg.musicDir, 300) : "" }
   var src = Array.isArray(msg.sources) ? msg.sources : []
   for (var i = 0; i < src.length && out.sources.length < 50; i++) {
     var s = src[i]

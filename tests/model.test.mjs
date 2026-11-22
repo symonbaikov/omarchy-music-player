@@ -8,7 +8,7 @@ const source = readFileSync(new URL("../Model.js", import.meta.url), "utf8").rep
 const M = {}
 // QML's V4 engine lacks some newer built-ins; remove them so tests catch their use.
 const V4_MISSING = "delete String.prototype.trimEnd; delete String.prototype.trimStart; delete Array.prototype.at; delete Object.hasOwn;\n"
-vm.runInNewContext(V4_MISSING + source + "\n;Object.assign(__out, { cleanText, plain, truncate, formatTime, parseLine, parseSession, clampIndex, mpvCommand, GLYPH, normalizeRepeat, nextRepeat, repeatFromMpv, repeatCommands, coverUrl, OBSERVED, SUPERMIX_ID, isMix, radioListId, autoplaySeed, isLoading, addTargets, likedSet, withLiked, playbackFailure, seconds, stepChoice, recentReport, mirrorOffer, parseUpdate, exploreRows, DOWNLOAD_FORMATS, trackCover, serviceOf, isYouTube, TRACK_KEY_RE, cloudForm, tileHue, CLOUD_KINDS, SERVICES, lyricIndex, chordTones, chordNoteNames, guitarDiagram, GUITAR_SHAPES, chordLabel, keyLabel })", { __out: M })
+vm.runInNewContext(V4_MISSING + source + "\n;Object.assign(__out, { cleanText, plain, truncate, formatTime, parseLine, parseSession, clampIndex, mpvCommand, GLYPH, normalizeRepeat, nextRepeat, repeatFromMpv, repeatCommands, coverUrl, OBSERVED, SUPERMIX_ID, isMix, radioListId, autoplaySeed, isLoading, addTargets, likedSet, withLiked, playbackFailure, seconds, stepChoice, recentReport, mirrorOffer, parseUpdate, exploreRows, DOWNLOAD_FORMATS, trackCover, serviceOf, isYouTube, TRACK_KEY_RE, cloudForm, tileHue, CLOUD_KINDS, SERVICES, lyricIndex, chordTones, chordNoteNames, guitarDiagram, GUITAR_SHAPES, chordLabel, keyLabel, visibleTabs, isRadio, canDownload, isPodcast, isPodcastShow, validCover })", { __out: M })
 
 const MARKUP = '<img src="https://example.invalid/tracker">Song'
 
@@ -445,4 +445,103 @@ test("chords and scores: sanitized; chord notes and guitar shapes are right", ()
   assert.equal(sc.items.length, 1)
   assert.equal(sc.ultimateGuitar, "")
   assert.ok(sc.musescore.startsWith("https://musescore.com/"))
+})
+
+test("radio keys and lists; the tabs setting", () => {
+  const st = "rd:1c6dcd6f-88c6-4fd4-8191-078435168e85"
+  assert.ok(M.TRACK_KEY_RE.test(st))
+  assert.ok(M.isRadio(st))
+  assert.equal(M.serviceOf(st), "rd")
+  assert.equal(M.canDownload(st), false)
+  assert.equal(M.canDownload("dQw4w9WgXcQ"), true)
+  const lists = M.parseLine(JSON.stringify({ type: "playlists", service: "rd", items: [
+    { id: "rd:fav", title: "Favorite stations", count: 2 }, { id: "rd:tag:hip-hop", title: "Hip Hop" },
+    { id: "rd:country:US", title: "US" }, { id: "rd:tag:../x", title: "bad" }] }))
+  assert.equal(lists.service, "rd")
+  assert.deepEqual(Array.from(lists.items, i => i.id), ["rd:fav", "rd:tag:hip-hop", "rd:country:US"])
+  assert.deepEqual(Array.from(M.parseLine(JSON.stringify({ type: "radioFavs", ids: [st, "x"] })).ids), [st])
+  assert.deepEqual(Array.from(M.visibleTabs("")), ["yt", "am", "sp", "sc", "cl", "rd", "pc", "my"])
+  assert.deepEqual(Array.from(M.visibleTabs("rd,sc,bogus")), ["yt", "sc", "rd", "my"])
+})
+
+test("radio countries are sanitized into rows", () => {
+  const m = M.parseLine(JSON.stringify({ type: "radioCountries", current: "RU",
+    items: [{ code: "US", name: "United States", count: 7088 }, { code: "ru", name: "bad" }, { code: "RU", name: "Russia", count: 2474 }] }))
+  assert.equal(m.current, "RU")
+  assert.deepEqual(Array.from(m.items, c => c.id), ["US", "RU"])
+  assert.equal(m.items[1].kind, "country")
+  assert.equal(m.items[1].count, 2474)
+})
+
+test("AI Mix and recently played lists; notes on songs", () => {
+  const lists = M.parseLine(JSON.stringify({ type: "playlists", service: "my", items: [
+    { id: "ai:mix", title: "Shieldwall and Saga", count: 27, subtitle: "Nordic folk and battle metal" }, { id: "hist:recent", title: "Recently played" }] }))
+  assert.deepEqual(Array.from(lists.items, i => i.id), ["ai:mix", "hist:recent"])
+  const t = M.parseLine(JSON.stringify({ type: "tracks", playlistId: "ai:mix", items: [
+    { id: "dQw4w9WgXcQ", title: "Helvegen", artist: "Wardruna", note: "Haunting authentic Norse folk\u0000" }] }))
+  assert.equal(t.items[0].note, "Haunting authentic Norse folk")
+})
+
+test("podcast episodes, shows and subscriptions", () => {
+  const ep = "pc:2abd05655129946b/d6129de71b4292d6"
+  assert.ok(M.TRACK_KEY_RE.test(ep))
+  assert.ok(M.isPodcast(ep))
+  assert.equal(M.serviceOf(ep), "pc")
+  assert.equal(M.canDownload(ep), false)
+  assert.ok(M.isPodcastShow("pc:2abd05655129946b"))
+  assert.equal(M.isPodcastShow(ep), false)
+  const lists = M.parseLine(JSON.stringify({ type: "playlists", service: "pc", items: [
+    { id: "pc:new", title: "New episodes" },
+    { id: "pc:2abd05655129946b", title: "The Rest Is History", subtitle: "Goalhanger",
+      cover: "https://is1-ssl.mzstatic.com/image/thumb/Podcasts211/v4/12/e4/mza_93.jpg/600x600bb.jpg" },
+    { id: "pc:XYZ", title: "bad" }] }))
+  assert.deepEqual(Array.from(lists.items, i => i.id), ["pc:new", "pc:2abd05655129946b"])
+  assert.ok(lists.items[1].cover.startsWith("https://is1-ssl.mzstatic.com/"))
+  const subs = M.parseLine(JSON.stringify({ type: "podcastSubs", ids: ["pc:2abd05655129946b", ep, "x"] }))
+  assert.deepEqual(Array.from(subs.ids), ["pc:2abd05655129946b"])
+  assert.equal(M.validCover("https://evil.example/x.jpg"), "")
+})
+
+test("Deezer songs, lists and covers", () => {
+  assert.ok(M.TRACK_KEY_RE.test("dz:668826392"))
+  assert.equal(M.serviceOf("dz:668826392"), "dz")
+  assert.equal(M.canDownload("dz:668826392"), true)
+  const lists = M.parseLine(JSON.stringify({ type: "playlists", service: "dz", items: [
+    { id: "dz:fav", title: "Favorite tracks" }, { id: "dz:pl:276102231", title: "2014",
+      cover: "https://cdn-images.dzcdn.net/images/cover/633eedc798aa3012c6b61b78f5d7e4c9-f96f9c62426dcb114ffc1f4bba7f2158/250x250-000000-80-0-0.jpg" },
+    { id: "dz:chart", title: "Top tracks" }, { id: "dz:pl:abc", title: "bad" }] }))
+  assert.deepEqual(Array.from(lists.items, i => i.id), ["dz:fav", "dz:pl:276102231", "dz:chart"])
+  assert.ok(lists.items[1].cover)
+  assert.equal(M.validCover("https://cdn-images.dzcdn.net/images/cover/../x.jpg"), "")
+  assert.ok(M.SERVICES.includes("dz"))
+  assert.equal(Array.from(M.visibleTabs("")).includes("dz"), false)
+})
+
+test("Mixcloud and Audius songs and lists", () => {
+  for (const k of ["mc:DJJazzyJeff/dj-jazzy-jeff-boiler-room", "mc:AK729/%E7%89%B9%E5%88%AB", "au:V66vyPP"]) assert.ok(M.TRACK_KEY_RE.test(k), k)
+  assert.equal(M.TRACK_KEY_RE.test("mc:a/../b c"), false)
+  assert.equal(M.serviceOf("au:V66vyPP"), "au")
+  assert.equal(M.serviceOf("mc:a/b"), "mc")
+  const lists = M.parseLine(JSON.stringify({ type: "playlists", service: "au", items: [
+    { id: "au:trending" }, { id: "au:trending:hip-hop-rap" }, { id: "mc:hot:deep-house" }, { id: "au:x" }] }))
+  assert.deepEqual(Array.from(lists.items, i => i.id), ["au:trending", "au:trending:hip-hop-rap", "mc:hot:deep-house"])
+  assert.ok(M.validCover("https://thumbnailer.mixcloud.com/unsafe/300x300/extaudio/e/c/c/e/e421-6f4e"))
+  assert.equal(Array.from(M.visibleTabs("mc,au")).join(","), "yt,mc,au,my")
+})
+
+test("scrobbling status is sanitized", () => {
+  const m = M.parseLine(JSON.stringify({ type: "scrobble", listenbrainz: "me\u0000", lastfm: "" }))
+  assert.deepEqual({ ...m }, { type: "scrobble", listenbrainz: "me", lastfm: "" })
+  assert.equal(M.parseLine(JSON.stringify({ type: "scrobbleWaiting" })).type, "scrobbleWaiting")
+})
+
+test("Apple Music songs, lists and the added link", () => {
+  assert.ok(M.TRACK_KEY_RE.test("am:1460471576"))
+  assert.equal(M.serviceOf("am:1460471576"), "am")
+  const lists = M.parseLine(JSON.stringify({ type: "playlists", service: "am", items: [
+    { id: "am:top" }, { id: "am:al:1460471435" }, { id: "am:pl:pl.f4d106fed2bd41149aaacabb233eb5eb" }, { id: "am:pl:../x" }] }))
+  assert.deepEqual(Array.from(lists.items, i => i.id), ["am:top", "am:al:1460471435", "am:pl:pl.f4d106fed2bd41149aaacabb233eb5eb"])
+  const added = M.parseLine(JSON.stringify({ type: "amAdded", id: "am:al:1460471435", title: "Once", count: 11 }))
+  assert.equal(added.title, "Once")
+  assert.equal(M.parseLine(JSON.stringify({ type: "amAdded", id: "x y" })), null)
 })

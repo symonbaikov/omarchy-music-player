@@ -407,6 +407,7 @@ FloatingWindow {
       }
 
       Flickable {
+        WheelScroll {}
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.top: sideTop.bottom
@@ -504,6 +505,7 @@ FloatingWindow {
       // Listen Now: what's playing, your mixes and every service's lists.
       Flickable {
         id: homePage
+        WheelScroll { }
         visible: win.page === "home"
         anchors.fill: parent
         contentHeight: homeColumn.implicitHeight + win.gutter * 2
@@ -688,6 +690,7 @@ FloatingWindow {
 
         GridView {
           id: grid
+          WheelScroll { }
           visible: count > 0 && !win.cloudFormShown
           anchors.left: parent.left
           anchors.leftMargin: win.gutter - Style.space(10)
@@ -720,6 +723,7 @@ FloatingWindow {
       // Connect a cloud storage, in full screen.
       Flickable {
         id: cloudPage
+        WheelScroll { }
         visible: win.cloudFormShown
         anchors.fill: parent
         anchors.topMargin: win.gutter + Style.space(70)
@@ -878,6 +882,7 @@ FloatingWindow {
       // An open playlist: big artwork, Play and Shuffle, then its songs.
       ListView {
         id: listPage
+        WheelScroll { }
         visible: win.page === "list"
         anchors.fill: parent
         anchors.leftMargin: win.gutter - Style.space(10)
@@ -1023,6 +1028,7 @@ FloatingWindow {
         // Explore's front page: its shelves.
         Flickable {
           id: browseShelves
+          WheelScroll { }
           visible: win.p.exploreMode === "home"
           anchors.left: parent.left
           anchors.right: parent.right
@@ -1053,6 +1059,7 @@ FloatingWindow {
         // A mood's lists, or search results.
         ListView {
           id: browseList
+          WheelScroll { }
           visible: win.p.exploreMode !== "home"
           anchors.left: parent.left
           anchors.leftMargin: win.gutter - Style.space(10)
@@ -1238,6 +1245,7 @@ FloatingWindow {
           }
           ListView {
             id: queueView
+            WheelScroll { }
             width: parent.width
             height: parent.height - (playingFrom.visible ? playingFrom.height + Style.space(12) : 0)
             clip: true
@@ -1270,6 +1278,7 @@ FloatingWindow {
         // the next ones after it), and the sheet music and tabs found for it.
         Flickable {
           id: notesPane
+          WheelScroll { }
           visible: win.side === "notes"
           anchors.left: parent.left
           anchors.right: parent.right
@@ -1357,6 +1366,7 @@ FloatingWindow {
             }
             ListView {
               id: chordStrip
+              WheelScroll { }
               visible: win.chordsReady
               width: parent.width
               height: Style.space(58)
@@ -1547,6 +1557,7 @@ FloatingWindow {
 
           ListView {
             id: lyricView
+            WheelScroll { onScrolled: { lyricView.userScrolled = true; resumeFollow.restart() } }
             anchors.fill: parent
             visible: win.lyricsReady && win.p.lyrics.lines.length > 0
             clip: true
@@ -2086,6 +2097,7 @@ FloatingWindow {
     }
     ListView {
       id: shelfList
+      WheelScroll { }
       width: shelf.width
       height: win.cardSize + Style.space(64)
       orientation: ListView.Horizontal
@@ -2462,6 +2474,62 @@ FloatingWindow {
         Keys.onEnterPressed: function(event) { keys.forceActiveFocus(); field.submitted(); event.accepted = true }
         Keys.onEscapePressed: function(event) { keys.forceActiveFocus(); event.accepted = true }
       }
+    }
+  }
+
+  // Wheel and touchpad scrolling for a list: a mouse wheel's notch moves
+  // about three rows, eased; a touchpad moves exactly with the fingers.
+  // (Qt's own wheel scrolling is a slow flick.) Sideways gestures scroll a
+  // row of covers; up and down over one scrolls the page around it.
+  component WheelScroll: WheelHandler {
+    id: wheel
+    signal scrolled()
+    target: null
+    acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+
+    function scrollable(item, sideways) {
+      for (var it = wheel.parent; it; it = it.parent) {
+        if (it.contentY === undefined || it.contentHeight === undefined) continue
+        if (sideways ? it.contentWidth > it.width + 1 : it.contentHeight > it.height + 1) return it
+      }
+      return null
+    }
+
+    property var view: null
+    property bool sideways: false
+    // A handler holds no children: the animation is a property.
+    property NumberAnimation ease: NumberAnimation {
+      target: wheel.view
+      property: wheel.sideways ? "contentX" : "contentY"
+      duration: Style.duration(140)
+      easing.type: Easing.OutCubic
+    }
+
+    onWheel: function(event) {
+      var dx = event.pixelDelta.x !== 0 ? event.pixelDelta.x : event.angleDelta.x / 120 * Style.space(110)
+      var dy = event.pixelDelta.y !== 0 ? event.pixelDelta.y : event.angleDelta.y / 120 * Style.space(110)
+      var side = Math.abs(dx) > Math.abs(dy)
+      var v = scrollable(wheel.parent, side)
+      if (!v) return
+      var touchpad = event.pixelDelta.x !== 0 || event.pixelDelta.y !== 0
+      var from = wheel.ease.running && wheel.view === v && wheel.sideways === side ? wheel.ease.to
+        : (side ? v.contentX : v.contentY)
+      var lo = side ? v.originX : v.originY
+      var hi = side ? v.originX + v.contentWidth - v.width : v.originY + v.contentHeight - v.height
+      var to = Math.max(lo, Math.min(hi, from - (side ? dx : dy)))
+      wheel.ease.stop()
+      if (touchpad || Style.reduceMotion) {
+        if (side) v.contentX = to
+        else v.contentY = to
+      } else {
+        wheel.view = v
+        wheel.sideways = side
+        wheel.ease.from = side ? v.contentX : v.contentY
+        wheel.ease.to = to
+        wheel.ease.start()
+      }
+      event.accepted = true
+      wheel.scrolled()
     }
   }
 

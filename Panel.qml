@@ -2294,7 +2294,7 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: panel.loadedContent
-    contentWidth: panel.fittedContentWidth(Style.space(470))
+    contentWidth: panel.fittedContentWidth(Style.space(527))
     contentHeight: panel.fittedContentHeight(panel.loadedContentHeight)
 
     content: PanelKeyCatcher {
@@ -2308,77 +2308,83 @@ Panel {
       }
       // Typing in the search field goes to the field, not to shortcuts.
       blocked: searchField.activeFocus || setupField.activeFocus || root.cloudTyping
-      implicitHeight: column.implicitHeight
+      implicitHeight: Math.max(column.implicitHeight, rail.implicitHeight + railEnd.implicitHeight + Style.space(24))
       onMoveRequested: function(dx, dy) { root.moveCursor(dx, dy) }
       onActivateRequested: root.activateCursor()
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(text, modifiers) { root.handleKey(text) }
 
+      // ---------- services, down the left side ----------
+      // Each service's logo in its color (its name in a tooltip and in the
+      // header), "+" to pick them; the player window and settings at the foot.
+      Column {
+        id: rail
+        anchors.left: parent.left
+        anchors.top: parent.top
+        width: Style.space(38)
+        spacing: Style.space(6)
+
+        Repeater {
+          model: root.shownTabs
+          ServiceTab {
+            required property var modelData
+            glyph: modelData.glyph
+            brand: modelData.color
+            label: modelData.label
+            selected: root.service === modelData.id && root.view !== "services"
+            onClicked: root.switchService(modelData.id)
+          }
+        }
+        ServiceTab {
+          glyph: Model.GLYPH.plus
+          brand: root.fg
+          label: strings.t("services.title")
+          selected: root.view === "services"
+          onClicked: root.view === "services" ? root.backToPlaylists() : root.openServices()
+        }
+      }
+      Column {
+        id: railEnd
+        anchors.horizontalCenter: rail.horizontalCenter
+        anchors.bottom: parent.bottom
+        spacing: Style.space(4)
+        PanelActionButton {
+          anchors.horizontalCenter: parent.horizontalCenter
+          iconText: Model.GLYPH.fullscreen
+          fontSize: Style.font.title
+          tooltipText: strings.t("full.open")
+          foreground: root.fg
+          fontFamily: root.fontFamily
+          onClicked: root.openFull()
+        }
+        PanelActionButton {
+          anchors.horizontalCenter: parent.horizontalCenter
+          iconText: Model.GLYPH.settings
+          fontSize: Style.font.title
+          tooltipText: strings.t("settings.open")
+          foreground: root.view === "settings" ? Style.selectedStateColor(root.fg, Commons.Color.accent) : root.fg
+          fontFamily: root.fontFamily
+          onClicked: root.view === "settings" ? root.backToPlaylists() : root.openSettings()
+        }
+      }
+      Rectangle {
+        id: railLine
+        anchors.left: rail.right
+        anchors.leftMargin: Style.space(8)
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        width: 1
+        color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.08)
+      }
+
       Column {
         id: column
-        anchors.left: parent.left
+        anchors.left: railLine.right
+        anchors.leftMargin: Style.space(10)
         anchors.right: parent.right
         anchors.top: parent.top
         spacing: Style.space(12)
-
-        // ---------- services: YouTube Music, Spotify, SoundCloud, My Music ----------
-        Item {
-          width: parent.width
-          implicitHeight: Math.max(tabsRow.implicitHeight, settingsButton.implicitHeight)
-
-          Row {
-            id: tabsRow
-            anchors.left: parent.left
-            anchors.verticalCenter: parent.verticalCenter
-            spacing: Style.space(4)
-
-            Repeater {
-              model: root.shownTabs
-              ServiceTab {
-                required property var modelData
-                glyph: modelData.glyph
-                brand: modelData.color
-                label: modelData.label
-                selected: root.service === modelData.id && root.view !== "services"
-                onClicked: root.switchService(modelData.id)
-              }
-            }
-            // "+": pick which services have a tab.
-            ServiceTab {
-              glyph: Model.GLYPH.plus
-              brand: root.fg
-              label: strings.t("services.title")
-              selected: root.view === "services"
-              onClicked: root.view === "services" ? root.backToPlaylists() : root.openServices()
-            }
-          }
-
-          // Full screen and settings, in the panel's top right corner.
-          Row {
-            id: settingsButton
-            anchors.right: parent.right
-            anchors.verticalCenter: parent.verticalCenter
-            spacing: Style.space(2)
-
-            PanelActionButton {
-              iconText: Model.GLYPH.fullscreen
-              fontSize: Style.font.title
-              tooltipText: strings.t("full.open")
-              foreground: root.fg
-              fontFamily: root.fontFamily
-              onClicked: root.openFull()
-            }
-            PanelActionButton {
-              iconText: Model.GLYPH.settings
-              fontSize: Style.font.title
-              tooltipText: strings.t("settings.open")
-              foreground: root.view === "settings" ? Style.selectedStateColor(root.fg, Commons.Color.accent) : root.fg
-              fontFamily: root.fontFamily
-              onClicked: root.view === "settings" ? root.backToPlaylists() : root.openSettings()
-            }
-          }
-        }
 
         // ---------- search, across the panel under the tabs ----------
         // YouTube Music's songs (SoundCloud's on its tab); Enter shows them.
@@ -4189,7 +4195,8 @@ Panel {
     onClicked: root.reportProblem(where, message)
   }
 
-  // A service tab: its logo in the service's color, its name when selected.
+  // A service in the rail: its logo in the service's color; the selected one
+  // lit, with an accent bar at its left edge. Its name shows on hover.
   component ServiceTab: BorderSurface {
     id: tab
     property string glyph: ""
@@ -4197,34 +4204,29 @@ Panel {
     property string label: ""
     property bool selected: false
     signal clicked()
-    implicitHeight: Style.space(34)
-    implicitWidth: tabRow.implicitWidth + Style.space(20)
+    implicitWidth: Style.space(38)
+    implicitHeight: Style.space(38)
     radius: Style.cornerRadius
-    color: Style.controlFill(false, selected || tabMouse.containsMouse, root.fg, Commons.Color.accent)
-    borderSpec: Border.controlSpec(selected ? "focus" : (tabMouse.containsMouse ? "hover-cursor" : "normal"), root.fg, Commons.Color.accent)
+    color: selected || tabMouse.containsMouse ? Style.controlFill(false, true, root.fg, Commons.Color.accent) : "transparent"
+    borderSpec: selected ? Border.controlSpec("focus", root.fg, Commons.Color.accent) : Border.flat("transparent", 0)
 
-    Row {
-      id: tabRow
+    Rectangle {
+      visible: tab.selected
+      anchors.left: parent.left
+      anchors.leftMargin: -Style.space(5)
+      anchors.verticalCenter: parent.verticalCenter
+      width: Style.space(3)
+      height: parent.height * 0.5
+      radius: width / 2
+      color: Commons.Color.accent
+    }
+    Text {
       anchors.centerIn: parent
-      spacing: Style.space(6)
-      Text {
-        textFormat: Text.PlainText
-        text: tab.glyph
-        color: tab.brand
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.title
-        anchors.verticalCenter: parent.verticalCenter
-      }
-      Text {
-        visible: tab.selected
-        textFormat: Text.PlainText
-        text: tab.label
-        color: root.fg
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.body
-        font.bold: true
-        anchors.verticalCenter: parent.verticalCenter
-      }
+      textFormat: Text.PlainText
+      text: tab.glyph
+      color: tab.brand
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.title
     }
     MouseArea {
       id: tabMouse
@@ -4234,7 +4236,7 @@ Panel {
       onClicked: tab.clicked()
     }
     PanelToolTip {
-      visible: tabMouse.containsMouse && !tab.selected
+      visible: tabMouse.containsMouse
       text: tab.label
     }
   }

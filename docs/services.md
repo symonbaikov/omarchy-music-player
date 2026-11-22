@@ -1,6 +1,7 @@
 # Services
 
-Each service is a tab at the top of the panel (and in the player window's
+Each service is a logo in the rail down the panel's left side (hover it for
+its name; and in the player window's
 sidebar). The `+` tab picks which ones you see; YouTube Music and My Music
 are always there.
 
@@ -17,7 +18,7 @@ are always there.
 | <img src="icons/podcasts.svg" width="20" height="20" alt="" align="center" />&nbsp;Podcasts | Apple Podcasts' directory or any feed: top shows, search, subscriptions, new episodes | Nothing |
 | <img src="icons/mymusic.svg" width="20" height="20" alt="" align="center" />&nbsp;My&nbsp;Music | AI Mix, My Mix, your own mixes, Recently played, Downloads | Nothing |
 
-A search field sits under the tabs: `Enter` (or `/` to get there) searches
+A search field runs across the top of the panel: `Enter` (or `/` to get there) searches
 YouTube Music, or Deezer, SoundCloud, Mixcloud, Audius, radio stations or
 podcasts on their tabs. Back returns
 to where you were.

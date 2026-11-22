@@ -2,7 +2,7 @@
 
 <img alt="The player window" src="images/player-window.png" />
 
-The icon beside the gear in the panel, or `Shift+F`, opens the whole player
+The full-screen icon at the foot of the panel's left rail (above the gear), or `Shift+F`, opens the whole player
 in its own window, like Apple Music's app. Hyprland treats it like any other
 window: it tiles, moves (drag its title, or `Super`+drag; `Super+T` floats
 it), goes to another workspace and closes with `Super+W`. Its button, `F11`

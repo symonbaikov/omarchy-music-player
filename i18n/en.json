@@ -247,6 +247,7 @@
   "full.lyricsNone": "No lyrics for this song yet.",
   "full.instrumental": "Instrumental",
   "full.lyricsSource": "Lyrics: %1",
+  "full.lyricsUntimed": "Not timed to the song: there are no timed lyrics for it yet, so these don't follow along.",
   "full.fullscreen": "Full screen (F11)",
   "full.leaveFullscreen": "Leave full screen (F11)",
   "notes.tab": "Notes",

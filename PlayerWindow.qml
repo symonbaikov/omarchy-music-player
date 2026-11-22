@@ -1587,7 +1587,22 @@ FloatingWindow {
             model: visible ? win.p.lyrics.lines : []
             // Room above the first line and below the last, so either can
             // sit where the playing line does.
-            header: Item { width: lyricView.width; height: win.lyricsSynced ? lyricView.height * 0.3 : 0 }
+            // Lyrics without timings (none on LRCLIB yet): say so, or they
+            // look like timed lyrics that stopped following the song.
+            header: Item {
+              width: lyricView.width
+              height: win.lyricsSynced ? lyricView.height * 0.3 : untimed.implicitHeight + Style.space(18)
+              Txt {
+                id: untimed
+                visible: !win.lyricsSynced
+                width: parent.width
+                text: Model.GLYPH.lyrics + "  " + win.t("full.lyricsUntimed")
+                color: win.dim
+                font.pixelSize: Style.font.body
+                wrapMode: Text.Wrap
+                elide: Text.ElideNone
+              }
+            }
             footer: Item {
               width: lyricView.width
               height: Math.max(lyricSource.implicitHeight + Style.space(30), win.lyricsSynced ? lyricView.height * 0.6 : 0)

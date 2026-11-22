@@ -35,7 +35,9 @@ scroll yourself and it waits a few seconds before following again.
 Timed lyrics come from [LRCLIB](https://lrclib.net), looked up by the song's
 artist, title and length (YouTube titles are cleaned of "Official Video" and
 the like first). When it has none, YouTube Music's own lyrics are shown as
-text. Lyrics are fetched only while the view is open, and cached.
+text, marked as not timed: they don't follow the song (many songs have no
+timed lyrics anywhere yet). Lyrics are fetched only while the view is open,
+and cached.
 
 ## Notes
 

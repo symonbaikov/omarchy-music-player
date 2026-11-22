@@ -70,8 +70,9 @@ Panel {
     : service === "sc" ? (svc.sc.setup ? [] : [scSearchEntry].concat(svc.sc.items))
     : service === "cl" ? (svc.cl.setup || cloudFormOpen ? [] : svc.cl.items.concat([cloudAddEntry]))
     : service === "rd" ? [radioCountryEntry].concat(svc.rd.items)
+    : service === "my" ? (svc.my.setup ? [] : [aiEntry].concat(svc.my.items))
     : svc[service].setup ? [] : svc[service].items
-  readonly property var rows: view === "settings" || view === "download" || view === "services" ? []
+  readonly property var rows: view === "settings" || view === "download" || view === "services" || view === "ai" ? []
     : view === "countries" ? countryRows
     : view === "explore" ? exploreRowsData
     : view === "playlists" ? libraryRows
@@ -454,6 +455,16 @@ Panel {
       if (msg.key === chordsProc.key) chordsStage = msg.stage
     } else if (msg.type === "scores") {
       if (msg.key === scoresProc.key) scores = msg
+    } else if (msg.type === "aiMix") {
+      if (msg.state === "asking" || msg.state === "finding") { aiState = msg.state; if (msg.agent) aiAgent = msg.agent }
+      else if (msg.state === "done") {
+        aiState = ""
+        loadService("my", true)
+        if (!aiProc.auto) {
+          showNotice(strings.t("ai.ready").arg(msg.title).arg(msg.count))
+          openList({ id: "ai:mix", title: msg.title, count: msg.count })
+        }
+      }
     } else if (msg.type === "radioCountries") {
       radioCountries = msg.items
       radioCountry = msg.current
@@ -507,6 +518,8 @@ Panel {
     } else if (msg.type === "playlists") {
       playlists = msg.items
       if (!msg.stale) playlistsLoading = false
+    } else if (msg.type === "tracks" && source === "recent") {
+      recentTracks = msg.items.slice(0, 30)
     } else if (msg.type === "tracks") {
       // A fresh Liked Music list is the truth about what's liked.
       if (msg.playlistId === "LM" && !msg.stale) likedIds = Model.likedSet(msg.items.map(function(t) { return t.id }))
@@ -581,6 +594,7 @@ Panel {
       else if (source === "service") setSvc(servicePlaylistsProc.target, { loading: false, error: msg.setup ? "" : msg.message, setup: msg.setup })
       else if (source === "spotify") { spotifyWaiting = false; showNotice(msg.message, false, true) }
       else if (source === "countries") showNotice(strings.t("notice.failed").arg(msg.message))
+      else if (source === "ai") { aiState = ""; if (!aiProc.auto) aiError = msg.message }
       else if (source === "chords") { chordsStage = ""; chordsError = msg.message; numpyMissing = msg.setup === "numpy" }
       else if (source === "scores" || source === "openScore") { if (source === "openScore") showNotice(msg.message) }
       else if (source === "lyrics") { lyricsLoading = false; lyrics = { key: lyricsProc.key, lines: [], none: true, synced: false } }
@@ -1031,6 +1045,59 @@ Panel {
       queued = null
       if (next) Qt.callLater(function() { root.loadLyrics(next) })
     }
+  }
+
+  // ---- AI Mix ----------------------------------------------------------------------
+  // A mix your AI agent makes from what you listen to (bin/ytmusic-mpv
+  // ai-mix). Off until turned on: it sends a summary of your taste to the
+  // agent. When on, a mix older than a day is remade by itself.
+  readonly property bool aiEnabled: setting("aiMix", "Off") === "On"
+  property string aiState: ""                 // "" | "asking" | "finding"
+  property string aiAgent: ""
+  property string aiError: ""
+  readonly property var aiEntry: ({ kind: "explore", id: "__aimake", title: strings.t("ai.make"), artist: strings.t("ai.makeHint") })
+
+  // Recently played, for the player window's home.
+  property var recentTracks: []
+  Process {
+    id: recentProc
+    command: root.helper(["tracks", "hist:recent"])
+    stdout: SplitParser { onRead: function(line) { root.handleHelperLine(line, "recent") } }
+  }
+  onFullOpenChanged: if (fullOpen && !recentProc.running) recentProc.running = true
+
+  function openAiMaker() {
+    aiError = ""
+    if (service !== "my") switchService("my")
+    view = "ai"
+    cursorIndex = -1
+    if (!opened) open()
+  }
+
+  function makeAiMix(wish, auto) {
+    if (aiProc.running) return
+    if (!aiEnabled) saveSettings({ aiMix: "On" })
+    aiError = ""
+    aiState = "asking"
+    aiProc.auto = auto === true
+    aiProc.command = helper(["ai-mix", "--browser", browser].concat(wish ? ["--prompt", wish] : [])
+      .concat(auto ? ["--if-older", "86400"] : []))
+    aiProc.running = true
+  }
+
+  Process {
+    id: aiProc
+    property bool auto: false
+    stdout: SplitParser { onRead: function(line) { root.handleHelperLine(line, "ai") } }
+    onExited: root.aiState = ""
+  }
+  // Remade by itself once a day while it's on (and only then).
+  Timer {
+    interval: 3 * 3600 * 1000
+    repeat: true
+    triggeredOnStart: true
+    running: root.aiEnabled
+    onTriggered: root.makeAiMix("", true)
   }
 
   // ---- notes: chords and scores -----------------------------------------------------
@@ -1609,6 +1676,8 @@ Panel {
       hint: strings.t("settings.mirrorsHint"), checked: setting("backupMirrors", "Off") === "On", enabled: true },
     { key: "updateCheck", kind: "toggle", section: "", label: strings.t("settings.updates"),
       hint: strings.t("settings.updatesHint"), checked: updateCheckOn, enabled: true },
+    { key: "aiMix", kind: "toggle", section: strings.t("settings.ai"), label: strings.t("ai.setting"),
+      hint: strings.t("ai.settingHint"), checked: aiEnabled, enabled: true },
     { key: "showCovers", kind: "toggle", section: strings.t("settings.display"), label: strings.t("settings.covers"),
       hint: strings.t("settings.coversHint"), checked: showCovers, enabled: true },
     { key: "showTitle", kind: "toggle", section: "", label: strings.t("settings.barTitle"),
@@ -1895,6 +1964,7 @@ Panel {
       if (p.id === "__scsearch") openSoundCloudSearch()
       else if (p.id === "__cloudadd") openCloudForm()
       else if (p.id === "__rdcountry") openCountries()
+      else if (p.id === "__aimake") openAiMaker()
       else openExplore()
       return
     }
@@ -1922,6 +1992,7 @@ Panel {
     }
     if (view === "tracks" && tracksFromExplore) { view = "explore"; cursorIndex = -1; return }
     if (view === "countries") { view = "playlists"; countryFilter = ""; cursorIndex = -1; return }
+    if (view === "ai") { view = "playlists"; cursorIndex = -1; return }
     if (view === "settings" || view === "services") {
       view = viewBeforeSettings === "tracks" && openPlaylist ? "tracks" : "playlists"
       cursorIndex = -1
@@ -2048,6 +2119,7 @@ Panel {
       else if (page === "home" || page === "nowplaying") fullView.go(page)
     }
     function cloud(): void { root.fullOpen ? fullView.addStorage() : root.openCloudForm() }
+    function aiMix(): void { root.openAiMaker() }
   }
 
   onOpenedChanged: {
@@ -2810,6 +2882,7 @@ Panel {
               text: root.view === "settings" ? strings.t("settings.title")
                 : root.view === "services" ? strings.t("services.title")
                 : root.view === "countries" ? strings.t("rd.countries")
+                : root.view === "ai" ? strings.t("ai.title")
                 : root.view === "explore" ? root.exploreTitle
                 : root.view === "download" && root.downloadTrack ? strings.t("download.title").arg(root.downloadTrack.title)
                 : root.view === "tracks" ? root.playlistTitle(root.openPlaylist)
@@ -2847,7 +2920,7 @@ Panel {
               onClicked: root.handleKey("s")
             }
             Button {
-              visible: root.view !== "settings" && root.view !== "download" && root.view !== "services" && !(root.view === "explore" && root.exploreMode === "mood")
+              visible: root.view !== "settings" && root.view !== "download" && root.view !== "services" && root.view !== "ai" && !(root.view === "explore" && root.exploreMode === "mood")
               iconText: Model.GLYPH.refresh
               iconSpinning: root.view === "tracks" ? root.tracksLoading : root.view === "explore" ? root.exploreLoading : root.playlistsLoading
               fontSize: Style.font.title
@@ -3071,6 +3144,55 @@ Panel {
           }
         }
 
+        // ---------- AI Mix: make one ----------
+        Column {
+          visible: root.view === "ai"
+          width: parent.width
+          spacing: Style.space(10)
+          PlainText {
+            width: parent.width
+            text: strings.t("ai.body")
+            color: root.dim
+            wrapMode: Text.Wrap
+            elide: Text.ElideNone
+          }
+          CloudField {
+            id: aiWish
+            width: parent.width
+            label: strings.t("ai.wish")
+            onSubmitted: root.makeAiMix(aiWish.text, false)
+          }
+          Button {
+            iconText: root.aiState !== "" ? Model.GLYPH.loading : Model.GLYPH.ai
+            iconSpinning: root.aiState !== ""
+            text: root.aiState === "asking" ? strings.t("ai.asking").arg(root.aiAgent || strings.t("ai.agent"))
+              : root.aiState === "finding" ? strings.t("ai.finding")
+              : root.aiEnabled ? strings.t("ai.go") : strings.t("ai.goFirst")
+            enabled: root.aiState === ""
+            foreground: root.fg
+            fontFamily: root.fontFamily
+            bordered: true
+            onClicked: root.makeAiMix(aiWish.text, false)
+          }
+          PlainText {
+            visible: root.aiError !== ""
+            width: parent.width
+            text: root.aiError
+            color: Commons.Color.urgent
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.Wrap
+            elide: Text.ElideNone
+          }
+          PlainText {
+            width: parent.width
+            text: strings.t("ai.privacy")
+            color: root.dim
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.Wrap
+            elide: Text.ElideNone
+          }
+        }
+
         // ---------- which services have a tab ----------
         Column {
           visible: root.view === "services"
@@ -3220,6 +3342,7 @@ Panel {
             Repeater {
               model: root.cloudFormUsable && root.cloudFormEpoch >= 0 ? root.cloudKindSpec.fields.slice() : []
               CloudField {
+                onSubmitted: root.connectCloud()
                 required property var modelData
                 width: cloudColumn.width
                 label: strings.t("cloud.field." + modelData)
@@ -3228,6 +3351,7 @@ Panel {
               }
             }
             CloudField {
+              onSubmitted: root.connectCloud()
               id: cloudPathField
               visible: root.cloudFormUsable && root.cloudKindSpec.server !== true
               width: parent.width
@@ -3235,6 +3359,7 @@ Panel {
                 : root.cloudKind === "local" ? "cloud.pathLocal" : "cloud.path")
             }
             CloudField {
+              onSubmitted: root.connectCloud()
               id: cloudTitleField
               visible: root.cloudFormUsable
               width: parent.width
@@ -3578,6 +3703,7 @@ Panel {
                   if (rowItem.kind === "country") return rowItem.modelData.id === root.radioCountry ? Model.GLYPH.check : Model.GLYPH.explore
                   if (rowItem.kind === "explore") return rowItem.modelData.id === "__scsearch" ? Model.GLYPH.search
                     : rowItem.modelData.id === "__rdcountry" ? Model.GLYPH.explore
+                    : rowItem.modelData.id === "__aimake" ? Model.GLYPH.ai
                     : rowItem.modelData.id === "__cloudadd" ? Model.GLYPH.plus : Model.GLYPH.explore
                   if (rowItem.kind === "mood") return Model.GLYPH.mood
                   if (!rowItem.isTrack) {
@@ -3589,6 +3715,8 @@ Panel {
                     if (/^sc:likes:/.test(rowItem.modelData.id)) return Model.GLYPH.soundcloud
                     if (/^cl:[a-f0-9]{8}$/.test(rowItem.modelData.id)) return Model.GLYPH.cloud
                     if (rowItem.modelData.id === "rd:fav") return Model.GLYPH.heart
+                    if (rowItem.modelData.id === "ai:mix") return Model.GLYPH.ai
+                    if (rowItem.modelData.id === "hist:recent") return Model.GLYPH.history
                     if (/^ms:[a-f0-9]{8}:fav$/.test(rowItem.modelData.id)) return Model.GLYPH.heart
                     if (/^ms:[a-f0-9]{8}:rnd$/.test(rowItem.modelData.id)) return Model.GLYPH.shuffle
                     if (/^ms:[a-f0-9]{8}:pl:/.test(rowItem.modelData.id)) return Model.GLYPH.playlist
@@ -3629,7 +3757,8 @@ Panel {
                 visible: text !== ""
                 color: root.dim
                 font.pixelSize: Style.font.body
-                text: rowItem.modelData.artist || rowItem.modelData.subtitle || ""
+                text: (rowItem.modelData.artist || rowItem.modelData.subtitle || "")
+                  + (rowItem.modelData.note ? "  ·  " + rowItem.modelData.note : "")
               }
             }
 
@@ -3740,7 +3869,7 @@ Panel {
           color: root.dim
           font.pixelSize: Style.font.bodySmall
           text: {
-            if (root.view === "settings" || root.view === "download" || root.view === "services") return ""
+            if (root.view === "settings" || root.view === "download" || root.view === "services" || root.view === "ai") return ""
             if (root.view === "explore") {
               if (root.exploreError !== "") return strings.t("error.prefix").arg(root.exploreError)
               if (root.rows.length > 0) return ""
@@ -3890,6 +4019,7 @@ Panel {
     property bool secret: false
     property alias text: input.text
     signal edited(string value)
+    signal submitted()
     spacing: Style.space(4)
 
     PlainText {
@@ -3924,8 +4054,8 @@ Panel {
         echoMode: field.secret ? TextInput.Password : TextInput.Normal
         onTextEdited: field.edited(text)
         onActiveFocusChanged: root.cloudTyping = activeFocus
-        Keys.onReturnPressed: function(event) { focus = false; root.connectCloud(); event.accepted = true }
-        Keys.onEnterPressed: function(event) { focus = false; root.connectCloud(); event.accepted = true }
+        Keys.onReturnPressed: function(event) { focus = false; field.submitted(); event.accepted = true }
+        Keys.onEnterPressed: function(event) { focus = false; field.submitted(); event.accepted = true }
         Keys.onEscapePressed: function(event) { focus = false; event.accepted = true }
       }
     }

@@ -41,6 +41,7 @@
       "fadeIn": 0,
       "fadeOut": 0,
       "pauseFade": 600,
+      "aiMix": "Off",
       "transition": "Off",
       "tabs": "yt,sp,sc,cl,rd,my",
       "crossfade": 6,

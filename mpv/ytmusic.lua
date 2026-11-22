@@ -382,9 +382,31 @@ mp.observe_property("time-pos", "number", function(_, t)
     if t then played_to = t end
 end)
 
+-- ---- listening history ---------------------------------------------------------
+-- Each song that played is noted (how long, of how long, and whether it ran
+-- to its end) by the helper in a local history: "Recently played", and what
+-- the AI Mix learns your taste from. Nothing leaves the machine here.
+local function note_play(entry_id, played, reason)
+    if opts.helper == "" or not entry_id or played < 5 then return end
+    local name
+    for _, item in ipairs(mp.get_property_native("playlist") or {}) do
+        if item.id == entry_id then name = item.filename end
+    end
+    if not name or name:sub(1, #RADIO) == RADIO then return end
+    mp.command_native_async({
+        name = "subprocess",
+        playback_only = false,
+        args = { opts.python, "-I", opts.helper, "history-add", name,
+                 "--played", string.format("%.0f", played),
+                 "--duration", string.format("%.0f", last_duration or 0),
+                 "--reason", tostring(reason) },
+    }, function() end)
+end
+
 mp.register_event("end-file", function(e)
     local t, entry_id = played_to, e.playlist_entry_id
     played_to = 0
+    if entry_id and entry_id == loaded_entry then note_play(entry_id, t, e.reason) end
     if e.reason ~= "eof" and e.reason ~= "error" then return end
     -- Only a song that opened and played; one that never opened is skipped
     -- (or rescued by the on_load_fail hook above).

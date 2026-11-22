@@ -10,7 +10,7 @@ var MAX_TEXT = 300
 // A list: a YouTube playlist id, or one of the other services' lists
 // (sc:… SoundCloud, sp:… Spotify, mix:… your mixes, cl:… your cloud storage:
 // a source, or one folder in it).
-var PLAYLIST_ID_RE = /^(?:[A-Za-z0-9_-]{2,80}|sc:(?:likes|sets):[A-Za-z0-9_-]{1,100}|sc:set:[A-Za-z0-9_-]{1,100}\/[A-Za-z0-9_-]{1,200}|sc:search|sp:liked|sp:pl:[A-Za-z0-9]{22}|mix:all|mix:[a-f0-9]{8}|cl:[a-f0-9]{8}(?::[a-f0-9]{16})?|rd:(?:fav|top|vote|search|country:[A-Z]{2}|tag:[a-z0-9-]{1,40})|ms:[a-f0-9]{8}:(?:fav|rnd|al:[A-Za-z0-9_-]{1,64}|pl:[A-Za-z0-9_-]{1,64}))$/
+var PLAYLIST_ID_RE = /^(?:[A-Za-z0-9_-]{2,80}|sc:(?:likes|sets):[A-Za-z0-9_-]{1,100}|sc:set:[A-Za-z0-9_-]{1,100}\/[A-Za-z0-9_-]{1,200}|sc:search|sp:liked|sp:pl:[A-Za-z0-9]{22}|mix:all|mix:[a-f0-9]{8}|cl:[a-f0-9]{8}(?::[a-f0-9]{16})?|rd:(?:fav|top|vote|search|country:[A-Z]{2}|tag:[a-z0-9-]{1,40})|ms:[a-f0-9]{8}:(?:fav|rnd|al:[A-Za-z0-9_-]{1,64}|pl:[A-Za-z0-9_-]{1,64})|ai:mix|hist:recent)$/
 var VIDEO_ID_RE = /^[A-Za-z0-9_-]{11}$/
 // A track from any service: a YouTube video id, sc:…, sp:… or cl:….
 var TRACK_KEY_RE = /^(?:[A-Za-z0-9_-]{11}|sc:(?:[0-9]{1,20}|[A-Za-z0-9_-]{1,100}\/[A-Za-z0-9_-]{1,200})|sp:[A-Za-z0-9]{22}|cl:[a-f0-9]{8}\/[a-f0-9]{16}|rd:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|ms:[a-f0-9]{8}\/[A-Za-z0-9_-]{1,64})$/
@@ -108,6 +108,8 @@ var GLYPH = {
   artist: String.fromCodePoint(0xF0803),
   lyrics: String.fromCodePoint(0xF1021),
   radioService: String.fromCodePoint(0xF0439),
+  ai: String.fromCodePoint(0xF0674),
+  history: String.fromCodePoint(0xF02DA),
   folderMusic: String.fromCodePoint(0xF1359),
   server: String.fromCodePoint(0xF048B),
   podcast: String.fromCodePoint(0xF0994),
@@ -361,6 +363,7 @@ function sanitizeTracks(items) {
     if (typeof t.path === "string" && t.path.charAt(0) === "/") track.path = t.path
     if (validCover(t.cover)) track.cover = t.cover
     if (t.album) track.album = cleanText(t.album, 200)
+    if (t.note) track.note = cleanText(t.note, 160)
     out.push(track)
   }
   return out

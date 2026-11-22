@@ -106,6 +106,16 @@ mixes and download like any other. The listing is kept for 6 hours; refresh
 to read new files at once. Remove a storage in settings: its files are
 never touched.
 
+**AI Mix** (My Music → *Make an AI Mix*): the AI agent Omarchy already
+uses (Claude, Codex or OpenCode: `omarchy default agent`) picks songs for
+you from what you listen to across every service: what you play to the
+end, what you skip, what you like. Some are close to your favorites, most
+are new to you, each with a line on why it's there. Ask for a mood if you
+like ("epic for work", "calmer"). Every pick is looked up on YouTube Music
+and dropped if it doesn't exist (an AI can invent songs). Once on, the mix
+is made again each day. Off until you turn it on. My Music also keeps
+**Recently played**, and the player window's home shows both.
+
 **Pick your tabs**: the `+` tab lists every service; switch on the ones you
 use. YouTube Music and My Music are always there.
 
@@ -401,6 +411,12 @@ omarchy bar set io.github.symonbaikov.ytmusic-mpv playbackCookies On
   in `~/.local/share/io.github.symonbaikov.ytmusic-mpv/servers.json`;
   removing the server deletes it. Covers are copied to the cache. Problem
   reports mask any sign-in in a URL.
+- **Listening history** (what played, for how long, finished or skipped)
+  stays in `~/.local/share/io.github.symonbaikov.ytmusic-mpv/history.jsonl`.
+  With **AI Mix** turned on, a summary of it goes to your AI agent's
+  provider (Anthropic for Claude, OpenAI for Codex …), through the agent
+  itself, run without tools: the artists and songs you play most, your
+  likes and the artists you skip. Nothing else, and nothing while it's off.
 - **Radio**: the lists and search come from Radio Browser's servers
   (`*.api.radio-browser.info`), which also count a listen when a station is
   played. A station's logo is fetched once from the station's own site by

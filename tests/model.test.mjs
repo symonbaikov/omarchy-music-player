@@ -472,3 +472,12 @@ test("radio countries are sanitized into rows", () => {
   assert.equal(m.items[1].kind, "country")
   assert.equal(m.items[1].count, 2474)
 })
+
+test("AI Mix and recently played lists; notes on songs", () => {
+  const lists = M.parseLine(JSON.stringify({ type: "playlists", service: "my", items: [
+    { id: "ai:mix", title: "Shieldwall and Saga", count: 27, subtitle: "Nordic folk and battle metal" }, { id: "hist:recent", title: "Recently played" }] }))
+  assert.deepEqual(Array.from(lists.items, i => i.id), ["ai:mix", "hist:recent"])
+  const t = M.parseLine(JSON.stringify({ type: "tracks", playlistId: "ai:mix", items: [
+    { id: "dQw4w9WgXcQ", title: "Helvegen", artist: "Wardruna", note: "Haunting authentic Norse folk\u0000" }] }))
+  assert.equal(t.items[0].note, "Haunting authentic Norse folk")
+})

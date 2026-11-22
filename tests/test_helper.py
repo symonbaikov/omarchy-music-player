@@ -1190,6 +1190,72 @@ class MediaServers(unittest.TestCase):
         self.assertNotIn(sid, json.loads((data / "servers.json").read_text()))
 
 
+
+class History(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.saved = (h.HISTORY_PATH, h.SESSION_PATH, h.DATA_DIR, h.AI_MIX_PATH, h.ask_agent, h.find_on_youtube, h.tracks_cache_path)
+        d = self.dir.name
+        h.DATA_DIR = d
+        h.HISTORY_PATH = os.path.join(d, "history.jsonl")
+        h.SESSION_PATH = os.path.join(d, "session.json")
+        h.AI_MIX_PATH = os.path.join(d, "ai-mix.json")
+        h.tracks_cache_path = lambda list_id, browser: os.path.join(d, "none.json")
+        h.write_json_atomic(h.SESSION_PATH, {"tracks": [
+            {"id": "dQw4w9WgXcQ", "title": "Never Gonna", "artist": "Rick"},
+            {"id": "kJQP7kiw5Fk", "title": "Despacito", "artist": "Luis Fonsi"}]})
+
+    def tearDown(self):
+        (h.HISTORY_PATH, h.SESSION_PATH, h.DATA_DIR, h.AI_MIX_PATH, h.ask_agent, h.find_on_youtube, h.tracks_cache_path) = self.saved
+        self.dir.cleanup()
+
+    def add(self, vid, played, duration, reason):
+        h.cmd_history_add([f"https://music.youtube.com/watch?v={vid}", "--played", str(played),
+                           "--duration", str(duration), "--reason", reason])
+
+    def test_finished_and_skipped(self):
+        self.add("dQw4w9WgXcQ", 210, 212, "eof")
+        self.add("kJQP7kiw5Fk", 8, 229, "stop")        # too short to note at all? 8 s is noted by the helper
+        self.add("kJQP7kiw5Fk", 15, 229, "stop")
+        e = h.read_history()
+        self.assertTrue(e[0]["finished"] and not e[0]["skipped"])
+        self.assertTrue(e[-1]["skipped"])
+        self.assertEqual(e[0]["artist"], "Rick")
+        recent = h.recent_tracks()
+        self.assertEqual([t["id"] for t in recent], ["dQw4w9WgXcQ"])      # skipped songs aren't "recent"
+        self.add("dQw4w9WgXcQ", 1, 0, "eof")
+        h.cmd_history_add(["ytmusic-radio://1c6dcd6f-88c6-4fd4-8191-078435168e85", "--played", "300", "--reason", "stop"])
+        self.assertEqual(len(h.read_history()), 4)                        # stations aren't songs
+
+    def test_taste_and_a_mix_from_the_agent(self):
+        for _ in range(3):
+            self.add("dQw4w9WgXcQ", 210, 212, "eof")
+        for _ in range(3):
+            self.add("kJQP7kiw5Fk", 12, 229, "stop")
+        taste = h.taste_profile()
+        self.assertEqual(taste["topArtists"], ["Rick"])
+        self.assertIn("Luis Fonsi", taste["oftenSkipped"])
+        asked = {}
+        def agent(prompt):
+            asked["prompt"] = prompt
+            return {"title": "For You", "about": "x", "songs": [{"artist": "A", "title": f"Song {i}", "why": "because"} for i in range(8)]
+                    + [{"artist": "Ghost", "title": "Invented", "why": "?"}]}, "Claude"
+        h.ask_agent = agent
+        h.find_on_youtube = lambda s: None if s["artist"] == "Ghost" else {"id": f"vid{s['title'][-1]}aaaaaaa"[:11], "title": s["title"], "artist": s["artist"], "duration": 100}
+        import io, contextlib
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            h.cmd_ai_mix(["--prompt", "something calm"])
+        self.assertIn("something calm", asked["prompt"])
+        self.assertIn("Rick", asked["prompt"])
+        mix = h.read_json(h.AI_MIX_PATH)
+        self.assertEqual(len(mix["items"]), 8)                            # the invented song is dropped
+        self.assertEqual(mix["items"][0]["note"], "because")
+        self.assertIn('"state":"done"', out.getvalue())
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            h.cmd_ai_mix(["--if-older", "86400"])
+        self.assertIn('"state":"fresh"', out.getvalue())
+
+
 class Reports(unittest.TestCase):
     def test_redact_removes_everything_personal(self):
         home = os.path.expanduser("~")

@@ -154,6 +154,7 @@ FloatingWindow {
     if (item.kind === "explore") {
       if (item.id === "__cloudadd") addStorage()
       else if (item.id === "__rdcountry") p.openCountries()
+      else if (item.id === "__aimake") p.openAiMaker()
       else showBrowse()
       return
     }
@@ -194,6 +195,8 @@ FloatingWindow {
     if (id === "LM") return Model.GLYPH.heart
     if (id === "DOWNLOADS") return Model.GLYPH.download
     if (id === "__cloudadd") return Model.GLYPH.plus
+    if (id === "ai:mix" || id === "__aimake") return Model.GLYPH.ai
+    if (id === "hist:recent") return Model.GLYPH.history
     if (/^mix:/.test(id) || id === Model.SUPERMIX_ID) return Model.GLYPH.supermix
     if (/^sp:/.test(id)) return Model.GLYPH.spotify
     if (/^sc:/.test(id)) return Model.GLYPH.soundcloud
@@ -211,7 +214,7 @@ FloatingWindow {
 
   readonly property var mixes: p.svc.my.items
   readonly property var libraryCards: p.libraryRows.filter(function(r) {
-    return !(r.kind === "explore" && r.id !== "__cloudadd" && r.id !== "__rdcountry")
+    return !(r.kind === "explore" && r.id !== "__cloudadd" && r.id !== "__rdcountry" && r.id !== "__aimake")
   })
   readonly property var queue: p.session && p.session.tracks ? p.session.tracks : []
   readonly property string bigCover: p.connected && p.currentTrack
@@ -591,7 +594,13 @@ FloatingWindow {
             }
           }
 
-          Shelf { title: win.t("full.mixes"); items: win.mixes }
+          Shelf {
+            title: win.t("ai.madeForYou")
+            glyph: Model.GLYPH.ai
+            items: win.mixes.filter(function(m) { return m.id === "ai:mix" }).concat([win.p.aiEntry])
+          }
+          Shelf { title: win.t("full.recent"); glyph: Model.GLYPH.history; items: win.p.recentTracks }
+          Shelf { title: win.t("full.mixes"); items: win.mixes.filter(function(m) { return m.id !== "ai:mix" && m.id !== "hist:recent" }) }
           Shelf { title: win.t("list.playlists"); glyph: Model.GLYPH.youtube; glyphColor: "#FF0033"; items: win.p.playlists }
           Shelf { title: win.t("tab.sp"); glyph: Model.GLYPH.spotify; glyphColor: "#1ED760"; items: win.p.svc.sp.items }
           Shelf { title: win.t("tab.sc"); glyph: Model.GLYPH.soundcloud; glyphColor: "#FF5500"; items: win.p.svc.sc.items }
@@ -2176,7 +2185,7 @@ FloatingWindow {
       Txt {
         width: parent.width
         visible: text !== ""
-        text: row.track ? (row.track.artist || row.track.subtitle || "") : ""
+        text: row.track ? (row.track.artist || row.track.subtitle || "") + (row.track.note ? "  ·  " + row.track.note : "") : ""
         color: win.dim
       }
     }

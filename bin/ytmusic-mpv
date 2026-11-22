@@ -127,7 +127,7 @@ SERVICE_LIST_RE = re.compile(
     r"^(?:sc:(?:likes|sets):[A-Za-z0-9_-]{1,100}|sc:set:[A-Za-z0-9_-]{1,100}/[A-Za-z0-9_-]{1,200}|sc:search"
     r"|sp:liked|sp:pl:[A-Za-z0-9]{22}|mix:all|mix:[a-f0-9]{8}|cl:[a-f0-9]{8}(?::[a-f0-9]{16})?"
     r"|rd:(?:fav|top|vote|search|country:[A-Z]{2}|tag:[a-z0-9-]{1,40})"
-    r"|ms:[a-f0-9]{8}:(?:fav|rnd|al:[A-Za-z0-9_-]{1,64}|pl:[A-Za-z0-9_-]{1,64}))$")
+    r"|ms:[a-f0-9]{8}:(?:fav|rnd|al:[A-Za-z0-9_-]{1,64}|pl:[A-Za-z0-9_-]{1,64})|ai:mix|hist:recent)$")
 SC_USER_RE = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
 SPOTIFY_SCHEME = "ytmusic-spotify://"
 # browser[+keyring][:profile]; the profile may be a path (Zen, LibreWolf and
@@ -991,6 +991,13 @@ def cmd_playlists(args):
         return
     if service == "my":
         items = [{"id": "mix:all", "title": "My Mix", "count": None}]
+        ai = read_json(AI_MIX_PATH)
+        if isinstance(ai, dict) and ai.get("items"):
+            items.insert(0, {"id": "ai:mix", "title": clean_text(ai.get("title"), 60) or "AI Mix",
+                             "count": len(playable(ai.get("items"))), "subtitle": clean_text(ai.get("about"), 120)})
+        recent = recent_tracks(100)
+        if recent:
+            items.append({"id": "hist:recent", "title": "Recently played", "count": len(recent)})
         items += [{"id": m["id"], "title": clean_text(m.get("title")) or "Mix", "count": len(playable(m.get("items")))}
                   for m in read_mixes()]
         items.append({"id": DOWNLOADS_ID, "title": "Downloads", "count": len(downloaded_tracks())})
@@ -1009,6 +1016,12 @@ def cmd_tracks(args):
         return
     if playlist_id.startswith("mix:"):
         emit({"type": "tracks", "stale": False, "playlistId": playlist_id, **mix_tracks(playlist_id, opt(args, "--browser", "none"))})
+        return
+    if playlist_id == "ai:mix":
+        emit({"type": "tracks", "stale": False, "playlistId": playlist_id, **ai_mix_tracks()})
+        return
+    if playlist_id == "hist:recent":
+        emit({"type": "tracks", "stale": False, "playlistId": playlist_id, "title": "Recently played", "items": recent_tracks(100)})
         return
     if playlist_id == "rd:fav":
         emit({"type": "tracks", "stale": False, "playlistId": playlist_id, "title": "Favorite stations",
@@ -1148,6 +1161,10 @@ def load_tracks(playlist_id, browser, max_age=None, raise_errors=False):
         return {"title": "Downloads", "items": downloaded_tracks()}
     if playlist_id.startswith("mix:"):
         return mix_tracks(playlist_id, browser)
+    if playlist_id == "ai:mix":
+        return ai_mix_tracks()
+    if playlist_id == "hist:recent":
+        return {"title": "Recently played", "items": recent_tracks(100)}
     if playlist_id == "rd:fav":
         return {"title": "Favorite stations", "items": with_radio_covers(radio_favorites())}
     if playlist_id.startswith("cl:"):
@@ -4650,6 +4667,273 @@ def download_server_audio(key, name):
     return meta
 
 
+# ---- listening history and the AI Mix -----------------------------------------------
+# The player notes each song that played (mpv/ytmusic.lua → history-add):
+# how long of how long, and whether it ran to its end or was skipped. The
+# history stays on this machine (history.jsonl). From it, and the likes in
+# every service, `taste` sums up what you listen to; `ai-mix` (only when
+# turned on) gives that summary to the AI agent Omarchy uses (Claude, Codex
+# or OpenCode, from `omarchy default agent`) and asks it for songs you may
+# like. Each one is looked up on YouTube Music; songs it can't find (an AI
+# can invent some) are dropped. The mix is the list "ai:mix".
+
+HISTORY_PATH = os.path.join(DATA_DIR, "history.jsonl")
+HISTORY_MAX = 5000
+AI_MIX_PATH = os.path.join(DATA_DIR, "ai-mix.json")
+AI_SONGS = 30
+AGENT_FILE = os.path.join(HOME, ".config", "omarchy", "defaults", "agent")
+
+
+def session_track(key):
+    data = read_json(SESSION_PATH)
+    for t in (data.get("tracks") if isinstance(data, dict) else None) or []:
+        if isinstance(t, dict) and t.get("id") == key:
+            return t
+    return None
+
+
+def cmd_history_add(args):
+    """history-add <mpv entry> --played S --duration S --reason R"""
+    name = args[0] if args else ""
+    key = None
+    if os.path.isabs(name):
+        key = next((t["id"] for t in downloaded_tracks() if t.get("path") == name), None)
+    if not key:
+        key, _ = mix_entry(name)
+    if not key or not TRACK_KEY_RE.match(key) or key.startswith("rd:"):
+        return
+    try:
+        played = max(0, min(86400, int(float(opt(args, "--played", "0")))))
+        duration = max(0, min(86400, int(float(opt(args, "--duration", "0")))))
+    except ValueError:
+        return
+    reason = opt(args, "--reason", "")
+    track = session_track(key) or {}
+    finished = reason == "eof" and (duration == 0 or played >= duration * 0.8)
+    skipped = reason != "eof" and played < min(30, max(10, duration * 0.4))
+    entry = {"t": int(time.time()), "id": key, "title": clean_text(track.get("title"), 200),
+             "artist": clean_text(track.get("artist"), 200), "played": played, "duration": duration,
+             "finished": finished, "skipped": skipped}
+    os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
+    with open(HISTORY_PATH, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    try:
+        if os.path.getsize(HISTORY_PATH) > HISTORY_MAX * 400:
+            lines = open(HISTORY_PATH, encoding="utf-8").read().splitlines()[-HISTORY_MAX:]
+            write_lines = "\n".join(lines) + "\n"
+            with open(HISTORY_PATH + ".tmp", "w", encoding="utf-8") as fh:
+                fh.write(write_lines)
+            os.replace(HISTORY_PATH + ".tmp", HISTORY_PATH)
+    except OSError:
+        pass
+
+
+def read_history(limit=HISTORY_MAX):
+    try:
+        lines = open(HISTORY_PATH, encoding="utf-8").read().splitlines()[-limit:]
+    except OSError:
+        return []
+    out = []
+    for line in lines:
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(e, dict) and TRACK_KEY_RE.match(str(e.get("id", ""))):
+            out.append(e)
+    return out
+
+
+def recent_tracks(limit=100):
+    """Songs played lately, newest first, each once."""
+    seen, out = set(), []
+    for e in reversed(read_history()):
+        if e["id"] in seen or e.get("skipped"):
+            continue
+        seen.add(e["id"])
+        out.append({"id": e["id"], "title": e.get("title") or e["id"], "artist": e.get("artist") or "", "duration": e.get("duration") or None})
+        if len(out) >= limit:
+            break
+    return out
+
+
+def artist_of_track(t):
+    """The artist, or for a YouTube upload titled "Artist - Song" that part."""
+    artist = clean_text(t.get("artist"), 120)
+    title = clean_text(t.get("title"), 200)
+    m = re.match(r"^(.{2,60}?)\s+[-–]\s+.+", title)
+    if m and (not artist or artist.lower() in ("various artists", "release - topic")):
+        return m.group(1).strip()
+    return artist
+
+
+def taste_profile(browser="none"):
+    """What you listen to, summed up small enough to hand to an AI."""
+    history = read_history()
+    score, songs, skipped_artists = {}, {}, {}
+    for e in history:
+        a = artist_of_track(e)
+        w = 2.0 if e.get("finished") else (-1.5 if e.get("skipped") else 0.5)
+        if a:
+            score[a] = score.get(a, 0) + w
+            if e.get("skipped"):
+                skipped_artists[a] = skipped_artists.get(a, 0) + 1
+        label = f"{a} - {e.get('title')}" if a and a.lower() not in str(e.get("title", "")).lower() else str(e.get("title"))
+        if label.strip():
+            songs[label] = songs.get(label, 0) + w
+    likes = []
+    for list_id in ["LM", "sp:liked"] + ([f"sc:likes:{u}"] if (u := sc_user(widget_settings().get("soundcloudUser"))) else []):
+        cached = read_json(tracks_cache_path(list_id, browser))
+        for t in (cached.get("items") if isinstance(cached, dict) else None) or []:
+            if isinstance(t, dict) and t.get("title"):
+                likes.append(t)
+                a = artist_of_track(t)
+                if a:
+                    score[a] = score.get(a, 0) + 1.5
+    top_artists = [a for a, s in sorted(score.items(), key=lambda kv: -kv[1]) if s > 0][:40]
+    loved = [s for s, v in sorted(songs.items(), key=lambda kv: -kv[1]) if v > 0][:40]
+    liked = [f"{artist_of_track(t)} - {t['title']}".strip(" -") for t in likes[:60]]
+    disliked = [a for a, n in sorted(skipped_artists.items(), key=lambda kv: -kv[1]) if n >= 2 and score.get(a, 0) <= 0][:15]
+    return {"topArtists": top_artists, "mostPlayed": loved, "liked": liked, "oftenSkipped": disliked,
+            "plays": len(history), "likes": len(likes)}
+
+
+def agent_command():
+    """How to ask Omarchy's AI agent one question without tools, and its name."""
+    try:
+        chosen = open(AGENT_FILE, encoding="utf-8").readline().strip()
+    except OSError:
+        chosen = ""
+    order = [chosen] + ["claude", "codex", "opencode"]
+    for name in order:
+        if name == "claude" and shutil_which("claude"):
+            return ["claude", "-p", "--tools", "", "--no-session-persistence", "--strict-mcp-config",
+                    "--setting-sources", ""], "Claude", True
+        if name == "codex" and shutil_which("codex"):
+            return ["codex", "exec", "--skip-git-repo-check", "-"], "Codex", True
+        if name == "opencode" and shutil_which("opencode"):
+            return ["opencode", "run"], "OpenCode", False
+    return None, "", False
+
+
+AI_PROMPT = """You are a music curator making one personal playlist.
+Here is what this listener plays (from their own player; "liked" are songs they liked, "oftenSkipped" artists they tend to skip):
+
+{profile}
+
+{wish}
+
+Pick {count} real, existing songs (exact artist and title as released) this listener will probably love:
+- about a third close to what they play most (other songs by those artists, or very near),
+- the rest new discoveries in the same spirit that they have most likely not heard,
+- no song from the lists above, no artist from oftenSkipped, at most two songs per artist.
+Give a short title for the playlist (2-5 words) and, for each song, one short reason (under 12 words) tied to their taste.
+Answer with JSON only, nothing else:
+{{"title": "...", "about": "one sentence", "songs": [{{"artist": "...", "title": "...", "why": "..."}}]}}"""
+
+
+def ask_agent(prompt):
+    cmd, name, stdin_ok = agent_command()
+    if not cmd:
+        raise RuntimeError("No AI agent is set up (omarchy default agent claude, codex or opencode)")
+    workdir = tempfile.mkdtemp(prefix="ai-mix-")
+    try:
+        proc = subprocess.run(cmd if stdin_ok else cmd + [prompt], input=prompt if stdin_ok else None,
+                              stdin=None if stdin_ok else subprocess.DEVNULL, capture_output=True, text=True,
+                              timeout=240, cwd=workdir)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"{name} took too long to answer")
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+    text = proc.stdout or ""
+    start, end = text.find("{"), text.rfind("}")
+    if proc.returncode != 0 or start < 0 or end <= start:
+        raise RuntimeError(f"{name} didn't answer with a playlist: {(proc.stderr or text).strip()[-200:]}")
+    try:
+        data = json.loads(text[start:end + 1])
+    except ValueError:
+        raise RuntimeError(f"{name}'s answer wasn't readable")
+    if not isinstance(data, dict) or not isinstance(data.get("songs"), list):
+        raise RuntimeError(f"{name}'s answer had no songs")
+    return data, name
+
+
+def find_on_youtube(song):
+    """The YouTube Music song for an AI's pick, or None if there is none."""
+    want = {"title": clean_text(song.get("title"), 200), "artist": clean_text(song.get("artist"), 200)}
+    if not want["title"]:
+        return None
+    try:
+        data = music_public("search", {"query": f"{want['artist']} {want['title']}".strip(), "params": SONGS_FILTER})
+    except RuntimeError:
+        return None
+    best, best_score = None, 3.0
+    for r in find_renderers(data, "musicResponsiveListItemRenderer", [])[:8]:
+        cand = explore_item({"musicResponsiveListItemRenderer": r})
+        if cand and cand.get("kind") == "song":
+            score = match_score(want, cand)
+            if score > best_score:
+                best, best_score = cand, score
+    return best
+
+
+def cmd_ai_mix(args):
+    """ai-mix [--prompt TEXT] [--browser B]: a new AI Mix."""
+    browser = check_browser(opt(args, "--browser", "none"))
+    wish = clean_text(opt(args, "--prompt", ""), 300)
+    # --if-older S (the daily remake): nothing to do while the mix is newer.
+    if_older = opt(args, "--if-older", "")
+    if if_older.isdigit():
+        mix = read_json(AI_MIX_PATH)
+        if isinstance(mix, dict) and time.time() - float(mix.get("createdAt") or 0) < int(if_older):
+            emit({"type": "aiMix", "state": "fresh"})
+            return
+    profile = taste_profile(browser)
+    if profile["plays"] + profile["likes"] < 5:
+        fail("Listen to a few more songs first (or like some): the AI needs something to go on")
+    emit({"type": "aiMix", "state": "asking"})
+    known = set(s.lower() for s in profile["mostPlayed"] + profile["liked"])
+    prompt = AI_PROMPT.format(profile=json.dumps({k: v for k, v in profile.items() if k not in ("plays", "likes")},
+                                                 ensure_ascii=False, indent=1),
+                              wish=f"They asked for: {wish}" if wish else "Make it a mix for everyday listening.",
+                              count=AI_SONGS)
+    try:
+        answer, agent = ask_agent(prompt)
+    except RuntimeError as exc:
+        fail(str(exc))
+    emit({"type": "aiMix", "state": "finding", "agent": agent})
+    picks = [s for s in answer["songs"] if isinstance(s, dict)][:AI_SONGS + 10]
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+        found = list(pool.map(find_on_youtube, picks))
+    items, seen = [], set()
+    for pick, hit in zip(picks, found):
+        if not hit or hit["id"] in seen or f"{hit.get('artist')} - {hit.get('title')}".lower() in known:
+            continue
+        seen.add(hit["id"])
+        items.append({"id": hit["id"], "title": hit["title"], "artist": hit.get("artist") or clean_text(pick.get("artist"), 120),
+                      "duration": hit.get("duration"), "note": clean_text(pick.get("why"), 160)})
+    if len(items) < 5:
+        fail("The AI's picks couldn't be found on YouTube Music; try again")
+    mix = {"title": clean_text(answer.get("title"), 60) or "AI Mix", "about": clean_text(answer.get("about"), 200),
+           "prompt": wish, "agent": agent, "createdAt": int(time.time()), "items": items[:AI_SONGS]}
+    os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
+    write_json_atomic(AI_MIX_PATH, mix)
+    emit({"type": "aiMix", "state": "done", "title": mix["title"], "count": len(mix["items"]), "agent": agent})
+
+
+def ai_mix_tracks():
+    mix = read_json(AI_MIX_PATH)
+    if not isinstance(mix, dict):
+        return {"title": "AI Mix", "items": []}
+    return {"title": clean_text(mix.get("title"), 60) or "AI Mix", "items": playable(mix.get("items"))}
+
+
+def cmd_taste(_args):
+    """taste: what the AI Mix would send, to show it before turning it on."""
+    emit({"type": "taste", **taste_profile()})
+
+
 # ---- problem reports ------------------------------------------------------------
 # One click in the panel: everything about the error is gathered here and
 # opened as a filled-in GitHub issue in the browser, so the user only presses
@@ -4893,6 +5177,9 @@ def main():
         "resolve": cmd_resolve,
         "lyrics": cmd_lyrics,
         "radio-fav": cmd_radio_fav,
+        "history-add": cmd_history_add,
+        "taste": cmd_taste,
+        "ai-mix": cmd_ai_mix,
         "radio-countries": cmd_radio_countries,
         "radio-favs": cmd_radio_favs,
         "chords": cmd_chords,

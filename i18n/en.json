@@ -271,5 +271,22 @@
   "rd.countries": "Countries",
   "rd.countryField": "Type a country…",
   "rd.stationsIn": "Stations in %1",
-  "rd.stationCount": "%1 stations"
+  "rd.stationCount": "%1 stations",
+  "settings.ai": "AI",
+  "ai.setting": "AI Mix",
+  "ai.settingHint": "Your AI agent (Claude, Codex or OpenCode) makes you a mix from what you listen to, again each day. It is sent a short summary of your taste: the artists and songs you play and like.",
+  "ai.title": "AI Mix",
+  "ai.make": "Make an AI Mix",
+  "ai.makeHint": "Songs picked for you by your AI from what you listen to",
+  "ai.body": "Your AI agent looks at what you play, finish, skip and like across every service, and picks songs you'll probably love: some close to your favorites, most of them new to you. Each is checked on YouTube Music.",
+  "ai.wish": "WHAT ARE YOU IN THE MOOD FOR? (OPTIONAL: \"EPIC FOR WORK\", \"CALMER\" …)",
+  "ai.go": "Make my AI Mix",
+  "ai.goFirst": "Turn on and make my AI Mix",
+  "ai.agent": "your AI",
+  "ai.asking": "Asking %1…",
+  "ai.finding": "Finding the songs…",
+  "ai.ready": "%1: %2 songs picked for you",
+  "ai.privacy": "Sent to your AI agent: the artists and songs you play most, your likes and the artists you skip. Your history itself stays on this computer.",
+  "ai.madeForYou": "Made for you",
+  "full.recent": "Recently played"
 }

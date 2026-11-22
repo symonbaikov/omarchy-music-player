@@ -30,6 +30,7 @@ local opts = {
     fade_out = 0,
     transition = "off",
     xfade = 6,
+    pause_fade = 0.6,
 }
 require("mp.options").read_options(opts, "ytmusic")
 
@@ -45,6 +46,7 @@ end
 opts.fade_in = clamp(opts.fade_in, 0, 30, 0)
 opts.fade_out = clamp(opts.fade_out, 0, 30, 0)
 opts.xfade = clamp(opts.xfade, 2, 16, 6)
+opts.pause_fade = clamp(opts.pause_fade, 0, 3, 0.6)
 if opts.transition ~= "peak" then opts.transition = "off" end
 
 local function entry_name(i)
@@ -191,13 +193,81 @@ local function fade_amp()
     return math.max(0, amp)
 end
 
+-- ---- pausing with a fade ------------------------------------------------------
+-- The panel pauses through `script-message ytmusic-toggle-pause`: the song
+-- fades away over pause_fade seconds and then pauses, and comes back the
+-- same way. (Media keys pause mpv directly, at once.)
+local pause_amp = 1
+local pause_ramp = nil          -- { from, to, start, then_pause }
+local pause_timer
+
+local function pause_amp_now()
+    if not pause_ramp then return pause_amp end
+    local k = (mp.get_time() - pause_ramp.start) / math.max(0.01, opts.pause_fade)
+    if k >= 1 then return pause_ramp.to end
+    return pause_ramp.from + (pause_ramp.to - pause_ramp.from) * k
+end
+
 local function tick()
-    if opts.fade_in <= 0 and opts.fade_out <= 0 then
-        set_gain(0)
+    local amp = pause_amp_now()
+    if opts.fade_in > 0 or opts.fade_out > 0 then amp = amp * fade_amp() end
+    set_gain(amp_to_db(amp))
+end
+
+local function pause_step()
+    if not pause_ramp then pause_timer:kill() return end
+    pause_amp = pause_amp_now()
+    tick()
+    if mp.get_time() - pause_ramp.start >= opts.pause_fade then
+        local done = pause_ramp
+        pause_ramp = nil
+        pause_timer:kill()
+        if done.then_pause then
+            mp.set_property_bool("pause", true)
+            -- Full volume again behind the pause, so a media key resumes as before.
+            pause_amp = 1
+            tick()
+        end
+    end
+end
+pause_timer = mp.add_periodic_timer(0.02, pause_step)
+pause_timer:kill()
+
+local function ramp(to, then_pause)
+    pause_ramp = { from = pause_amp_now(), to = to, start = mp.get_time(), then_pause = then_pause }
+    pause_amp = pause_ramp.from
+    pause_timer:resume()
+end
+
+mp.register_script_message("ytmusic-toggle-pause", function()
+    local paused = mp.get_property_bool("pause")
+    if opts.pause_fade <= 0 then
+        mp.set_property_bool("pause", not paused)
         return
     end
-    set_gain(amp_to_db(fade_amp()))
-end
+    if paused then
+        pause_amp = 0
+        tick()
+        mp.set_property_bool("pause", false)
+        ramp(1, false)
+    elseif pause_ramp and pause_ramp.then_pause then
+        ramp(1, false)                -- pressed again while fading: come back
+    else
+        ramp(0, true)
+    end
+end)
+
+-- Paused or resumed some other way (a media key) mid-fade: drop the fade.
+mp.observe_property("pause", "bool", function(_, paused)
+    if pause_ramp and paused and not pause_ramp.then_pause then
+        pause_ramp = nil
+        pause_amp = 1
+        tick()
+    end
+end)
+
+-- What this script can do, for the panel.
+mp.set_property_native("user-data/ytmusic/features", { pause_fade = true })
 
 mp.add_periodic_timer(0.05, tick)
 
@@ -437,6 +507,8 @@ mp.register_script_message("ytmusic-set", function(key, value)
         opts.fade_out = clamp(value, 0, 30, 0)
     elseif key == "xfade" then
         opts.xfade = clamp(value, 2, 16, 6)
+    elseif key == "pause_fade" then
+        opts.pause_fade = clamp(value, 0, 3, 0.6)
     elseif key == "transition" then
         opts.transition = value == "peak" and "peak" or "off"
         if opts.transition == "peak" then prepare() else cancel_mix() end

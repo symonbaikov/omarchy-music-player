@@ -12,7 +12,7 @@ Commands (every result is one JSON object per line on stdout):
   play <playlist-id> [--index N] [--video-id ID] [--shuffle 0|1] [PLAYER]
   radio <video-id> [--mode replace|keep|append] [--title T] [PLAYER]
     PLAYER: [--browser B] [--playback-cookies 0|1] [--volume V]
-            [--repeat off|all|one] [--fade-in S] [--fade-out S]
+            [--repeat off|all|one] [--fade-in S] [--fade-out S] [--pause-fade S]
             [--transition off|peak] [--xfade S]
   like <video-id> [--remove 1] [--browser B] [--title T] [--artist A] [--duration S]
   add <playlist-id> <video-id> [--browser B]
@@ -1114,6 +1114,7 @@ def player_options(args):
         "volume": min(100, max(0, int(opt(args, "--volume", "60")))),
         "repeat": repeat,
         "fade_in": min(30.0, max(0.0, float(opt(args, "--fade-in", "0")))),
+        "pause_fade": min(3.0, max(0.0, float(opt(args, "--pause-fade", "0.6")))),
         "fade_out": min(30.0, max(0.0, float(opt(args, "--fade-out", "0")))),
         "transition": transition,
         "xfade": min(16.0, max(2.0, float(opt(args, "--xfade", "6")))),
@@ -1261,6 +1262,7 @@ def start_player(playlist_id, title, order, start, options, autoplay=False):
         f"--script-opts-append=ytmusic-helper={os.path.realpath(__file__)}",
         f"--script-opts-append=ytmusic-python={sys.executable or 'python3'}",
         f"--script-opts-append=ytmusic-fade_in={options['fade_in']:g}",
+        f"--script-opts-append=ytmusic-pause_fade={options['pause_fade']:g}",
         f"--script-opts-append=ytmusic-fade_out={options['fade_out']:g}",
         f"--script-opts-append=ytmusic-transition={options['transition']}",
         f"--script-opts-append=ytmusic-xfade={options['xfade']:g}",

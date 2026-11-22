@@ -40,6 +40,7 @@
       "autoplay": "On",
       "fadeIn": 0,
       "fadeOut": 0,
+      "pauseFade": 600,
       "transition": "Off",
       "crossfade": 6,
       "backupMirrors": "Off",
@@ -142,6 +143,16 @@
         "step": 1,
         "defaultValue": 0,
         "description": "Each song fades away over its last seconds. 0 is off."
+      },
+      {
+        "key": "pauseFade",
+        "type": "integer",
+        "label": "Fade on pause (milliseconds)",
+        "min": 0,
+        "max": 3000,
+        "step": 100,
+        "defaultValue": 600,
+        "description": "Pausing fades the song away over this long, and playing again brings it back the same way. 0 pauses at once."
       },
       {
         "key": "transition",

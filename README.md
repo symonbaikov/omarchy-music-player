@@ -100,6 +100,8 @@ that song. Fades, Peak mix and Downloads work across services.
 - Cover art for the playing song and for every track in the list.
 - Apple Music-style repeat: off, repeat the playlist, or repeat one song.
 - **Fade in / fade out**: each song rises at its start and fades at its end.
+- **Fade on pause**: pausing fades the song away instead of cutting it off,
+  and playing again brings it back (0.6 s; change it in settings).
 - **Peak mix**: like a DJ, or Apple Music's AutoMix taken further. At a
   song's climax, it crossfades into the next song's climax: the next song
   comes in with its build-up while the first one fades, and its climax
@@ -307,6 +309,7 @@ omarchy bar set io.github.symonbaikov.ytmusic-mpv playbackCookies On
 | `autoplay` | `On` | Keep playing recommended songs when the queue runs out (repeat off). |
 | `fadeIn` | `0` | Seconds each song fades in over. `0` is off. |
 | `fadeOut` | `0` | Seconds each song fades out over at its end. `0` is off. |
+| `pauseFade` | `600` | Pausing fades the song away over this many milliseconds, and playing again brings it back the same way (0 pauses at once). Media keys still pause at once. |
 | `transition` | `Off` | `Peak mix` switches songs climax to climax (see above). |
 | `crossfade` | `6` | How long the two climaxes overlap in a peak mix, 2–16 seconds. |
 | `soundcloudUser` | (empty) | Your SoundCloud name or profile link (the SoundCloud tab sets it). |

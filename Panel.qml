@@ -33,6 +33,12 @@ Panel {
   readonly property real fadeOut: Model.seconds(setting("fadeOut", 0), 0, 30, 0)
   readonly property string transitionMode: setting("transition", "Off") === "Peak mix" ? "peak" : "off"
   readonly property real crossfade: Model.seconds(setting("crossfade", 6), 2, 16, 6)
+  // Pausing fades the song away over this long (milliseconds in settings).
+  readonly property real pauseFade: Model.seconds(Number(setting("pauseFade", 600)) / 1000, 0, 3, 0.6)
+  onPauseFadeChanged: sendPlayerSetting("pause_fade", pauseFade)
+  // The running player's script knows `ytmusic-toggle-pause` (one started by
+  // an older version doesn't: it pauses at once).
+  property bool pauseFadeSupported: false
   onFadeInChanged: sendPlayerSetting("fade_in", fadeIn)
   onFadeOutChanged: sendPlayerSetting("fade_out", fadeOut)
   onTransitionModeChanged: sendPlayerSetting("transition", transitionMode)
@@ -1424,6 +1430,7 @@ Panel {
       }
       break
     }
+    case "user-data/ytmusic/features": pauseFadeSupported = !!data && data.pause_fade === true; break
     case "seeking": seekingRaw = data; break
     case "paused-for-cache": pausedForCache = data === true; break
     case "loop-file":
@@ -1439,6 +1446,7 @@ Panel {
 
   function resetPlayer() {
     paused = false
+    pauseFadeSupported = false
     mediaTitle = ""
     duration = 0
     position = 0
@@ -1492,7 +1500,7 @@ Panel {
   }
 
   function playerArgs() {
-    return ["--fade-in", String(fadeIn), "--fade-out", String(fadeOut),
+    return ["--fade-in", String(fadeIn), "--fade-out", String(fadeOut), "--pause-fade", String(pauseFade),
       "--transition", transitionMode, "--xfade", String(crossfade)]
   }
 
@@ -1504,6 +1512,7 @@ Panel {
     sendPlayerSetting("fade_in", fadeIn)
     sendPlayerSetting("fade_out", fadeOut)
     sendPlayerSetting("xfade", crossfade)
+    sendPlayerSetting("pause_fade", pauseFade)
     sendPlayerSetting("transition", transitionMode)
   }
 
@@ -1518,11 +1527,14 @@ Panel {
   // ---- settings screen -----------------------------------------------------
   readonly property var fadeChoices: [0, 1, 2, 3, 5, 8]
   readonly property var crossfadeChoices: [4, 6, 8, 12]
+  readonly property var pauseFadeChoices: [0, 0.3, 0.6, 1, 2]
   readonly property var settingsItems: [
     { key: "fadeIn", kind: "choice", section: strings.t("settings.playback"), label: strings.t("settings.fadeIn"),
       hint: strings.t("settings.fadeInHint"), choices: fadeChoices, value: fadeIn, enabled: true },
     { key: "fadeOut", kind: "choice", section: "", label: strings.t("settings.fadeOut"),
       hint: strings.t("settings.fadeOutHint"), choices: fadeChoices, value: fadeOut, enabled: true },
+    { key: "pauseFade", kind: "choice", section: "", label: strings.t("settings.pauseFade"),
+      hint: strings.t("settings.pauseFadeHint"), choices: pauseFadeChoices, value: pauseFade, enabled: true },
     { key: "transition", kind: "toggle", section: "", label: strings.t("settings.peakMix"),
       hint: strings.t("settings.peakMixHint"), checked: transitionMode === "peak", enabled: true },
     { key: "crossfade", kind: "choice", section: "", label: strings.t("settings.crossfade"),
@@ -1553,7 +1565,8 @@ Panel {
 
   function setChoice(key, seconds) {
     var changes = {}
-    changes[key] = Number(seconds)
+    // The pause fade is kept in milliseconds (the settings schema has whole numbers).
+    changes[key] = key === "pauseFade" ? Math.round(Number(seconds) * 1000) : Number(seconds)
     saveSettings(changes)
   }
 
@@ -1720,7 +1733,10 @@ Panel {
     }
   }
 
-  function togglePause() { send(["cycle", "pause"]) }
+  function togglePause() {
+    if (pauseFadeSupported) send(["script-message", "ytmusic-toggle-pause"])
+    else send(["cycle", "pause"])
+  }
   function next() { send(["playlist-next", "weak"]) }
   function previous() {
     // Like most players: restart the track unless we're at its very start.

@@ -583,6 +583,7 @@ function mpvCommand(args, requestId) {
 // user-data/ytmusic/*: set by the player's own script (mpv/ytmusic.lua)
 // when a song came from a backup source, and when songs keep failing.
 var OBSERVED = ["user-data/ytmusic/fallback", "user-data/ytmusic/health", "user-data/ytmusic/unplayable",
+  "user-data/ytmusic/features",
   "pause", "media-title", "duration", "playlist-pos", "playlist-count", "volume", "idle-active",
   "loop-file", "loop-playlist", "seeking", "paused-for-cache"]
 

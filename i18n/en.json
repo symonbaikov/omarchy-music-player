@@ -244,5 +244,7 @@
   "notes.noScores": "Songsterr has no tabs for this song. Try MuseScore or Ultimate Guitar:",
   "notes.open": "Open",
   "notes.musescore": "Sheet music on MuseScore",
-  "notes.ultimateGuitar": "Chords on Ultimate Guitar"
+  "notes.ultimateGuitar": "Chords on Ultimate Guitar",
+  "settings.pauseFade": "Fade on pause",
+  "settings.pauseFadeHint": "Pausing fades the song away instead of cutting it off, and playing again brings it back the same way."
 }

@@ -19,7 +19,8 @@ Scope {
   function showService(id) { withWindow(function(w) { w.showService(id) }) }
   function showBrowse() { withWindow(function(w) { w.showBrowse() }) }
   function addStorage() { withWindow(function(w) { w.addStorage() }) }
-  function showLyrics() { withWindow(function(w) { w.lyricsMode = true; w.go("nowplaying") }) }
+  function showLyrics() { withWindow(function(w) { w.side = "lyrics"; w.go("nowplaying") }) }
+  function showNotes() { withWindow(function(w) { w.side = "notes"; w.go("nowplaying") }) }
 
   LazyLoader {
     id: loader

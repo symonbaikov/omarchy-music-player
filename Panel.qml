@@ -400,6 +400,12 @@ Panel {
     if (!msg) return
     if (msg.type === "playlists" && msg.service !== "yt") {
       setSvc(msg.service, { items: msg.items, loading: msg.stale, error: "", setup: "" })
+    } else if (msg.type === "chords") {
+      if (msg.key === chordsProc.key) { chords = msg; chordsStage = ""; chordsError = "" }
+    } else if (msg.type === "chordsProgress") {
+      if (msg.key === chordsProc.key) chordsStage = msg.stage
+    } else if (msg.type === "scores") {
+      if (msg.key === scoresProc.key) scores = msg
     } else if (msg.type === "lyrics") {
       if (msg.key === lyricsProc.key) { lyrics = msg; lyricsLoading = false }
     } else if (msg.type === "cloud") {
@@ -515,6 +521,8 @@ Panel {
       else if (source === "signin") showNotice(msg.message)
       else if (source === "service") setSvc(servicePlaylistsProc.target, { loading: false, error: msg.setup ? "" : msg.message, setup: msg.setup })
       else if (source === "spotify") { spotifyWaiting = false; showNotice(msg.message, false, true) }
+      else if (source === "chords") { chordsStage = ""; chordsError = msg.message; numpyMissing = msg.setup === "numpy" }
+      else if (source === "scores" || source === "openScore") { if (source === "openScore") showNotice(msg.message) }
       else if (source === "lyrics") { lyricsLoading = false; lyrics = { key: lyricsProc.key, lines: [], none: true, synced: false } }
       else if (source === "cloudAdd") { cloudBusy = ""; cloudError = msg.message; if (msg.setup === "rclone") rcloneInstalled = false }
       else if (source === "cloud") showNotice(msg.message)
@@ -963,6 +971,68 @@ Panel {
       queued = null
       if (next) Qt.callLater(function() { root.loadLyrics(next) })
     }
+  }
+
+  // ---- notes: chords and scores -----------------------------------------------------
+  // For the player window's Notes: the playing song's chords in time
+  // (Model.sanitizeChords) and the sheet music and tabs found for it.
+  property var chords: null
+  property string chordsStage: ""            // "audio" | "listen" while the helper works
+  property string chordsError: ""
+  property bool numpyMissing: false
+  property var scores: null
+
+  function loadNotes(track) {
+    if (!track || !Model.TRACK_KEY_RE.test(String(track.id))) return
+    if (!(scores && scores.key === track.id) && !scoresProc.running) {
+      scores = null
+      scoresProc.key = track.id
+      scoresProc.command = helper(["scores", track.id, "--title", track.title || "", "--artist", track.artist || ""])
+      scoresProc.running = true
+    }
+    if (chords && chords.key === track.id) return
+    if (chordsProc.running) { if (chordsProc.key !== track.id) chordsProc.queued = track; return }
+    chords = null
+    chordsError = ""
+    chordsStage = "audio"
+    chordsProc.key = track.id
+    chordsProc.command = helper(["chords", track.id, "--browser", browser, "--playback-cookies", playbackCookies ? "1" : "0"])
+    chordsProc.running = true
+  }
+
+  function openScore(url) {
+    openScoreProc.command = helper(["open-score", url])
+    openScoreProc.running = true
+  }
+
+  // Chord detection needs numpy; installing asks for the password, so it
+  // runs in a terminal the user sees.
+  function installNumpy() {
+    installProc.command = ["omarchy-launch-floating-terminal-with-presentation", "omarchy pkg add python-numpy"]
+    installProc.running = true
+    numpyMissing = false
+  }
+
+  Process {
+    id: chordsProc
+    property string key: ""
+    property var queued: null
+    stdout: SplitParser { onRead: function(line) { root.handleHelperLine(line, "chords") } }
+    onExited: {
+      if (root.chordsStage !== "" && !(root.chords && root.chords.key === key)) root.chordsStage = ""
+      var next = queued
+      queued = null
+      if (next) Qt.callLater(function() { root.loadNotes(next) })
+    }
+  }
+  Process {
+    id: scoresProc
+    property string key: ""
+    stdout: SplitParser { onRead: function(line) { root.handleHelperLine(line, "scores") } }
+  }
+  Process {
+    id: openScoreProc
+    stdout: SplitParser { onRead: function(line) { root.handleHelperLine(line, "openScore") } }
   }
 
   // ---- full screen ---------------------------------------------------------------
@@ -1802,13 +1872,14 @@ Panel {
     function tab(name: string): void { root.open(); root.switchService(name) }
     function download(): void { root.openDownload(root.currentTrack) }
     function fullscreen(): void { root.fullOpen ? root.closeFull() : root.openFull() }
-    // Full screen on one page: home, browse, nowplaying, lyrics, or a service
+    // The player window on one page: home, browse, nowplaying, lyrics, notes, or a service
     // (yt, sp, sc, cl, my) — handy for a keybinding.
     function full(page: string): void {
       if (!root.fullOpen) root.openFull()
       if (Model.SERVICES.indexOf(page) >= 0) fullView.showService(page)
       else if (page === "browse") fullView.showBrowse()
       else if (page === "lyrics") fullView.showLyrics()
+      else if (page === "notes") fullView.showNotes()
       else if (page === "home" || page === "nowplaying") fullView.go(page)
     }
     function cloud(): void { root.fullOpen ? fullView.addStorage() : root.openCloudForm() }

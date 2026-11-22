@@ -949,6 +949,42 @@ class Lyrics(unittest.TestCase):
         self.assertIsNone(h.best_lyrics([{"trackName": "Nope", "artistName": "Nobody", "duration": 10}], "Luis Fonsi", "Despacito", 228))
 
 
+
+def has_numpy():
+    try:
+        import numpy  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+@unittest.skipUnless(has_numpy() and h.shutil_which("ffmpeg"), "needs numpy and ffmpeg")
+class Chords(unittest.TestCase):
+    def test_hears_the_chords_of_a_synthetic_song(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "song.wav")
+            # 6 s of C major (C4 E4 G4 and a C3 bass), then 6 s of A minor.
+            def triad(freqs):
+                return "+".join(f"0.25*sin(2*PI*{f}*t)" for f in freqs)
+            expr = f"if(lt(t,6),{triad([130.81, 261.63, 329.63, 392.0])},{triad([110.0, 220.0, 261.63, 329.63])})"
+            subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i",
+                            f"aevalsrc='{expr}':s=22050:d=12", path], check=True)
+            segments, key = h.detect_chords(*h.chroma_of(path))
+        names = [s[2] for s in segments if s[1] - s[0] > 2]
+        self.assertEqual(names, ["C", "Am"])
+        self.assertAlmostEqual([s for s in segments if s[2] == "Am"][0][0], 6.0, delta=1.0)
+        self.assertIn(key, ("C major", "A minor"))
+
+    def test_score_links_are_only_the_three_sites(self):
+        for good in ("https://www.songsterr.com/a/wsa/sabaton-berserker-tab-s7835130",
+                     "https://musescore.com/sheetmusic?text=Sabaton%20Berserker",
+                     "https://www.ultimate-guitar.com/search.php?search_type=title&value=Sabaton%20Berserker"):
+            self.assertTrue(h.SCORE_URL_RE.match(good), good)
+        for bad in ("https://evil.example/tab-s1", "file:///etc/passwd", "https://musescore.com/sheetmusic?text=a b;rm"):
+            self.assertFalse(h.SCORE_URL_RE.match(bad), bad)
+
+
 class Reports(unittest.TestCase):
     def test_redact_removes_everything_personal(self):
         home = os.path.expanduser("~")

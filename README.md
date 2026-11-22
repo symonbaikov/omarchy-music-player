@@ -134,6 +134,16 @@ that song. Fades, Peak mix and Downloads work across services.
   themselves, the others dimmed and soft; click a line to jump there.
   Timed lyrics come from [LRCLIB](https://lrclib.net); when it has none,
   YouTube Music's own lyrics are shown as text.
+- **Notes**, for learning a song (beside Lyrics, or `c`): its **chords in
+  time with it**, heard from the song's own audio, so every song has them.
+  The chord playing now is big, with its fingering on a guitar and its
+  notes lit on a keyboard; the chords to come follow (click one to go
+  there), with the song's key. Under them, **sheet music and tabs**:
+  Songsterr's tabs and notation for the song (each instrument: guitar,
+  bass, drums, keys …), opened in their own window, and a search on
+  MuseScore (sheet music) and Ultimate Guitar. Chord detection needs
+  `python-numpy` (the view offers to install it); like any, it is
+  approximate.
 - A **settings** screen (the gear in the panel's top right corner) for
   fades, peak mix, autoplay, playing with your account, covers and the bar
   title.
@@ -202,7 +212,8 @@ shell; the music keeps playing. Turn it off with `updateCheck: Off`.
 - Omarchy (Quattro shell)
 - `python3`, `yt-dlp`, `mpv`
 - `ffmpeg` for peak mix (Arch's `mpv` already depends on it)
-- Optional: `mpv-mpris` (media keys and the OSD), `rclone` (cloud storage)
+- Optional: `mpv-mpris` (media keys and the OSD), `rclone` (cloud storage),
+  `python-numpy` (chords in Notes)
 - A browser signed in to YouTube Music (Chromium, Brave, Chrome, Firefox,
   Zen, Vivaldi, Edge or Opera) to read your private library. Public playlists
   work without one. The browser doesn't have to be running.
@@ -267,7 +278,7 @@ omarchy-shell io.github.symonbaikov.ytmusic-mpv explore       # Explore
 omarchy-shell io.github.symonbaikov.ytmusic-mpv tab sp        # a tab: yt, sp, sc, cl or my
 omarchy-shell io.github.symonbaikov.ytmusic-mpv download      # download the playing song
 omarchy-shell io.github.symonbaikov.ytmusic-mpv fullscreen    # the player window, open / close
-omarchy-shell io.github.symonbaikov.ytmusic-mpv full lyrics  # full screen on a page: home, browse, nowplaying, lyrics, yt, sp, sc, cl, my
+omarchy-shell io.github.symonbaikov.ytmusic-mpv full lyrics  # the player window on a page: home, browse, nowplaying, lyrics, notes, yt, sp, sc, cl, my
 omarchy-shell io.github.symonbaikov.ytmusic-mpv cloud         # connect a cloud storage
 ```
 
@@ -344,6 +355,12 @@ omarchy bar set io.github.symonbaikov.ytmusic-mpv playbackCookies On
   that's playing: its title, artist and length go to `lrclib.net` (an open
   lyrics database, no account), or its ID to YouTube Music's web API without
   an account. They're cached in the cache folder.
+- **Notes**: chords are worked out on your machine from the song's audio
+  (downloaded the way peak mix does, into the same cache, or read from your
+  downloaded file); nothing about it is sent anywhere. Only while Notes is
+  open, the song's title and artist go to `songsterr.com` to find tabs; the
+  MuseScore and Ultimate Guitar buttons only open their search in your
+  browser.
 - **Your mixes** are kept in `~/.local/share/io.github.symonbaikov.ytmusic-mpv/mixes.json`.
 - **Cloud storage** is reached only by rclone, and only the storage you
   connected. A new storage's settings go into rclone's own config (passwords

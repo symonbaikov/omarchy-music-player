@@ -8,7 +8,7 @@ const source = readFileSync(new URL("../Model.js", import.meta.url), "utf8").rep
 const M = {}
 // QML's V4 engine lacks some newer built-ins; remove them so tests catch their use.
 const V4_MISSING = "delete String.prototype.trimEnd; delete String.prototype.trimStart; delete Array.prototype.at; delete Object.hasOwn;\n"
-vm.runInNewContext(V4_MISSING + source + "\n;Object.assign(__out, { cleanText, plain, truncate, formatTime, parseLine, parseSession, clampIndex, mpvCommand, GLYPH, normalizeRepeat, nextRepeat, repeatFromMpv, repeatCommands, coverUrl, OBSERVED, SUPERMIX_ID, isMix, radioListId, autoplaySeed, isLoading, addTargets, likedSet, withLiked, playbackFailure, seconds, stepChoice, recentReport, mirrorOffer, parseUpdate, exploreRows, DOWNLOAD_FORMATS, trackCover, serviceOf, isYouTube, TRACK_KEY_RE, cloudForm, tileHue, CLOUD_KINDS, SERVICES, lyricIndex })", { __out: M })
+vm.runInNewContext(V4_MISSING + source + "\n;Object.assign(__out, { cleanText, plain, truncate, formatTime, parseLine, parseSession, clampIndex, mpvCommand, GLYPH, normalizeRepeat, nextRepeat, repeatFromMpv, repeatCommands, coverUrl, OBSERVED, SUPERMIX_ID, isMix, radioListId, autoplaySeed, isLoading, addTargets, likedSet, withLiked, playbackFailure, seconds, stepChoice, recentReport, mirrorOffer, parseUpdate, exploreRows, DOWNLOAD_FORMATS, trackCover, serviceOf, isYouTube, TRACK_KEY_RE, cloudForm, tileHue, CLOUD_KINDS, SERVICES, lyricIndex, chordTones, chordNoteNames, guitarDiagram, GUITAR_SHAPES, chordLabel, keyLabel })", { __out: M })
 
 const MARKUP = '<img src="https://example.invalid/tracker">Song'
 
@@ -416,4 +416,33 @@ test("lyrics: timed lines are kept in order, plain text split, the playing line 
   assert.equal(p.lines.length, 3)
   assert.equal(M.parseLine(JSON.stringify({ type: "lyrics", key: "../x" })), null)
   assert.equal(M.parseLine(JSON.stringify({ type: "lyrics", key: "dQw4w9WgXcQ", none: true })).none, true)
+})
+
+test("chords and scores: sanitized; chord notes and guitar shapes are right", () => {
+  const c = M.parseLine(JSON.stringify({ type: "chords", key: "dQw4w9WgXcQ", songKey: "B minor",
+    segments: [[0, 2, "Bm"], [2, 4.5, "G"], [4.5, 5, "<b>"], [1, 6, "D"], [6, 8, "N"]] }))
+  assert.equal(c.songKey, "B minor")
+  assert.deepEqual(Array.from(c.segments, s => s.name), ["Bm", "G", "N"])
+  assert.deepEqual(Array.from(M.chordNoteNames("Bm")), ["B", "D", "F#"])
+  assert.deepEqual(Array.from(M.chordNoteNames("G")), ["G", "B", "D"])
+  assert.deepEqual(Array.from(M.chordNoteNames("Gm")), ["G", "B♭", "D"])
+  assert.equal(M.chordLabel("A#m"), "B♭m")
+  assert.equal(M.chordLabel("F#"), "F#")
+  assert.equal(M.keyLabel("D# major"), "E♭ major")
+  // Every shape plays only the chord's notes (standard tuning E A D G B E).
+  const tuning = [4, 9, 2, 7, 11, 4]
+  for (const [name, shape] of Object.entries(M.GUITAR_SHAPES)) {
+    const tones = Array.from(M.chordTones(name))
+    shape.forEach((f, i) => { if (f >= 0) assert.ok(tones.includes((tuning[i] + f) % 12), name + " string " + i) })
+  }
+  assert.deepEqual(JSON.parse(JSON.stringify(M.guitarDiagram("C"))), { base: 1, strings: [-1, 3, 2, 0, 1, 0] })
+  assert.equal(M.guitarDiagram("Bm").base, 1)
+  assert.deepEqual(JSON.parse(JSON.stringify(M.guitarDiagram("D#"))), { base: 6, strings: [-1, 1, 3, 3, 3, 1] })
+  const sc = M.parseLine(JSON.stringify({ type: "scores", key: "dQw4w9WgXcQ", query: "Sabaton Berserker",
+    musescore: "https://musescore.com/sheetmusic?text=Sabaton%20Berserker", ultimateGuitar: "javascript:alert(1)",
+    items: [{ title: "Berserker", artist: "Sabaton", url: "https://www.songsterr.com/a/wsa/sabaton-berserker-tab-s7835130", instruments: ["Distortion Guitar"] },
+            { title: "x", url: "https://evil.example/tab-s1" }] }))
+  assert.equal(sc.items.length, 1)
+  assert.equal(sc.ultimateGuitar, "")
+  assert.ok(sc.musescore.startsWith("https://musescore.com/"))
 })

@@ -205,8 +205,8 @@
   "cloud.waiting": "Finish signing in in your browser…",
   "cloud.checking": "Checking the folder…",
   "cloud.added": "Connected %1",
-  "full.open": "Full screen (Shift+F)",
-  "full.close": "Leave full screen (Esc)",
+  "full.open": "Player window (Shift+F)",
+  "full.close": "Close the window",
   "full.appName": "Music",
   "full.home": "Listen Now",
   "full.nowPlaying": "Now Playing",
@@ -227,5 +227,7 @@
   "full.lyricsLoading": "Looking for the lyrics…",
   "full.lyricsNone": "No lyrics for this song yet.",
   "full.instrumental": "Instrumental",
-  "full.lyricsSource": "Lyrics: %1"
+  "full.lyricsSource": "Lyrics: %1",
+  "full.fullscreen": "Full screen (F11)",
+  "full.leaveFullscreen": "Leave full screen (F11)"
 }

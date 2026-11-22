@@ -10,13 +10,13 @@ var MAX_TEXT = 300
 // A list: a YouTube playlist id, or one of the other services' lists
 // (sc:… SoundCloud, sp:… Spotify, mix:… your mixes, cl:… your cloud storage:
 // a source, or one folder in it).
-var PLAYLIST_ID_RE = /^(?:[A-Za-z0-9_-]{2,80}|sc:(?:likes|sets):[A-Za-z0-9_-]{1,100}|sc:set:[A-Za-z0-9_-]{1,100}\/[A-Za-z0-9_-]{1,200}|sc:search|sp:liked|sp:pl:[A-Za-z0-9]{22}|mix:all|mix:[a-f0-9]{8}|cl:[a-f0-9]{8}(?::[a-f0-9]{16})?|rd:(?:fav|top|vote|search|country:[A-Z]{2}|tag:[a-z0-9-]{1,40})|ms:[a-f0-9]{8}:(?:fav|rnd|al:[A-Za-z0-9_-]{1,64}|pl:[A-Za-z0-9_-]{1,64})|pc:(?:new|[a-f0-9]{16})|dz:(?:fav|chart|search|pl:[0-9]{1,20})|au:(?:search|trending(?::[a-z0-9-]{1,40})?)|mc:(?:search|hot:[a-z0-9-]{1,40})|ai:mix|hist:recent)$/
+var PLAYLIST_ID_RE = /^(?:[A-Za-z0-9_-]{2,80}|sc:(?:likes|sets):[A-Za-z0-9_-]{1,100}|sc:set:[A-Za-z0-9_-]{1,100}\/[A-Za-z0-9_-]{1,200}|sc:search|sp:liked|sp:pl:[A-Za-z0-9]{22}|mix:all|mix:[a-f0-9]{8}|cl:[a-f0-9]{8}(?::[a-f0-9]{16})?|rd:(?:fav|top|vote|search|country:[A-Z]{2}|tag:[a-z0-9-]{1,40})|ms:[a-f0-9]{8}:(?:fav|rnd|al:[A-Za-z0-9_-]{1,64}|pl:[A-Za-z0-9_-]{1,64})|pc:(?:new|[a-f0-9]{16})|dz:(?:fav|chart|search|pl:[0-9]{1,20})|am:(?:top|search|al:[0-9]{3,15}|pl:pl\.[A-Za-z0-9-]{8,64})|au:(?:search|trending(?::[a-z0-9-]{1,40})?)|mc:(?:search|hot:[a-z0-9-]{1,40})|ai:mix|hist:recent)$/
 var VIDEO_ID_RE = /^[A-Za-z0-9_-]{11}$/
 // A track from any service: a YouTube video id, sc:…, sp:… or cl:….
-var TRACK_KEY_RE = /^(?:[A-Za-z0-9_-]{11}|sc:(?:[0-9]{1,20}|[A-Za-z0-9_-]{1,100}\/[A-Za-z0-9_-]{1,200})|sp:[A-Za-z0-9]{22}|cl:[a-f0-9]{8}\/[a-f0-9]{16}|rd:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|ms:[a-f0-9]{8}\/[A-Za-z0-9_-]{1,64}|pc:[a-f0-9]{16}\/[a-f0-9]{16}|dz:[0-9]{1,20}|au:[A-Za-z0-9]{1,16}|mc:[A-Za-z0-9_-]{1,100}\/[A-Za-z0-9%_.-]{1,300})$/
-var SERVICES = ["yt", "sp", "dz", "sc", "mc", "au", "cl", "rd", "pc", "my"]
+var TRACK_KEY_RE = /^(?:[A-Za-z0-9_-]{11}|sc:(?:[0-9]{1,20}|[A-Za-z0-9_-]{1,100}\/[A-Za-z0-9_-]{1,200})|sp:[A-Za-z0-9]{22}|cl:[a-f0-9]{8}\/[a-f0-9]{16}|rd:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|ms:[a-f0-9]{8}\/[A-Za-z0-9_-]{1,64}|pc:[a-f0-9]{16}\/[a-f0-9]{16}|dz:[0-9]{1,20}|au:[A-Za-z0-9]{1,16}|am:[0-9]{1,15}|mc:[A-Za-z0-9_-]{1,100}\/[A-Za-z0-9%_.-]{1,300})$/
+var SERVICES = ["yt", "am", "sp", "dz", "sc", "mc", "au", "cl", "rd", "pc", "my"]
 // Tabs shown unless the user picks others (the "+" tab).
-var DEFAULT_TABS = "yt,sp,sc,cl,rd,pc,my"
+var DEFAULT_TABS = "yt,am,sp,sc,cl,rd,pc,my"
 
 // The tabs to show, from the setting: known services, each once, in the
 // usual order; YouTube Music and My Music always.
@@ -53,7 +53,7 @@ var SECRET_FIELDS = ["pass", "secret_access_key"]
 function serviceOf(key) {
   var k = String(key || "")
   var p = k.slice(0, 3)
-  return p === "sc:" || p === "sp:" || p === "cl:" || p === "rd:" || p === "ms:" || p === "pc:" || p === "dz:" || p === "au:" || p === "mc:" ? k.slice(0, 2) : "yt"
+  return p === "sc:" || p === "sp:" || p === "cl:" || p === "rd:" || p === "ms:" || p === "pc:" || p === "dz:" || p === "au:" || p === "mc:" || p === "am:" ? k.slice(0, 2) : "yt"
 }
 
 // Liking, adding to a YouTube playlist and radio are YouTube Music's.
@@ -93,6 +93,7 @@ var GLYPH = {
   youtube: String.fromCodePoint(0xF05C3),
   spotify: String.fromCodePoint(0xF04C7),
   deezer: String.fromCodePoint(0xF0EA2),
+  apple: String.fromCodePoint(0xF0035),
   mixcloud: String.fromCodePoint(0xF02CB),
   audius: String.fromCodePoint(0xF147D),
   soundcloud: String.fromCodePoint(0xF04C0),
@@ -384,6 +385,10 @@ function parseLine(line) {
   case "playlists":
     return { type: "playlists", stale: msg.stale === true, items: sanitizePlaylists(msg.items),
       service: SERVICES.indexOf(msg.service) >= 0 ? msg.service : "yt" }
+  case "amAdded":
+    if (!PLAYLIST_ID_RE.test(String(msg.id || ""))) return null
+    return { type: "amAdded", id: String(msg.id), title: cleanText(msg.title, 150),
+      count: typeof msg.count === "number" && msg.count >= 0 ? msg.count : null }
   case "mixAdded":
     if (!/^mix:[a-f0-9]{8}$/.test(String(msg.id || ""))) return null
     return { type: "mixAdded", id: String(msg.id), title: cleanText(msg.title, 80), already: msg.already === true }

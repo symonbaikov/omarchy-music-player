@@ -35,6 +35,11 @@ before use.
   only to `accounts.spotify.com` and `api.spotify.com`. Songs are matched on
   YouTube Music without an account; matches are cached. Disconnect in
   settings.
+- **Apple Music**: charts from `rss.marketingtools.apple.com`, search and
+  albums from `itunes.apple.com`, and a playlist you add from its public
+  page on `music.apple.com`; no account. Covers from Apple's image host.
+  Songs are matched on YouTube Music without an account. The playlists and
+  albums you add are kept in `applemusic.json`.
 - **Deezer**: your public profile, playlists, charts and search are read
   from `api.deezer.com` without an account; covers come from Deezer's image
   host. Songs are matched on YouTube Music without an account; matches are

@@ -7,6 +7,7 @@ picks which ones you see; YouTube Music and My Music are always there.
 | Tab | What you get | Setup |
 |---|---|---|
 | <img src="icons/youtubemusic.svg" width="20" height="20" alt="" align="center" />&nbsp;YouTube&nbsp;Music | Your playlists, Liked Music, My Supermix, Explore, search, radio, likes, add to playlist | The browser you're signed in with ([settings](settings.md)) |
+| <img src="icons/applemusic.svg" width="20" height="20" alt="" align="center" />&nbsp;Apple&nbsp;Music | Its charts, top albums, catalog search, your public playlists and albums by link | Nothing |
 | <img src="icons/spotify.svg" width="20" height="20" alt="" align="center" />&nbsp;Spotify | Your Liked Songs and the playlists you own or collaborate on | Once: your own Spotify app (below) |
 | <img src="icons/deezer.svg" width="20" height="20" alt="" align="center" />&nbsp;Deezer | Your favorite tracks and playlists, Deezer's charts, search | Your profile link |
 | <img src="icons/soundcloud.svg" width="20" height="20" alt="" align="center" />&nbsp;SoundCloud | Your likes and playlists, and search across SoundCloud | Your profile name or link |
@@ -37,6 +38,22 @@ to where you were.
   with its radio after it; albums, charts and moods open as playlists.
 - **My Supermix**, **Start radio** and **Autoplay** are YouTube Music's own
   recommendations, personalized to your account: see [playback](playback.md).
+
+## Apple Music
+
+No account needed. Apple keeps its audio to its own apps (and there's none
+for Linux), so songs play from their **YouTube Music match**, like Spotify.
+
+- **Top songs** and **top albums** in your country (Apple's public charts;
+  the country follows Radio's).
+- **Search** Apple Music's catalog from the search field.
+- **Your playlists and albums**: in Apple Music, Share → **Copy Link**, then
+  click **Add a playlist or album** in the tab; it takes the link from the
+  clipboard. A playlist has to be public (shared); it shows the songs its
+  page shows (up to about a hundred).
+
+Your whole library (likes, For You) would need Apple's MusicKit, which only
+works with a paid Apple Developer account, so it isn't here.
 
 ## Spotify
 

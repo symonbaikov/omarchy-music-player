@@ -1110,6 +1110,44 @@ class CoversEverywhere(unittest.TestCase):
         self.assertTrue(os.path.isfile(idx["covers"]["Band/Album"]))
 
 
+class AppleMusic(unittest.TestCase):
+    def test_art_ids_and_links(self):
+        self.assertEqual(h.am_art("https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/1d/1b/f9/x/26UMGIM39303.rgb.jpg/{w}x{h}bb.{f}"),
+                         "https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/1d/1b/f9/x/26UMGIM39303.rgb.jpg/300x300bb.jpg")
+        self.assertTrue(h.am_art("https://is1-ssl.mzstatic.com/image/thumb/Music/x/cover.jpg/100x100bb.jpg").endswith("/cover.jpg/300x300bb.jpg"))
+        self.assertIsNone(h.am_art("https://evil.example/x/100x100bb.jpg"))
+        t = h.am_song("1460471576", "Ghost Love Score", "Nightwish", 602000)
+        self.assertEqual((t["id"], t["duration"]), ("am:1460471576", 602))
+        self.assertTrue(h.TRACK_KEY_RE.match(t["id"]))
+        self.assertEqual(h.track_url(t), "ytmusic-apple://1460471576")
+        self.assertEqual(h.mix_entry("ytmusic-apple://1460471576")[0], "am:1460471576")
+        for lid in ("am:top", "am:search", "am:al:1460471435", "am:pl:pl.f4d106fed2bd41149aaacabb233eb5eb"):
+            self.assertTrue(h.is_list_id(lid), lid)
+        self.assertTrue(h.AM_LINK_RE.match("https://music.apple.com/us/playlist/todays-hits/pl.f4d106fed2bd41149aaacabb233eb5eb"))
+        self.assertTrue(h.AM_LINK_RE.match("https://music.apple.com/ru/album/once/1460471435?i=1460471576"))
+        for bad in ("https://evil.example/us/playlist/x/pl.f4d106fed2bd4114", "https://music.apple.com/us/artist/x/123"):
+            self.assertIsNone(h.AM_LINK_RE.match(bad), bad)
+
+    def test_playlist_page(self):
+        page = json.dumps({"data": [{"data": {"sections": [{"items": [
+            {"title": "stupid song", "artistName": "Olivia Rodrigo", "duration": 209680,
+             "contentDescriptor": {"kind": "song", "identifiers": {"storeAdamID": "1889992115"}},
+             "artwork": {"dictionary": {"url": "https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/a/b.jpg/{w}x{h}bb.{f}"}}},
+            {"title": "Album", "contentDescriptor": {"kind": "album", "identifiers": {"storeAdamID": "1"}}}]}]}}]})
+        body = ('<html><title>&lrm;Today&#8217;s Hits - Playlist - Apple Music</title>'
+                '<script type="application/json" id="serialized-server-data">' + page + '</script></html>').encode()
+        saved = h.http_get
+        h.http_get = lambda url, max_bytes, timeout=15, accept="": (body, None)
+        try:
+            title, songs = h.am_playlist_page("https://music.apple.com/us/playlist/x/pl.f4d106fed2bd4114")
+        finally:
+            h.http_get = saved
+        self.assertEqual(title, "Today\u2019s Hits")
+        self.assertEqual([s["id"] for s in songs], ["am:1889992115"])
+        self.assertEqual(songs[0]["duration"], 209)
+        self.assertTrue(songs[0]["cover"].endswith("/300x300bb.jpg"))
+
+
 class ServicePages(unittest.TestCase):
     def test_fixed_https_pages(self):
         for name, url in h.SERVICE_PAGES.items():

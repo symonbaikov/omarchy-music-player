@@ -33,7 +33,7 @@ omarchy-shell io.github.symonbaikov.ytmusic-mpv addToPlaylist # pick a playlist 
 omarchy-shell io.github.symonbaikov.ytmusic-mpv download      # download the playing song
 omarchy-shell io.github.symonbaikov.ytmusic-mpv openSettings  # the settings screen
 omarchy-shell io.github.symonbaikov.ytmusic-mpv explore       # Explore
-omarchy-shell io.github.symonbaikov.ytmusic-mpv tab rd        # a tab: yt, sp, dz, sc, mc, au, cl, rd, pc, my
+omarchy-shell io.github.symonbaikov.ytmusic-mpv tab rd        # a tab: yt, am, sp, dz, sc, mc, au, cl, rd, pc, my
 omarchy-shell io.github.symonbaikov.ytmusic-mpv fullscreen    # the player window, open / close
 omarchy-shell io.github.symonbaikov.ytmusic-mpv full lyrics   # the window on a page: home, browse, nowplaying, lyrics, notes, yt, sp, sc, cl, rd, pc, my
 omarchy-shell io.github.symonbaikov.ytmusic-mpv cloud         # add music files or a server

@@ -53,7 +53,7 @@ Commands: `playlists`, `tracks`, `play`, `radio`, `search`, `explore`,
 - **Track keys and list IDs** are validated by regex on both sides
   (`TRACK_KEY_RE`, `PLAYLIST_ID_RE` in Model.js; the same in the helper):
   - YouTube: an 11-character video ID; playlists by their own IDs.
-  - `sp:<id>` Spotify and `dz:<id>` Deezer (both played from their YouTube Music match, `resolve_spotify`), `sc:…` SoundCloud.
+  - `sp:<id>` Spotify, `dz:<id>` Deezer and `am:<id>` Apple Music (played from their YouTube Music match, `resolve_spotify`, caches per service in `match_files`); Apple Music lists `am:top`, `am:al:<id>`, `am:pl:pl.<id>`, `am:search`. `sc:…` SoundCloud.
   - `cl:<8 hex>/<16 hex>` a file in a storage or local folder; lists `cl:<8>` and `cl:<8>:<16>`.
   - `ms:<8>/<id>` a media server song; lists `ms:<8>:fav|rnd|al:<id>|pl:<id>`.
   - `mc:<user>/<slug>` a Mixcloud mix (played by yt-dlp from its page); lists `mc:hot:<genre>`, `mc:search`.
@@ -62,7 +62,7 @@ Commands: `playlists`, `tracks`, `play`, `radio`, `search`, `explore`,
   - `pc:<16 hex>/<16 hex>` a podcast episode (hashes of the feed URL and the episode's guid); lists `pc:new` and `pc:<16 hex>` (a show).
   - `mix:<8 hex>` your mixes, `mix:all` My Mix, `ai:mix`, `hist:recent`, `DOWNLOADS`.
 - **Custom schemes**: non-YouTube songs go into the queue as
-  `ytmusic-spotify://`, `ytmusic-deezer://`, `ytmusic-cloud://`, `ytmusic-radio://`,
+  `ytmusic-spotify://`, `ytmusic-deezer://`, `ytmusic-apple://`, `ytmusic-cloud://`, `ytmusic-radio://`,
   `ytmusic-server://`, `ytmusic-podcast://` URLs. The Lua `on_load` hook asks the helper
   (`resolve`) for the real stream and checks it (`resolved_ok`) before mpv
   opens it.

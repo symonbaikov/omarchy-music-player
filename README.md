@@ -6,6 +6,7 @@
 
   <p>
     <img src="docs/icons/youtubemusic.svg" width="32" height="32" alt="YouTube Music" title="YouTube Music" />&nbsp;&nbsp;
+    <img src="docs/icons/applemusic.svg" width="32" height="32" alt="Apple Music" title="Apple Music: charts, search, your public playlists" />&nbsp;&nbsp;
     <img src="docs/icons/spotify.svg" width="32" height="32" alt="Spotify" title="Spotify" />&nbsp;&nbsp;
     <img src="docs/icons/deezer.svg" width="32" height="32" alt="Deezer" title="Deezer" />&nbsp;&nbsp;
     <img src="docs/icons/soundcloud.svg" width="32" height="32" alt="SoundCloud" title="SoundCloud" />&nbsp;&nbsp;
@@ -21,13 +22,13 @@
 </div>
 
 All your music in one player that lives in your Omarchy bar: **YouTube
-Music, Spotify, Deezer, SoundCloud, Mixcloud, Audius, your own files and music server, internet
+Music, Apple Music, Spotify, Deezer, SoundCloud, Mixcloud, Audius, your own files and music server, internet
 radio and podcasts**, played by a headless `mpv`. No browser, no web app, no
 subscription of its own.
 
 ## What makes it special
 
-- **🎧 Every service, one queue.** Tabs for YouTube Music, Spotify, Deezer,
+- **🎧 Every service, one queue.** Tabs for YouTube Music, Apple Music, Spotify, Deezer,
   SoundCloud, Mixcloud, Audius, your files, radio, podcasts and your mixes. Mix songs from all of them in one
   playlist; **My Mix** alternates your likes from every service.
 - **✨ AI Mix.** The AI that already runs on your Omarchy (Claude, Codex or
@@ -87,7 +88,7 @@ Everything else, the shortcuts and the commands for your own key bindings:
 
 | | |
 |---|---|
-| [Services](docs/services.md) | YouTube Music, Spotify, Deezer, SoundCloud, Mixcloud, Audius, Files and servers, Radio, Podcasts, My Music |
+| [Services](docs/services.md) | YouTube Music, Apple Music, Spotify, Deezer, SoundCloud, Mixcloud, Audius, Files and servers, Radio, Podcasts, My Music |
 | [The player window](docs/player-window.md) | The window, Lyrics, Notes |
 | [AI Mix](docs/ai-mix.md) | How it learns your taste, and what it sends |
 | [Playback](docs/playback.md) | Peak mix, fades, radio and autoplay, scrobbling, downloads, backup sources, updates |

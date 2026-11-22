@@ -460,7 +460,7 @@ test("radio keys and lists; the tabs setting", () => {
   assert.equal(lists.service, "rd")
   assert.deepEqual(Array.from(lists.items, i => i.id), ["rd:fav", "rd:tag:hip-hop", "rd:country:US"])
   assert.deepEqual(Array.from(M.parseLine(JSON.stringify({ type: "radioFavs", ids: [st, "x"] })).ids), [st])
-  assert.deepEqual(Array.from(M.visibleTabs("")), ["yt", "sp", "sc", "cl", "rd", "pc", "my"])
+  assert.deepEqual(Array.from(M.visibleTabs("")), ["yt", "am", "sp", "sc", "cl", "rd", "pc", "my"])
   assert.deepEqual(Array.from(M.visibleTabs("rd,sc,bogus")), ["yt", "sc", "rd", "my"])
 })
 
@@ -533,4 +533,15 @@ test("scrobbling status is sanitized", () => {
   const m = M.parseLine(JSON.stringify({ type: "scrobble", listenbrainz: "me\u0000", lastfm: "" }))
   assert.deepEqual({ ...m }, { type: "scrobble", listenbrainz: "me", lastfm: "" })
   assert.equal(M.parseLine(JSON.stringify({ type: "scrobbleWaiting" })).type, "scrobbleWaiting")
+})
+
+test("Apple Music songs, lists and the added link", () => {
+  assert.ok(M.TRACK_KEY_RE.test("am:1460471576"))
+  assert.equal(M.serviceOf("am:1460471576"), "am")
+  const lists = M.parseLine(JSON.stringify({ type: "playlists", service: "am", items: [
+    { id: "am:top" }, { id: "am:al:1460471435" }, { id: "am:pl:pl.f4d106fed2bd41149aaacabb233eb5eb" }, { id: "am:pl:../x" }] }))
+  assert.deepEqual(Array.from(lists.items, i => i.id), ["am:top", "am:al:1460471435", "am:pl:pl.f4d106fed2bd41149aaacabb233eb5eb"])
+  const added = M.parseLine(JSON.stringify({ type: "amAdded", id: "am:al:1460471435", title: "Once", count: 11 }))
+  assert.equal(added.title, "Once")
+  assert.equal(M.parseLine(JSON.stringify({ type: "amAdded", id: "x y" })), null)
 })

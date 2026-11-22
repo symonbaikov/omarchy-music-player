@@ -70,6 +70,7 @@ Panel {
     : service === "sc" ? (svc.sc.setup ? [] : [scSearchEntry].concat(svc.sc.items))
     : service === "cl" ? (svc.cl.setup || cloudFormOpen ? [] : svc.cl.items.concat([cloudAddEntry]))
     : service === "rd" ? [radioCountryEntry].concat(svc.rd.items)
+    : service === "am" ? svc.am.items.concat([amAddEntry])
     : service === "my" ? (svc.my.setup ? [] : [aiEntry].concat(svc.my.items))
     : svc[service].setup ? [] : svc[service].items
   readonly property var rows: view === "settings" || view === "download" || view === "services" || view === "ai" ? []
@@ -121,6 +122,7 @@ Panel {
   property string service: "yt"
   readonly property var serviceTabs: [
     { id: "yt", glyph: Model.GLYPH.youtube, color: "#FF0033", label: strings.t("tab.yt") },
+    { id: "am", glyph: Model.GLYPH.apple, color: "#FA2D48", label: strings.t("tab.am") },
     { id: "sp", glyph: Model.GLYPH.spotify, color: "#1ED760", label: strings.t("tab.sp") },
     { id: "dz", glyph: Model.GLYPH.deezer, color: "#A238FF", label: strings.t("tab.dz") },
     { id: "sc", glyph: Model.GLYPH.soundcloud, color: "#FF5500", label: strings.t("tab.sc") },
@@ -134,6 +136,7 @@ Panel {
   // Per service: { items, loading, error, setup } ("setup": needs connecting).
   property var svc: ({ sp: { items: [], loading: false, error: "", setup: "" },
                        dz: { items: [], loading: false, error: "", setup: "" },
+                       am: { items: [], loading: false, error: "", setup: "" },
                        mc: { items: [], loading: false, error: "", setup: "" },
                        au: { items: [], loading: false, error: "", setup: "" },
                        sc: { items: [], loading: false, error: "", setup: "" },
@@ -212,6 +215,39 @@ Panel {
   readonly property var cloudKindSpec: {
     for (var i = 0; i < Model.CLOUD_KINDS.length; i++) if (Model.CLOUD_KINDS[i].id === cloudKind) return Model.CLOUD_KINDS[i]
     return Model.CLOUD_KINDS[0]
+  }
+  // Apple Music: keep a public playlist or album by its share link, taken
+  // from the clipboard (Share → Copy Link in Apple Music).
+  readonly property var amAddEntry: ({ kind: "explore", id: "__amadd", title: strings.t("am.addEntry"),
+    artist: strings.t("am.addHint") })
+  function addAppleMusicLink() {
+    if (amPasteProc.running || amAddProc.running) return
+    amPasteProc.running = true
+  }
+  Process {
+    id: amPasteProc
+    command: ["wl-paste", "--no-newline", "--type", "text/plain"]
+    stdout: StdioCollector {
+      onStreamFinished: {
+        var link = String(text || "").trim().split("\n")[0].slice(0, 400)
+        if (!/^https:\/\/(embed\.)?music\.apple\.com\//.test(link)) { root.showNotice(strings.t("am.pasteNothing")); return }
+        root.showNotice(strings.t("am.adding"))
+        amAddProc.command = root.helper(["am-add", link])
+        amAddProc.running = true
+      }
+    }
+  }
+  Process {
+    id: amAddProc
+    stdout: SplitParser {
+      onRead: function(line) {
+        var msg = Model.parseLine(line)
+        if (msg && msg.type === "amAdded") {
+          root.showNotice(strings.t("am.added").arg(msg.title))
+          root.openList({ id: msg.id, title: msg.title, count: msg.count })
+        } else root.handleHelperLine(line, "amAdd")
+      }
+    }
   }
   readonly property var cloudAddEntry: ({ kind: "explore", id: "__cloudadd", title: strings.t("cloud.addEntry"),
     artist: strings.t("cloud.addHint") })
@@ -1312,7 +1348,7 @@ Panel {
     if (view !== "explore") {
       if (view === "addTo") closeAddTo()
       searchReturnView = view === "settings" || view === "download" ? "playlists" : view
-      exploreService = ["sc", "rd", "pc", "dz", "mc", "au"].indexOf(service) >= 0 ? service : "yt"
+      exploreService = ["sc", "rd", "pc", "dz", "mc", "au", "am"].indexOf(service) >= 0 ? service : "yt"
     }
     view = "explore"
     runSearch(q)
@@ -2093,6 +2129,7 @@ Panel {
     if (p.kind === "explore") {
       if (p.id === "__scsearch") openSoundCloudSearch()
       else if (p.id === "__cloudadd") openCloudForm()
+      else if (p.id === "__amadd") addAppleMusicLink()
       else if (p.id === "__rdcountry") openCountries()
       else if (p.id === "__aimake") openAiMaker()
       else openExplore()
@@ -2474,7 +2511,7 @@ Panel {
             readonly property string where: root.view === "explore" ? root.exploreService : root.service
             text: root.view === "countries" ? strings.t("rd.countryField")
               : where === "sc" ? strings.t("sc.searchField") : where === "rd" ? strings.t("rd.searchField")
-              : ["pc", "dz", "mc", "au"].indexOf(where) >= 0 ? strings.t(where + ".searchField") : strings.t("explore.search")
+              : ["pc", "dz", "mc", "au", "am"].indexOf(where) >= 0 ? strings.t(where + ".searchField") : strings.t("explore.search")
             color: root.dim
             font.pixelSize: Style.font.subtitle
           }
@@ -3992,7 +4029,7 @@ Panel {
                   if (rowItem.kind === "explore") return rowItem.modelData.id === "__scsearch" ? Model.GLYPH.search
                     : rowItem.modelData.id === "__rdcountry" ? Model.GLYPH.explore
                     : rowItem.modelData.id === "__aimake" ? Model.GLYPH.ai
-                    : rowItem.modelData.id === "__cloudadd" ? Model.GLYPH.plus : Model.GLYPH.explore
+                    : rowItem.modelData.id === "__cloudadd" || rowItem.modelData.id === "__amadd" ? Model.GLYPH.plus : Model.GLYPH.explore
                   if (rowItem.kind === "mood") return Model.GLYPH.mood
                   if (!rowItem.isTrack) {
                     if (rowItem.modelData.id === "LM") return Model.GLYPH.heart
@@ -4003,6 +4040,9 @@ Panel {
                     if (rowItem.modelData.id === "dz:fav") return Model.GLYPH.heart
                     if (rowItem.modelData.id === "dz:chart") return Model.GLYPH.deezer
                     if (/^mc:/.test(rowItem.modelData.id)) return Model.GLYPH.mixcloud
+                    if (rowItem.modelData.id === "am:top") return Model.GLYPH.apple
+                    if (/^am:al:/.test(rowItem.modelData.id)) return Model.GLYPH.album
+                    if (/^am:pl:/.test(rowItem.modelData.id)) return Model.GLYPH.playlist
                     if (/^au:/.test(rowItem.modelData.id)) return Model.GLYPH.audius
                     if (/^sc:likes:/.test(rowItem.modelData.id)) return Model.GLYPH.soundcloud
                     if (/^cl:[a-f0-9]{8}$/.test(rowItem.modelData.id)) return Model.GLYPH.cloud

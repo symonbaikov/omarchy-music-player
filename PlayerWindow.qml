@@ -154,6 +154,7 @@ FloatingWindow {
     }
     if (item.kind === "explore") {
       if (item.id === "__cloudadd") addStorage()
+      else if (item.id === "__amadd") p.addAppleMusicLink()
       else if (item.id === "__rdcountry") p.openCountries()
       else if (item.id === "__aimake") p.openAiMaker()
       else showBrowse()
@@ -195,7 +196,7 @@ FloatingWindow {
     if (item && item.kind === "song") return Model.GLYPH.music
     if (id === "LM") return Model.GLYPH.heart
     if (id === "DOWNLOADS") return Model.GLYPH.download
-    if (id === "__cloudadd") return Model.GLYPH.plus
+    if (id === "__cloudadd" || id === "__amadd") return Model.GLYPH.plus
     if (id === "ai:mix" || id === "__aimake") return Model.GLYPH.ai
     if (id === "hist:recent") return Model.GLYPH.history
     if (/^mix:/.test(id) || id === Model.SUPERMIX_ID) return Model.GLYPH.supermix
@@ -215,7 +216,7 @@ FloatingWindow {
 
   readonly property var mixes: p.svc.my.items
   readonly property var libraryCards: p.libraryRows.filter(function(r) {
-    return !(r.kind === "explore" && r.id !== "__cloudadd" && r.id !== "__rdcountry" && r.id !== "__aimake")
+    return !(r.kind === "explore" && r.id !== "__cloudadd" && r.id !== "__amadd" && r.id !== "__rdcountry" && r.id !== "__aimake")
   })
   readonly property var queue: p.session && p.session.tracks ? p.session.tracks : []
   readonly property string bigCover: p.connected && p.currentTrack

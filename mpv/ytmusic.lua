@@ -302,6 +302,7 @@ local RADIO = "ytmusic-radio://"
 local SERVER = "ytmusic-server://"
 local PODCAST = "ytmusic-podcast://"
 local DEEZER = "ytmusic-deezer://"
+local APPLE = "ytmusic-apple://"
 local AUDIUS = "ytmusic-audius://"
 
 local function watch_id(url)
@@ -439,6 +440,7 @@ mp.register_event("end-file", function(e)
     local name = entry and entry.filename or ""
     local radio = name:sub(1, #RADIO) == RADIO
     if not entry or not (watch_id(name) or name:sub(1, #SPOTIFY) == SPOTIFY or name:sub(1, #DEEZER) == DEEZER
+        or name:sub(1, #APPLE) == APPLE
         or name:sub(1, #CLOUD) == CLOUD or radio
         or name:sub(1, #SERVER) == SERVER or name:sub(1, #PODCAST) == PODCAST
         or name:sub(1, #AUDIUS) == AUDIUS or name:match("^https://www%.mixcloud%.com/")
@@ -466,7 +468,7 @@ end)
 -- the Spotify song's YouTube Music match, or the file on the local rclone
 -- server. The entry keeps its name, so the panel still knows which song it is.
 local function resolved_ok(kind, url)
-    if kind == "sp" or kind == "dz" then return watch_id(url) ~= nil end
+    if kind == "sp" or kind == "dz" or kind == "am" then return watch_id(url) ~= nil end
     if kind == "rd" or kind == "ms" or kind == "pc" then return url:match("^https?://[^%s]+$") ~= nil end
     if kind == "au" then return url:match("^https://api%.audius%.co/v1/tracks/%w+/stream%?app_name=[%w%-]+$") ~= nil end
     -- A song in a local folder: its file.
@@ -486,6 +488,9 @@ mp.add_hook("on_load", 5, function(hook)
     elseif url:sub(1, #AUDIUS) == AUDIUS then
         kind, key = "au", url:sub(#AUDIUS + 1)
         if not key:match("^%w+$") then return end
+    elseif url:sub(1, #APPLE) == APPLE then
+        kind, key = "am", url:sub(#APPLE + 1)
+        if not key:match("^%d+$") then return end
     elseif url:sub(1, #DEEZER) == DEEZER then
         kind, key = "dz", url:sub(#DEEZER + 1)
         if not key:match("^%d+$") then return end
@@ -534,7 +539,7 @@ mp.add_hook("on_load", 5, function(hook)
             msg.error("podcast episode " .. key .. " can't be opened: " .. tostring(out and out.message or "helper failed"))
         elseif kind == "rd" then
             msg.error("radio station " .. key .. " can't be reached: " .. tostring(out and out.message or "helper failed"))
-        elseif kind == "sp" or kind == "dz" then
+        elseif kind == "sp" or kind == "dz" or kind == "am" then
             msg.warn("no YouTube Music match for Spotify song " .. key .. ": " .. tostring(out and out.message or "helper failed"))
         else
             msg.error("cloud song " .. key .. " can't be opened: " .. tostring(out and out.message or "helper failed"))

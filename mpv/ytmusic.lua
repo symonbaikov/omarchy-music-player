@@ -406,9 +406,21 @@ local function note_play(entry_id, played, reason)
     })
 end
 
+-- Repeat one: mpv starts the song over without ending it, so each time it
+-- comes round from its end it is noted as played through.
+local loop_prev = 0
+mp.observe_property("time-pos", "number", function(_, t)
+    if not t then return end
+    if t < 2 and last_duration > 20 and loop_prev > last_duration - 3
+        and mp.get_property("loop-file", "no") ~= "no" then
+        note_play(loaded_entry, loop_prev, "eof")
+    end
+    loop_prev = t
+end)
+
 mp.register_event("end-file", function(e)
     local t, entry_id = played_to, e.playlist_entry_id
-    played_to = 0
+    played_to, loop_prev = 0, 0
     if entry_id and entry_id == loaded_entry then note_play(entry_id, t, e.reason) end
     if e.reason ~= "eof" and e.reason ~= "error" then return end
     -- Only a song that opened and played; one that never opened is skipped

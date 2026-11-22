@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.symonbaikov.ytmusic-mpv",
   "name": "Omarchy Music Player",
-  "version": "0.6.0",
+  "version": "1.0.0",
   "author": "Symon Baikov",
   "license": "MIT",
   "homepage": "https://github.com/symonbaikov/omarchy-ytmusic-mpv",

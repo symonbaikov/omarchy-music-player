@@ -6,9 +6,14 @@ to. My Music → **Make an AI Mix** (or
 
 1. Optionally say what you're in the mood for: "epic for work", "calmer",
    "music from games I haven't heard".
-2. **Make my AI Mix**. About half a minute later a notification says it's
+2. Optionally pick the **languages** its songs are sung in (Songs in:
+   Russian, English …, or Instrumental for music without singing). Any
+   language until you pick one; the choice is kept, also for the daily mix.
+   Your favorites can be in other languages: the AI takes your taste from
+   them, and the language from this.
+3. **Make my AI Mix**. About half a minute later a notification says it's
    ready, with **Play** and **Open**.
-3. Once turned on, it's made again each day by itself. Turn it off in
+4. Once turned on, it's made again each day by itself. Turn it off in
    settings (AI Mix).
 
 ## How it works
@@ -33,5 +38,6 @@ to. My Music → **Make an AI Mix** (or
 
 Only while AI Mix is on, and only to your agent's provider (Anthropic for
 Claude, OpenAI for Codex …): the artists and songs you play most, your liked
-songs, the artists you skip, and your mood if you typed one. Never the
+songs, the artists you skip, your mood if you typed one, and the languages
+you picked. Never the
 history itself, your accounts or anything else.

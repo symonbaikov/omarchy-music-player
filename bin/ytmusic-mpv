@@ -6156,7 +6156,7 @@ Here is what this listener plays (from their own player; "liked" are songs they 
 {profile}
 
 {wish}
-
+{languages}
 Pick {count} real, existing songs (exact artist and title as released) this listener will probably love:
 - about a third close to what they play most (other songs by those artists, or very near),
 - the rest new discoveries in the same spirit that they have most likely not heard,
@@ -6164,6 +6164,38 @@ Pick {count} real, existing songs (exact artist and title as released) this list
 Give a short title for the playlist (2-5 words) and, for each song, one short reason (under 12 words) tied to their taste.
 Answer with JSON only, nothing else:
 {{"title": "...", "about": "one sentence", "songs": [{{"artist": "...", "title": "...", "why": "..."}}]}}"""
+
+
+# Languages the AI Mix can be asked for (setting aiLanguages, "ru,en"), and
+# "instrumental" for music without singing.
+AI_LANGUAGES = {"en": "English", "ru": "Russian", "uk": "Ukrainian", "es": "Spanish", "pt": "Portuguese",
+                "fr": "French", "de": "German", "it": "Italian", "pl": "Polish", "tr": "Turkish",
+                "ja": "Japanese", "ko": "Korean", "zh": "Chinese", "hi": "Hindi", "ar": "Arabic"}
+
+
+def ai_languages(value):
+    """The known languages in a setting like "ru,en,instrumental", in order."""
+    out = []
+    for code in str(value or "").lower().replace(" ", "").split(","):
+        if (code in AI_LANGUAGES or code == "instrumental") and code not in out:
+            out.append(code)
+    return out
+
+
+def languages_line(codes):
+    """The prompt's rule for the chosen languages ("" for any)."""
+    names = [AI_LANGUAGES[c] for c in codes if c in AI_LANGUAGES]
+    sung = " or ".join(names) if len(names) < 3 else ", ".join(names[:-1]) + " or " + names[-1]
+    if names and "instrumental" in codes:
+        rule = f"Only songs sung in {sung}, or instrumental music without singing."
+    elif names:
+        rule = f"Only songs sung in {sung}."
+    elif "instrumental" in codes:
+        rule = "Only instrumental music, without singing."
+    else:
+        return ""
+    return (rule + " This is a firm rule for every song, including the ones close to their favorites;"
+            " their favorites may be in other languages: take the taste from them, not the language.\n")
 
 
 def ask_agent(prompt):
@@ -6212,9 +6244,10 @@ def find_on_youtube(song):
 
 
 def cmd_ai_mix(args):
-    """ai-mix [--prompt TEXT] [--browser B]: a new AI Mix."""
+    """ai-mix [--prompt TEXT] [--languages ru,en,instrumental] [--browser B]: a new AI Mix."""
     browser = check_browser(opt(args, "--browser", "none"))
     wish = clean_text(opt(args, "--prompt", ""), 300)
+    languages = ai_languages(opt(args, "--languages", ""))
     # --if-older S (the daily remake): nothing to do while the mix is newer.
     if_older = opt(args, "--if-older", "")
     if if_older.isdigit():
@@ -6230,7 +6263,7 @@ def cmd_ai_mix(args):
     prompt = AI_PROMPT.format(profile=json.dumps({k: v for k, v in profile.items() if k not in ("plays", "likes")},
                                                  ensure_ascii=False, indent=1),
                               wish=f"They asked for: {wish}" if wish else "Make it a mix for everyday listening.",
-                              count=AI_SONGS)
+                              languages=languages_line(languages), count=AI_SONGS)
     try:
         answer, agent = ask_agent(prompt)
     except RuntimeError as exc:
@@ -6250,7 +6283,8 @@ def cmd_ai_mix(args):
     if len(items) < 5:
         fail("The AI's picks couldn't be found on YouTube Music; try again")
     mix = {"title": clean_text(answer.get("title"), 60) or "AI Mix", "about": clean_text(answer.get("about"), 200),
-           "prompt": wish, "agent": agent, "createdAt": int(time.time()), "items": items[:AI_SONGS]}
+           "prompt": wish, "languages": languages, "agent": agent, "createdAt": int(time.time()),
+           "items": items[:AI_SONGS]}
     os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
     write_json_atomic(AI_MIX_PATH, mix)
     emit({"type": "aiMix", "state": "done", "title": mix["title"], "count": len(mix["items"]), "agent": agent})

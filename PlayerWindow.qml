@@ -1587,7 +1587,22 @@ FloatingWindow {
             model: visible ? win.p.lyrics.lines : []
             // Room above the first line and below the last, so either can
             // sit where the playing line does.
-            header: Item { width: lyricView.width; height: win.lyricsSynced ? lyricView.height * 0.3 : 0 }
+            // Lyrics without timings (none on LRCLIB yet): say so, or they
+            // look like timed lyrics that stopped following the song.
+            header: Item {
+              width: lyricView.width
+              height: win.lyricsSynced ? lyricView.height * 0.3 : untimed.implicitHeight + Style.space(18)
+              Txt {
+                id: untimed
+                visible: !win.lyricsSynced
+                width: parent.width
+                text: Model.GLYPH.lyrics + "  " + win.t("full.lyricsUntimed")
+                color: win.dim
+                font.pixelSize: Style.font.body
+                wrapMode: Text.Wrap
+                elide: Text.ElideNone
+              }
+            }
             footer: Item {
               width: lyricView.width
               height: Math.max(lyricSource.implicitHeight + Style.space(30), win.lyricsSynced ? lyricView.height * 0.6 : 0)
@@ -1609,7 +1624,8 @@ FloatingWindow {
             Timer { id: resumeFollow; interval: 3000; onTriggered: { lyricView.userScrolled = false; lyricView.follow(true) } }
 
             function follow(animate) {
-              if (!win.lyricsSynced || userScrolled || !visible || count === 0) return
+              if (!win.lyricsSynced) { roughFollow(animate); return }
+              if (userScrolled || !visible || count === 0) return
               var i = Math.max(0, win.lyricLine)
               var from = contentY
               positionViewAtIndex(i, ListView.Beginning)
@@ -1620,6 +1636,29 @@ FloatingWindow {
               else contentY = to
             }
             NumberAnimation { id: scrollAnim; target: lyricView; property: "contentY"; duration: 650; easing.type: Easing.OutCubic }
+
+            // Untimed lyrics: glide down with the song's progress, a second
+            // at a time, so they're roughly where the song is.
+            function roughFollow(animate) {
+              if (win.lyricsSynced || userScrolled || !visible || count === 0) return
+              var room = contentHeight - height
+              if (room <= 0) return
+              var to = originY + room * Model.roughLyricsFraction(win.p.position, win.p.duration)
+              if (animate && !Style.reduceMotion && Math.abs(to - contentY) < height) {
+                roughAnim.to = to
+                roughAnim.restart()
+              } else {
+                roughAnim.stop()
+                contentY = to
+              }
+            }
+            NumberAnimation { id: roughAnim; target: lyricView; property: "contentY"; duration: 1000; easing.type: Easing.Linear }
+            Timer {
+              interval: 1000
+              repeat: true
+              running: lyricView.visible && win.lyricsReady && !win.lyricsSynced && win.p.playing && !lyricView.userScrolled
+              onTriggered: lyricView.roughFollow(true)
+            }
             Connections {
               target: win
               function onLyricLineChanged() { lyricView.follow(true) }

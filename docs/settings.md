@@ -23,6 +23,7 @@ omarchy bar set io.github.symonbaikov.ytmusic-mpv playbackCookies On
 | `transition` | `Off` | `Peak mix`: switch songs climax to climax. |
 | `crossfade` | `6` | How long the two climaxes overlap in a peak mix, 2–16 seconds. |
 | `aiMix` | `Off` | `On`: your AI agent makes you a mix each day ([AI Mix](ai-mix.md)). |
+| `aiLanguages` | (empty) | The languages the AI Mix's songs are sung in, e.g. `ru,en` (`en`, `ru`, `uk`, `es`, `pt`, `fr`, `de`, `it`, `pl`, `tr`, `ja`, `ko`, `zh`, `hi`, `ar`, and `instrumental`). Empty: any. |
 | `tabs` | `yt,am,sp,sc,cl,rd,pc,my` | The tabs shown (the `+` tab sets it; `am` is Apple Music; also `dz` Deezer, `mc` Mixcloud, `au` Audius). |
 | `radioCountry` | (empty) | The Radio tab's country, e.g. `DE`. Empty: from your language setting. |
 | `soundcloudUser` | (empty) | Your SoundCloud name or profile link (the SoundCloud tab sets it). |

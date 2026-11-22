@@ -60,6 +60,17 @@ OverlayWindow {
     go("library")
   }
 
+  // Connect a cloud storage right here, on the Cloud page.
+  function addStorage() {
+    p.cloudError = ""
+    p.cloudFormOpen = true
+    p.switchService("cl")
+    go("library")
+  }
+
+  readonly property bool cloudFormShown: page === "library" && p.service === "cl"
+    && (p.svc.cl.setup !== "" || p.cloudFormOpen)
+
   function showBrowse() {
     p.openExplore()
     go("browse")
@@ -88,13 +99,23 @@ OverlayWindow {
       return
     }
     if (item.kind === "explore") {
-      if (item.id === "__cloudadd") p.openCloudForm()
+      if (item.id === "__cloudadd") addStorage()
       else showBrowse()
       return
     }
     listFrom = page === "list" ? listFrom : page
     p.openList(item)
     go("list")
+  }
+
+  // A storage was added: the form starts empty next time.
+  Connections {
+    target: win.p
+    function onCloudFormEpochChanged() { fullCloudPath.text = ""; fullCloudName.text = "" }
+  }
+
+  function connectStorage() {
+    p.connectCloud(fullCloudPath.text, fullCloudName.text)
   }
 
   function search(text) {
@@ -371,7 +392,7 @@ OverlayWindow {
           SideItem {
             glyph: Model.GLYPH.cloud
             label: win.t("cloud.addEntry")
-            onClicked: win.p.openCloudForm()
+            onClicked: win.addStorage()
           }
           SideItem {
             glyph: Model.GLYPH.settings
@@ -529,9 +550,10 @@ OverlayWindow {
           }
         }
 
-        // Not connected yet: the panel has the form.
+        // Spotify or SoundCloud not connected yet: the panel has their form.
         Column {
-          visible: win.p.service !== "yt" && win.p.svc[win.p.service].setup !== ""
+          visible: win.p.service !== "yt" && win.p.service !== "cl" && win.p.svc[win.p.service].setup !== ""
+          z: 1
           x: win.gutter
           anchors.top: libraryHeader.bottom
           anchors.topMargin: Style.space(30)
@@ -546,16 +568,10 @@ OverlayWindow {
             elide: Text.ElideNone
           }
           BigButton {
-            glyph: win.p.service === "cl" ? Model.GLYPH.cloud : Model.GLYPH.login
+            glyph: Model.GLYPH.login
             label: win.t("full.connect").arg(win.serviceLabel(win.p.service))
             filled: true
-            onClicked: {
-              if (win.p.service === "cl") { win.p.openCloudForm(); return }
-              var name = win.p.service
-              win.p.closeFull()
-              win.p.open()
-              win.p.switchService(name)
-            }
+            onClicked: win.p.connectInPanel(win.p.service)
           }
         }
 
@@ -572,6 +588,7 @@ OverlayWindow {
           text: {
             var s = win.p.service
             if (s !== "yt" && win.p.svc[s].setup !== "") return ""
+            if (win.cloudFormShown) return ""
             var error = s === "yt" ? win.p.playlistsError : win.p.svc[s].error
             if (error !== "") return win.t("error.prefix").arg(error)
             if (win.libraryCards.length > 0) return ""
@@ -582,6 +599,7 @@ OverlayWindow {
 
         GridView {
           id: grid
+          visible: count > 0 && !win.cloudFormShown
           anchors.left: parent.left
           anchors.leftMargin: win.gutter - Style.space(10)
           anchors.right: parent.right
@@ -606,6 +624,156 @@ OverlayWindow {
               item: modelData
               onClicked: win.activate(modelData, "")
             }
+          }
+        }
+      }
+
+      // Connect a cloud storage, in full screen.
+      Flickable {
+        id: cloudPage
+        visible: win.cloudFormShown
+        anchors.fill: parent
+        anchors.topMargin: win.gutter + Style.space(70)
+        contentHeight: cloudForm.implicitHeight + win.gutter * 2
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+        Column {
+          id: cloudForm
+          x: win.gutter
+          width: Math.min(cloudPage.width - win.gutter * 2, Style.space(720))
+          spacing: Style.space(18)
+
+          Txt {
+            width: parent.width
+            text: win.t("cloud.title")
+            font.pixelSize: Style.font.displayLarge
+            font.bold: true
+          }
+          Txt {
+            width: parent.width
+            text: win.p.rcloneInstalled ? win.t("cloud.body") : win.t("cloud.noRclone")
+            color: win.dim
+            font.pixelSize: Style.font.heading
+            wrapMode: Text.Wrap
+            elide: Text.ElideNone
+          }
+          BigButton {
+            visible: !win.p.rcloneInstalled
+            glyph: Model.GLYPH.download
+            label: win.t("cloud.installRclone")
+            filled: true
+            onClicked: win.p.installRclone()
+          }
+
+          Flow {
+            visible: win.p.rcloneInstalled
+            width: parent.width
+            spacing: Style.space(10)
+            Repeater {
+              model: Model.CLOUD_KINDS
+              Chip {
+                required property var modelData
+                label: modelData.label
+                selected: win.p.cloudKind === modelData.id
+                enabled: win.p.cloudBusy === ""
+                onClicked: { win.p.cloudKind = modelData.id; win.p.cloudKindTouched = true; win.p.cloudError = "" }
+              }
+            }
+          }
+          Txt {
+            visible: win.p.rcloneInstalled
+            width: parent.width
+            text: win.t("cloud.hint." + win.p.cloudKind)
+            color: win.dim
+            font.pixelSize: Style.font.subtitle
+            wrapMode: Text.Wrap
+            elide: Text.ElideNone
+          }
+
+          // A remote rclone already has.
+          Flow {
+            visible: win.p.rcloneInstalled && win.p.cloudKind === "remote" && win.p.cloudRemotes.length > 0
+            width: parent.width
+            spacing: Style.space(10)
+            Repeater {
+              model: win.p.cloudRemotes
+              Chip {
+                required property var modelData
+                label: modelData.name + "  ·  " + modelData.type
+                selected: win.p.cloudRemote === modelData.name
+                onClicked: win.p.cloudRemote = modelData.name
+              }
+            }
+          }
+          Txt {
+            visible: win.p.rcloneInstalled && win.p.cloudKind === "remote" && win.p.cloudRemotes.length === 0
+            width: parent.width
+            text: win.t("cloud.noRemotes")
+            color: win.dim
+            wrapMode: Text.Wrap
+            elide: Text.ElideNone
+          }
+
+          Repeater {
+            model: win.p.rcloneInstalled && win.p.cloudFormEpoch >= 0 ? win.p.cloudKindSpec.fields.slice() : []
+            FormField {
+              required property var modelData
+              width: cloudForm.width
+              label: win.t("cloud.field." + modelData)
+              secret: Model.SECRET_FIELDS.indexOf(modelData) >= 0
+              onEdited: function(value) { win.p.setCloudValue(modelData, value) }
+              onSubmitted: win.connectStorage()
+            }
+          }
+          FormField {
+            id: fullCloudPath
+            visible: win.p.rcloneInstalled
+            width: parent.width
+            label: win.t(win.p.cloudKind === "s3" ? "cloud.pathS3" : win.p.cloudKind === "smb" ? "cloud.pathSmb" : "cloud.path")
+            onSubmitted: win.connectStorage()
+          }
+          FormField {
+            id: fullCloudName
+            visible: win.p.rcloneInstalled
+            width: parent.width
+            label: win.t("cloud.name")
+            onSubmitted: win.connectStorage()
+          }
+
+          Row {
+            visible: win.p.rcloneInstalled
+            spacing: Style.space(12)
+            BigButton {
+              glyph: win.p.cloudBusy !== "" ? Model.GLYPH.loading : Model.GLYPH.cloud
+              label: win.p.cloudBusy === "waiting" ? win.t("cloud.waiting")
+                : win.p.cloudBusy === "checking" ? win.t("cloud.checking")
+                : win.p.cloudKindSpec.oauth ? win.t("cloud.signIn").arg(win.p.cloudKindSpec.label) : win.t("cloud.connect")
+              filled: true
+              enabled: win.p.cloudBusy === ""
+              onClicked: win.connectStorage()
+            }
+            BigButton {
+              visible: win.p.svc.cl.setup === "" && win.p.cloudBusy === ""
+              label: win.t("download.cancel")
+              onClicked: win.p.cloudFormOpen = false
+            }
+          }
+          Txt {
+            visible: win.p.cloudError !== ""
+            width: parent.width
+            text: win.p.cloudError
+            color: Commons.Color.urgent
+            font.pixelSize: Style.font.subtitle
+            wrapMode: Text.Wrap
+            elide: Text.ElideNone
+          }
+          BigButton {
+            visible: win.p.cloudError !== ""
+            glyph: Model.GLYPH.alert
+            label: win.t("report.button")
+            onClicked: win.p.reportProblem(win.t("tab.cl"), win.p.cloudError)
           }
         }
       }
@@ -1562,6 +1730,84 @@ OverlayWindow {
       hoverEnabled: true
       cursorShape: Qt.PointingHandCursor
       onClicked: tr.clicked()
+    }
+  }
+
+  // A choice among several, as a pill (kinds of storage, rclone remotes).
+  component Chip: Rectangle {
+    id: chip
+    property string label: ""
+    property bool selected: false
+    signal clicked()
+    implicitWidth: chipText.implicitWidth + Style.space(32)
+    implicitHeight: Style.space(38)
+    radius: height / 2
+    opacity: enabled ? 1 : 0.45
+    color: selected ? win.accent
+      : chipMouse.containsMouse ? Qt.rgba(win.fg.r, win.fg.g, win.fg.b, 0.16) : Qt.rgba(win.fg.r, win.fg.g, win.fg.b, 0.08)
+    Text {
+      id: chipText
+      anchors.centerIn: parent
+      textFormat: Text.PlainText
+      text: chip.label
+      color: chip.selected ? win.bg : win.fg
+      font.family: win.fontFamily
+      font.pixelSize: Style.font.subtitle
+      font.bold: chip.selected
+    }
+    MouseArea {
+      id: chipMouse
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onClicked: chip.clicked()
+    }
+  }
+
+  // A labelled text field; Enter submits, Esc hands the keys back.
+  component FormField: Column {
+    id: field
+    property string label: ""
+    property bool secret: false
+    property alias text: input.text
+    signal edited(string value)
+    signal submitted()
+    spacing: Style.space(6)
+    Txt {
+      width: field.width
+      text: field.label
+      color: win.dim
+      font.pixelSize: Style.font.caption
+      font.bold: true
+      font.letterSpacing: 1.1
+    }
+    BorderSurface {
+      width: field.width
+      implicitHeight: Style.space(44)
+      radius: Style.cornerRadius
+      color: Style.controlFill(input.activeFocus, false, win.fg, win.accent)
+      borderSpec: Border.controlSpec(input.activeFocus ? "focus" : "normal", win.fg, win.accent)
+      MouseArea {
+        anchors.fill: parent
+        cursorShape: Qt.IBeamCursor
+        onClicked: input.forceActiveFocus()
+      }
+      TextInput {
+        id: input
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.margins: Style.space(14)
+        anchors.verticalCenter: parent.verticalCenter
+        clip: true
+        color: win.fg
+        font.family: win.fontFamily
+        font.pixelSize: Style.font.heading
+        selectByMouse: true
+        echoMode: field.secret ? TextInput.Password : TextInput.Normal
+        onTextEdited: field.edited(text)
+        onAccepted: { keys.forceActiveFocus(); field.submitted() }
+        Keys.onEscapePressed: function(event) { keys.forceActiveFocus(); event.accepted = true }
+      }
     }
   }
 

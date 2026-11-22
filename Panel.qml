@@ -172,7 +172,7 @@ Panel {
   }
 
   function openCloudForm() {
-    fullOpen = false
+    if (leaveFull(function() { root.openCloudForm() })) return
     cloudError = ""
     cloudFormOpen = true
     if (service !== "cl") switchService("cl")
@@ -187,10 +187,13 @@ Panel {
     cloudValues = next
   }
 
-  function connectCloud() {
+  // `path` and `title` come from whichever form was used (the panel's or
+  // the full-screen view's); the panel's own fields when left out.
+  function connectCloud(path, title) {
     if (cloudAddProc.running) return
     if (cloudKind === "remote" && cloudRemote === "") { cloudError = strings.t("cloud.pickRemote"); return }
-    var form = Model.cloudForm(cloudKind, cloudValues, cloudRemote, cloudPathField.text, cloudTitleField.text)
+    var form = Model.cloudForm(cloudKind, cloudValues, cloudRemote,
+      path !== undefined ? path : cloudPathField.text, title !== undefined ? title : cloudTitleField.text)
     if (!form) return
     cloudError = ""
     cloudBusy = cloudKindSpec.oauth ? "waiting" : "checking"
@@ -949,6 +952,23 @@ Panel {
 
   function closeFull() { fullOpen = false }
 
+  // Spotify's and SoundCloud's setup lives in the panel: leave full screen,
+  // then open the panel on that tab once the full-screen window is gone
+  // (opened in the same moment, the panel would lose the keyboard to it).
+  function connectInPanel(name) {
+    leaveFull(function() { root.switchService(name); if (!root.opened) root.open() })
+  }
+
+  // Panel screens asked for from full screen: leave it and do `then` in the
+  // same moment (the panel takes the keyboard as the full-screen window
+  // goes). Returns false when not in full screen.
+  function leaveFull(then) {
+    if (!fullOpen) return false
+    fullOpen = false
+    then()
+    return true
+  }
+
   // ---- explore ---------------------------------------------------------------
   function openSoundCloudSearch() {
     exploreService = "sc"
@@ -1035,7 +1055,7 @@ Panel {
 
   // ---- download --------------------------------------------------------------
   function openDownload(track) {
-    fullOpen = false
+    if (leaveFull(function() { root.openDownload(track) })) return
     if (!track || !Model.TRACK_KEY_RE.test(String(track.id))) return
     downloadTrack = { id: track.id, title: track.title, artist: track.artist || "" }
     if (view !== "download") viewBeforeDownload = view === "addTo" || view === "settings" ? "playlists" : view
@@ -1426,7 +1446,7 @@ Panel {
   }
 
   function openSettings() {
-    fullOpen = false
+    if (leaveFull(function() { root.openSettings() })) return
     if (view !== "settings") viewBeforeSettings = view === "addTo" ? "playlists" : view
     if (view === "addTo") closeAddTo()
     view = "settings"
@@ -1513,7 +1533,7 @@ Panel {
   // "Add to playlist": the list switches to your playlists; picking one adds
   // the song and returns to where you were.
   function openAddTo(track) {
-    fullOpen = false
+    if (leaveFull(function() { root.openAddTo(track) })) return
     if (!track || !Model.TRACK_KEY_RE.test(String(track.id))) return
     if (svc.my.items.length === 0) loadService("my", false)
     if (!Model.isYouTube(track.id)) {
@@ -1756,7 +1776,7 @@ Panel {
       else if (page === "browse") fullView.showBrowse()
       else if (page === "home" || page === "nowplaying") fullView.go(page)
     }
-    function cloud(): void { root.openCloudForm() }
+    function cloud(): void { root.fullOpen ? fullView.addStorage() : root.openCloudForm() }
   }
 
   onOpenedChanged: {

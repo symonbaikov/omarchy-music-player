@@ -28,7 +28,7 @@ jobs:
       - name: Manifest is valid JSON
         run: python -c "import json; m = json.load(open('manifest.json')); print(m['id'], m['version'])"
       - name: QML model tests
-        run: node --test tests/
+        run: node --test tests/*.test.mjs
       - name: Helper tests
         run: python -I -m unittest discover -s tests -p 'test_*.py'
       - name: Lua script compiles

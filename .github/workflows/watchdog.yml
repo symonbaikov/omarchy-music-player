@@ -153,7 +153,7 @@ jobs:
                that.
             3. If the plugin can be fixed: make the smallest correct change,
                add or update a test, and run every test:
-               `node --test tests/`, `python -I -m unittest discover -s tests -p 'test_*.py'`,
+               `node --test tests/*.test.mjs`, `python -I -m unittest discover -s tests -p 'test_*.py'`,
                `luac5.4 -p mpv/ytmusic.lua`, then `python tools/watchdog.py` again.
                Bump the patch version in manifest.json. Commit on a new branch
                `auto-fix/watchdog-${{ needs.report.outputs.issue }}`, push it, and open a pull request with

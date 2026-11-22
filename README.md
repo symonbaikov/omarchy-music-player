@@ -292,7 +292,7 @@ omarchy bar set io.github.symonbaikov.ytmusic-mpv playbackCookies On
 ## Development
 
 ```bash
-node --test tests/
+node --test tests/*.test.mjs
 python3 -I -m unittest discover -s tests -p 'test_*.py'
 omarchy plugin validate .
 ```

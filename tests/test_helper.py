@@ -217,9 +217,12 @@ class PlayerCookies(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
         d = self.dir.name
-        self.saved = (h.SOCKET_PATH, h.SESSION_PATH, h.PID_PATH, h.our_mpv_pid)
+        self.saved = (h.SOCKET_PATH, h.SESSION_PATH, h.PID_PATH, h.our_mpv_pid, h.widget_settings, h.SessionLock)
         h.SOCKET_PATH, h.SESSION_PATH, h.PID_PATH = (os.path.join(d, n) for n in ("s", "session.json", "pid"))
         pathlib.Path(h.SESSION_PATH).write_text("{}")
+        # The widget's settings in shell.json, as the user has them now.
+        self.settings = {}
+        h.widget_settings = lambda: self.settings
         self.alive = True
         h.our_mpv_pid = lambda: 4242 if self.alive else None
         self.mpv = None
@@ -227,7 +230,7 @@ class PlayerCookies(unittest.TestCase):
     def tearDown(self):
         if self.mpv:
             self.mpv.close()
-        h.SOCKET_PATH, h.SESSION_PATH, h.PID_PATH, h.our_mpv_pid = self.saved
+        h.SOCKET_PATH, h.SESSION_PATH, h.PID_PATH, h.our_mpv_pid, h.widget_settings, h.SessionLock = self.saved
         self.dir.cleanup()
 
     def options(self, browser, cookies):
@@ -248,6 +251,34 @@ class PlayerCookies(unittest.TestCase):
         self.mpv = FakeMpv(h.SOCKET_PATH, {"cookies-from-browser": "chromium"})
         self.assertEqual(h.apply_player_cookies(self.options("firefox", True)), "applied")
         self.assertEqual(self.mpv.options, {"cookies-from-browser": "firefox"})
+
+    def test_settings_changed_while_loading_win(self):
+        # A radio started with cookies On (and Firefox) that finishes after
+        # the user turned them off, or picked another browser, must not use them.
+        self.mpv = FakeMpv(h.SOCKET_PATH, {"cookies-from-browser": "firefox"})
+        self.settings = {"browser": "firefox", "playbackCookies": "Off"}
+        self.assertIsNone(h.playback_cookie_spec(self.options("firefox", True)))
+        self.assertEqual(h.apply_player_cookies(self.options("firefox", True)), "applied")
+        self.assertEqual(self.mpv.options, {})
+        self.settings = {"browser": "chromium", "playbackCookies": "On"}
+        self.assertIsNone(h.playback_cookie_spec(self.options("firefox", True)))
+        self.settings = {"browser": "firefox", "playbackCookies": "On"}
+        self.assertEqual(h.playback_cookie_spec(self.options("firefox", True)), "firefox")
+
+    def test_revoking_does_not_wait_for_the_session_lock(self):
+        # A radio holding the lock while it loads must not delay revocation.
+        self.mpv = FakeMpv(h.SOCKET_PATH, {"cookies-from-browser": "firefox"})
+
+        class Held:
+            def __enter__(self):
+                raise AssertionError("revocation waited for the lock")
+
+            def __exit__(self, *exc):
+                return False
+        h.SessionLock = Held
+        out = capture(h.cmd_cookies, ["--browser", "firefox", "--playback-cookies", "0"])
+        self.assertEqual(out[-1], {"type": "cookies", "state": "applied"})
+        self.assertEqual(self.mpv.options, {})
 
     def test_unconfirmed_revocation_stops_the_player(self):
         self.mpv = FakeMpv(h.SOCKET_PATH, {"cookies-from-browser": "firefox"}, honor_set=False)

@@ -455,9 +455,12 @@ Panel {
     cookieSyncPending = true
     runCookieSync()
   }
-  // A play or radio started with the old settings runs first; this follows.
+  // Turning cookies off reaches the running player at once, even while a
+  // play or a radio is loading (they check the settings again before they
+  // start or keep a player). Turning them on waits for those to finish.
   function runCookieSync() {
-    if (!cookieSyncPending || cookiesProc.running || playProc.running || radioProc.running) return
+    var revoking = !playbackCookies || browser === "none"
+    if (!cookieSyncPending || cookiesProc.running || (!revoking && (playProc.running || radioProc.running))) return
     cookieSyncPending = false
     cookiesProc.command = helper(["cookies", "--browser", browser, "--playback-cookies", playbackCookies ? "1" : "0"])
     cookiesProc.running = true

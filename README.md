@@ -71,6 +71,15 @@ browser; the player reads that login, and the browser doesn't have to run.
 Then click the music note in your bar. Spotify, SoundCloud, your files and a
 server connect from their tabs, in a click or two.
 
+To remove it:
+
+```bash
+omarchy plugin remove io.github.symonbaikov.ytmusic-mpv
+```
+
+Your lists and settings stay; delete `~/.cache/io.github.symonbaikov.ytmusic-mpv/`
+and `~/.local/share/io.github.symonbaikov.ytmusic-mpv/` to remove them too.
+
 ## Use
 
 | | |

@@ -1385,10 +1385,20 @@ def track_url(track):
 
 def playback_cookie_spec(options):
     """The --cookies-from-browser value the player should pass to yt-dlp, or
-    None when playback must not use cookies."""
-    if options["playback_cookies"] and options["browser"] != "none":
-        return cookie_spec(options["browser"])
-    return None
+    None when playback must not use cookies.
+
+    The settings as they are now win over the ones a command was started
+    with: a play or a radio still loading when playback cookies were turned
+    off, or the browser changed, must not start or keep a player with the
+    old access (the sync that follows sets the new browser)."""
+    if not (options["playback_cookies"] and options["browser"] != "none"):
+        return None
+    now = widget_settings()
+    if "playbackCookies" in now and now.get("playbackCookies") != "On":
+        return None
+    if "browser" in now and str(now.get("browser") or "") != options["browser"]:
+        return None
+    return cookie_spec(options["browser"])
 
 
 def end_session():
@@ -1425,8 +1435,15 @@ def apply_player_cookies(options):
 
 def cmd_cookies(args):
     options = player_options(args)
-    with SessionLock():
+    if playback_cookie_spec(options) is None:
+        # Taking access away doesn't wait for a play or a radio that holds
+        # the lock while it loads: the player's next song must not use it.
+        # (Those check the current settings again before they start or keep
+        # a player.)
         state = apply_player_cookies(options)
+    else:
+        with SessionLock():
+            state = apply_player_cookies(options)
     emit({"type": "stopped"} if state == "stopped" else {"type": "cookies", "state": state})
 
 

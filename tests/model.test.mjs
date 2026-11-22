@@ -501,3 +501,18 @@ test("podcast episodes, shows and subscriptions", () => {
   assert.deepEqual(Array.from(subs.ids), ["pc:2abd05655129946b"])
   assert.equal(M.validCover("https://evil.example/x.jpg"), "")
 })
+
+test("Deezer songs, lists and covers", () => {
+  assert.ok(M.TRACK_KEY_RE.test("dz:668826392"))
+  assert.equal(M.serviceOf("dz:668826392"), "dz")
+  assert.equal(M.canDownload("dz:668826392"), true)
+  const lists = M.parseLine(JSON.stringify({ type: "playlists", service: "dz", items: [
+    { id: "dz:fav", title: "Favorite tracks" }, { id: "dz:pl:276102231", title: "2014",
+      cover: "https://cdn-images.dzcdn.net/images/cover/633eedc798aa3012c6b61b78f5d7e4c9-f96f9c62426dcb114ffc1f4bba7f2158/250x250-000000-80-0-0.jpg" },
+    { id: "dz:chart", title: "Top tracks" }, { id: "dz:pl:abc", title: "bad" }] }))
+  assert.deepEqual(Array.from(lists.items, i => i.id), ["dz:fav", "dz:pl:276102231", "dz:chart"])
+  assert.ok(lists.items[1].cover)
+  assert.equal(M.validCover("https://cdn-images.dzcdn.net/images/cover/../x.jpg"), "")
+  assert.ok(M.SERVICES.includes("dz"))
+  assert.equal(Array.from(M.visibleTabs("")).includes("dz"), false)
+})

@@ -1021,6 +1021,42 @@ def capture(fn, args):
     return [json.loads(line) for line in out.getvalue().splitlines()]
 
 
+class Deezer(unittest.TestCase):
+    def test_profile_links(self):
+        self.assertEqual(h.deezer_user("123456"), "123456")
+        self.assertEqual(h.deezer_user("https://www.deezer.com/en/profile/987654321"), "987654321")
+        self.assertEqual(h.deezer_user("https://www.deezer.com/profile/5?x=1"), "5")
+        for bad in ("", "evil", "https://evil.example/profile/1x", "javascript:1"):
+            self.assertEqual(h.deezer_user(bad), "", bad)
+
+    def test_track_and_covers(self):
+        t = h.dz_track({"id": 668826392, "title": "Ghost Love Score\n", "duration": 600, "artist": {"name": "Nightwish"},
+                        "album": {"title": "Once", "md5_image": "a" * 32}})
+        self.assertEqual(t["id"], "dz:668826392")
+        self.assertEqual(t["title"], "Ghost Love Score")
+        self.assertEqual(t["cover"], "https://cdn-images.dzcdn.net/images/cover/" + "a" * 32 + "/250x250-000000-80-0-0.jpg")
+        self.assertTrue(h.TRACK_KEY_RE.match(t["id"]))
+        self.assertIsNone(h.dz_track({"id": "x"}))
+        self.assertTrue(h.dz_image("playlist", "-".join(["b" * 32] * 4)))
+        self.assertIsNone(h.dz_image("cover", "../x"))
+
+    def test_lists_queue_and_matches(self):
+        for lid in ("dz:fav", "dz:chart", "dz:search", "dz:pl:276102231"):
+            self.assertTrue(h.is_list_id(lid), lid)
+        self.assertFalse(h.is_list_id("dz:pl:x"))
+        self.assertEqual(h.track_url({"id": "dz:668826392"}), "ytmusic-deezer://668826392")
+        self.assertEqual(h.mix_entry("ytmusic-deezer://668826392")[0], "dz:668826392")
+        self.assertEqual(h.source_of("dz:668826392"), "dz")
+        with tempfile.TemporaryDirectory() as d:
+            saved = h.DZ_MATCH_PATH
+            h.DZ_MATCH_PATH = os.path.join(d, "m.json")
+            try:
+                h.write_json_atomic(h.DZ_MATCH_PATH, {"668826392": "XZcI70MPE5A"})
+                self.assertEqual(h.resolve_spotify("dz:668826392"), "XZcI70MPE5A")
+            finally:
+                h.DZ_MATCH_PATH = saved
+
+
 class Podcasts(unittest.TestCase):
     FEED = b"""<?xml version="1.0"?>
 <rss xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel>

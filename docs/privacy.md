@@ -35,6 +35,10 @@ before use.
   only to `accounts.spotify.com` and `api.spotify.com`. Songs are matched on
   YouTube Music without an account; matches are cached. Disconnect in
   settings.
+- **Deezer**: your public profile, playlists, charts and search are read
+  from `api.deezer.com` without an account; covers come from Deezer's image
+  host. Songs are matched on YouTube Music without an account; matches are
+  cached.
 - **SoundCloud**: read by yt-dlp with the same browser login as YouTube.
   Album art from Spotify's and SoundCloud's image hosts.
 - **Music servers**: only your server (and plex.tv for Plex's sign-in and to

@@ -53,6 +53,7 @@
       "downloadFormat": "mp3",
       "downloadCover": "On",
       "soundcloudUser": "",
+      "deezerUser": "",
       "spotifyClientId": ""
     },
     "schema": [
@@ -243,6 +244,13 @@
         "label": "SoundCloud profile",
         "defaultValue": "",
         "description": "Your SoundCloud name or profile link, for the SoundCloud tab (likes and playlists)."
+      },
+      {
+        "key": "deezerUser",
+        "type": "string",
+        "label": "Deezer profile",
+        "defaultValue": "",
+        "description": "Your Deezer profile link or number, for the Deezer tab (favorites and playlists)."
       },
       {
         "key": "spotifyClientId",

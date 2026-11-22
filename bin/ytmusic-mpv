@@ -123,11 +123,11 @@ VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 # SoundCloud, "sp:<id>" for Spotify (played from its YouTube Music match),
 # "cl:<source>/<hash>" for a file in your own cloud storage (see "cloud").
 TRACK_KEY_RE = re.compile(r"^(?:[A-Za-z0-9_-]{11}|sc:(?:[0-9]{1,20}|[A-Za-z0-9_-]{1,100}/[A-Za-z0-9_-]{1,200})|sp:[A-Za-z0-9]{22}"
-                          r"|cl:[a-f0-9]{8}/[a-f0-9]{16}|ms:[a-f0-9]{8}/[A-Za-z0-9_-]{1,64}|rd:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|pc:[a-f0-9]{16}/[a-f0-9]{16})$")
+                          r"|cl:[a-f0-9]{8}/[a-f0-9]{16}|ms:[a-f0-9]{8}/[A-Za-z0-9_-]{1,64}|rd:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|pc:[a-f0-9]{16}/[a-f0-9]{16}|dz:[0-9]{1,20})$")
 SERVICE_LIST_RE = re.compile(
     r"^(?:sc:(?:likes|sets):[A-Za-z0-9_-]{1,100}|sc:set:[A-Za-z0-9_-]{1,100}/[A-Za-z0-9_-]{1,200}|sc:search"
     r"|sp:liked|sp:pl:[A-Za-z0-9]{22}|mix:all|mix:[a-f0-9]{8}|cl:[a-f0-9]{8}(?::[a-f0-9]{16})?"
-    r"|rd:(?:fav|top|vote|search|country:[A-Z]{2}|tag:[a-z0-9-]{1,40})|pc:(?:new|[a-f0-9]{16})"
+    r"|rd:(?:fav|top|vote|search|country:[A-Z]{2}|tag:[a-z0-9-]{1,40})|pc:(?:new|[a-f0-9]{16})|dz:(?:fav|chart|search|pl:[0-9]{1,20})"
     r"|ms:[a-f0-9]{8}:(?:fav|rnd|al:[A-Za-z0-9_-]{1,64}|pl:[A-Za-z0-9_-]{1,64})|ai:mix|hist:recent)$")
 SC_USER_RE = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
 SPOTIFY_SCHEME = "ytmusic-spotify://"
@@ -176,7 +176,7 @@ def is_list_id(value):
 
 
 def source_of(key):
-    return key[:2] if key[:3] in ("sc:", "sp:", "cl:", "rd:", "ms:", "pc:") else "yt"
+    return key[:2] if key[:3] in ("sc:", "sp:", "cl:", "rd:", "ms:", "pc:", "dz:") else "yt"
 
 
 def check_playlist_id(value):
@@ -382,6 +382,8 @@ def fetch_tracks(playlist_id, browser):
         return fetch_sc_tracks(playlist_id, browser)
     if playlist_id.startswith("sp:"):
         return fetch_sp_tracks(playlist_id)
+    if playlist_id.startswith("dz:"):
+        return fetch_dz_tracks(playlist_id)
     url, limit = list_source(playlist_id)
     data = run_ytdlp(url, browser, limit)
     items = []
@@ -674,16 +676,20 @@ def match_score(want, cand):
     return score
 
 
+MATCHED = ("sp:", "dz:")
+
+
 def resolve_spotify(key):
-    """The YouTube Music video id for a Spotify song, cached."""
+    """The YouTube Music video id for a Spotify or Deezer song, cached."""
     sp_id = key[3:]
-    matches = read_json(SP_MATCH_PATH)
+    match_path = DZ_MATCH_PATH if key.startswith("dz:") else SP_MATCH_PATH
+    matches = read_json(match_path)
     matches = matches if isinstance(matches, dict) else {}
     if VIDEO_ID_RE.match(str(matches.get(sp_id) or "")):
         return matches[sp_id]
-    known = (read_json(SP_TRACKS_PATH) or {}).get(key)
+    known = (read_json(DZ_TRACKS_PATH if key.startswith("dz:") else SP_TRACKS_PATH) or {}).get(key)
     if not known:
-        raise RuntimeError("unknown Spotify song; open its playlist again")
+        raise RuntimeError("unknown song; open its playlist again")
     best, best_score = None, 1.5
     queries = ([known["isrc"]] if known.get("isrc") else []) + [f"{known.get('artist', '')} {known.get('title', '')}".strip()]
     for q in queries:
@@ -700,7 +706,7 @@ def resolve_spotify(key):
     if not best:
         raise RuntimeError(f"no YouTube Music match for {known.get('title')}")
     matches[sp_id] = best
-    write_json_atomic(SP_MATCH_PATH, matches)
+    write_json_atomic(match_path, matches)
     return best
 
 
@@ -725,7 +731,7 @@ def cmd_resolve(args):
             url, start = podcast_stream(key)
             emit({"type": "resolved", "key": key, "url": url, "start": start})
             return
-        vid = resolve_spotify(key) if key.startswith("sp:") else None
+        vid = resolve_spotify(key) if key[:3] in MATCHED else None
     except RuntimeError as exc:
         fail(str(exc))
     emit({"type": "resolved", "key": key, "url": f"https://music.youtube.com/watch?v={vid}" if vid else track_url({"id": key})})
@@ -833,12 +839,23 @@ def clean_track(t):
     return out
 
 
+def liked_list_ids():
+    """Your liked songs in each service (their saved copies are read)."""
+    settings = widget_settings()
+    ids = ["LM", "sp:liked"]
+    if sc_user(settings.get("soundcloudUser")):
+        ids.append("sc:likes:" + sc_user(settings.get("soundcloudUser")))
+    if str(settings.get("deezerUser") or "").strip():
+        ids.append("dz:fav")
+    return ids
+
+
 def liked_everywhere(browser):
     """My Mix: the liked songs from every connected service, each list
     shuffled and then taken in turn, so the services alternate. The order is
     the same all day (seeded by the date), so the list and the queue agree."""
     lists = []
-    for list_id in ["LM", "sp:liked"] + ([f"sc:likes:{u}"] if (u := sc_user(widget_settings().get("soundcloudUser"))) else []):
+    for list_id in liked_list_ids():
         cached = read_json(tracks_cache_path(list_id, browser))
         items = playable(cached.get("items")) if isinstance(cached, dict) else []
         if items:
@@ -968,6 +985,13 @@ def cmd_playlists(args):
         return
     if service == "rd":
         emit({"type": "playlists", "stale": False, "items": radio_lists(), **extra})
+        return
+    if service == "dz":
+        user = deezer_user(widget_settings().get("deezerUser"))
+        if not user:
+            fail("Add your Deezer profile", kind="error", setup="dz", service="dz")
+        cache = os.path.join(CACHE_DIR, f"playlists-dz-{user}.json")
+        cached_then_fresh("playlists", cache, max_age, lambda: fetch_dz_playlists(user), extra)
         return
     if service == "pc":
         emit({"type": "podcastSubs", "ids": ["pc:" + s["h"] for s in podcast_state()["subs"]]})
@@ -1219,6 +1243,8 @@ def track_url(track):
     if key.startswith("sp:"):
         # mpv/ytmusic.lua resolves it to the song's YouTube Music match.
         return SPOTIFY_SCHEME + key[3:]
+    if key.startswith("dz:"):
+        return DEEZER_SCHEME + key[3:]
     if key.startswith("cl:"):
         # mpv/ytmusic.lua resolves it to the file on the local rclone server.
         return CLOUD_SCHEME + key[3:]
@@ -1497,7 +1523,7 @@ def cache_name(key):
     # inside <a> or <b> would make that name ambiguous.
     if key.startswith("sc:"):
         return "sc" + hashlib.sha1(key.encode()).hexdigest()[:16]
-    if key.startswith("sp:"):
+    if key[:3] in MATCHED:
         return resolve_spotify(key)
     if key.startswith("cl:"):
         return "cl" + key.rsplit("/", 1)[-1]
@@ -1507,7 +1533,7 @@ def cache_name(key):
 
 
 def download_url(key):
-    if key.startswith("sp:"):
+    if key[:3] in MATCHED:
         return f"https://music.youtube.com/watch?v={resolve_spotify(key)}"
     return track_url({"id": key})
 WATCH_RE = re.compile(r"^https://music\.youtube\.com/watch\?v=([A-Za-z0-9_-]{11})$")
@@ -1625,6 +1651,8 @@ def mix_entry(name):
         return m.group(1), None
     if (name or "").startswith(SPOTIFY_SCHEME) and SP_ID_RE.match(name[len(SPOTIFY_SCHEME):]):
         return "sp:" + name[len(SPOTIFY_SCHEME):], None
+    if (name or "").startswith(DEEZER_SCHEME) and re.match(r"^[0-9]{1,20}$", name[len(DEEZER_SCHEME):]):
+        return "dz:" + name[len(DEEZER_SCHEME):], None
     if sc_track_key(name):
         return sc_track_key(name), None
     if (name or "").startswith(CLOUD_SCHEME) and CLOUD_KEY_RE.match("cl:" + name[len(CLOUD_SCHEME):]):
@@ -1641,7 +1669,7 @@ def mix_entry(name):
         return None, None
     side = read_json(path[:-5] + ".json")
     key = side.get("id") if isinstance(side, dict) else ""
-    if not TRACK_KEY_RE.match(str(key or "")) or (not key.startswith("sp:") and cache_name(key) != m.group(2)):
+    if not TRACK_KEY_RE.match(str(key or "")) or (key[:3] not in MATCHED and cache_name(key) != m.group(2)):
         return None, None
     return key, side
 
@@ -2620,6 +2648,13 @@ def cmd_search(args):
         emit({"type": "search", "query": query, "service": "pc",
               "items": [dict(podcast_list_item(s), kind="list", artist=s.get("author", "")) for s in shows[:60]]})
         return
+    if opt(args, "--service", "yt") == "dz":
+        try:
+            found = deezer_search(query)
+        except RuntimeError as exc:
+            fail(str(exc))
+        emit({"type": "search", "query": query, "service": "dz", "items": [dict(t, kind="song") for t in found]})
+        return
     if opt(args, "--service", "yt") == "rd":
         try:
             stations = radio_search(query)
@@ -2712,8 +2747,8 @@ def safe_filename(text):
 def cover_urls(key):
     """Where a song's cover comes from (never with cookies): YouTube's
     thumbnail, Spotify's album image, SoundCloud's artwork."""
-    if key.startswith("sp:"):
-        known = (read_json(SP_TRACKS_PATH) or {}).get(key) or {}
+    if key[:3] in MATCHED:
+        known = (read_json(DZ_TRACKS_PATH if key.startswith("dz:") else SP_TRACKS_PATH) or {}).get(key) or {}
         urls = [known["cover"]] if isinstance(known.get("cover"), str) else []
         try:
             vid = resolve_spotify(key)
@@ -3668,7 +3703,7 @@ def lyrics_from_youtube(key):
     """YouTube Music's own lyrics for a song (plain text), without an account."""
     try:
         vid = key if VIDEO_ID_RE.match(key) else (
-            (read_json(SP_MATCH_PATH) or {}).get(key[3:]) if key.startswith("sp:") else None)
+            (read_json(DZ_MATCH_PATH if key.startswith("dz:") else SP_MATCH_PATH) or {}).get(key[3:]) if key[:3] in MATCHED else None)
         if not vid or not VIDEO_ID_RE.match(str(vid)):
             return None
         nxt = music_public("next", {"videoId": vid})
@@ -4213,6 +4248,153 @@ def cmd_radio_fav(args):
 
 def cmd_radio_favs(_args):
     emit({"type": "radioFavs", "ids": [t["id"] for t in radio_favorites()]})
+
+
+# ---- Deezer -----------------------------------------------------------------------
+# Deezer's public API (no account, no key): your favorite tracks and playlists
+# from your profile (setting deezerUser), Deezer's charts and search. Like
+# Spotify, the audio stays locked to Deezer's apps, so songs play from their
+# YouTube Music match (resolve_spotify handles both). A song is "dz:<id>";
+# lists are "dz:fav", "dz:pl:<id>", "dz:chart", "dz:search".
+
+DEEZER_SCHEME = "ytmusic-deezer://"
+DZ_TRACKS_PATH = os.path.join(CACHE_DIR, "deezer-tracks.json")
+DZ_MATCH_PATH = os.path.join(CACHE_DIR, "deezer-matches.json")
+DZ_LIMIT = 500
+
+
+def deezer_user(value):
+    """A profile number from what the user typed: the number, or a profile
+    link (deezer.com/<lang>/profile/<number>); a share link is followed."""
+    v = str(value or "").strip()
+    if re.match(r"^[0-9]{1,15}$", v):
+        return v
+    m = re.search(r"deezer\.com/(?:[a-z]{2}(?:-[a-z]{2})?/)?profile/([0-9]{1,15})", v)
+    if m:
+        return m.group(1)
+    if re.match(r"^https://(?:link\.deezer\.com|deezer\.page\.link)/[A-Za-z0-9/_-]{1,80}$", v):
+        try:
+            _, response = http_get(v, 2 * 1024 * 1024, timeout=10, accept="text/html")
+            m = re.search(r"deezer\.com/(?:[a-z]{2}(?:-[a-z]{2})?/)?profile/([0-9]{1,15})", response.geturl())
+            return m.group(1) if m else ""
+        except (OSError, RuntimeError):
+            return ""
+    return ""
+
+
+def deezer(path, params=None):
+    url = "https://api.deezer.com/" + path + ("?" + urllib.parse.urlencode(params) if params else "")
+    try:
+        data = http_json(url, timeout=15)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("Deezer can't be reached") from exc
+    if isinstance(data, dict) and isinstance(data.get("error"), dict):
+        err = data["error"]
+        if err.get("code") in (200, 300, 800) or err.get("type") in ("OAuthException", "DataException"):
+            raise RuntimeError("Deezer doesn't show this: make your profile and favorites public in Deezer's settings")
+        raise RuntimeError("Deezer: " + clean_text(err.get("message"), 120))
+    return data
+
+
+def dz_image(kind, md5, size=250):
+    # A mosaic of four covers is four hashes joined with "-".
+    if not re.match(r"^[a-f0-9]{32}(?:-[a-f0-9]{32}){0,3}$", str(md5 or "")):
+        return None
+    return f"https://cdn-images.dzcdn.net/images/{kind}/{md5}/{size}x{size}-000000-80-0-0.jpg"
+
+
+def dz_track(obj):
+    if not isinstance(obj, dict) or not re.match(r"^[0-9]{1,20}$", str(obj.get("id") or "")):
+        return None
+    if obj.get("type", "track") != "track" or obj.get("readable") is False and not obj.get("title"):
+        return None
+    album = obj.get("album") if isinstance(obj.get("album"), dict) else {}
+    t = {"id": "dz:" + str(obj["id"]), "title": clean_text(obj.get("title")) or str(obj["id"]),
+         "artist": clean_text((obj.get("artist") or {}).get("name"), 120),
+         "duration": obj.get("duration") if isinstance(obj.get("duration"), int) and 0 < obj["duration"] < 86400 else None}
+    if album.get("title"):
+        t["album"] = clean_text(album.get("title"), 150)
+    cover = dz_image("cover", album.get("md5_image") or obj.get("md5_image"))
+    if cover:
+        t["cover"] = cover
+    return t
+
+
+def remember_dz_tracks(tracks):
+    known = read_json(DZ_TRACKS_PATH)
+    known = known if isinstance(known, dict) else {}
+    for t in tracks:
+        known[t["id"]] = {k: t.get(k) for k in ("title", "artist", "duration", "cover") if t.get(k)}
+    if len(known) > 20000:
+        known = dict(list(known.items())[-20000:])
+    write_json_atomic(DZ_TRACKS_PATH, known)
+
+
+def dz_pages(path, params=None, limit=DZ_LIMIT):
+    out, index = [], 0
+    while len(out) < limit:
+        page = deezer(path, dict(params or {}, limit=100, index=index))
+        rows = page.get("data") if isinstance(page, dict) else None
+        if not rows:
+            break
+        out += [t for t in (dz_track(r) for r in rows) if t]
+        index += len(rows)
+        if not page.get("next"):
+            break
+    return out[:limit]
+
+
+def fetch_dz_tracks(list_id):
+    if list_id == "dz:chart":
+        title, items = "Top tracks", dz_pages("chart/0/tracks", limit=100)
+    elif list_id == "dz:fav":
+        user = deezer_user(widget_settings().get("deezerUser"))
+        if not user:
+            raise RuntimeError("Add your Deezer profile")
+        title, items = "Favorite tracks", dz_pages(f"user/{user}/tracks")
+    else:
+        m = re.match(r"^dz:pl:([0-9]{1,20})$", list_id)
+        if not m:
+            raise RuntimeError("unknown Deezer list")
+        info = deezer(f"playlist/{m.group(1)}")
+        title, items = clean_text(info.get("title"), 150) or "Playlist", dz_pages(f"playlist/{m.group(1)}/tracks")
+    remember_dz_tracks(items)
+    return {"title": title, "items": items}
+
+
+def dz_playlist_item(p, subtitle=None):
+    if not isinstance(p, dict) or not re.match(r"^[0-9]{1,20}$", str(p.get("id") or "")):
+        return None
+    item = {"id": f"dz:pl:{p['id']}", "title": clean_text(p.get("title"), 150) or "Playlist",
+            "count": p.get("nb_tracks") if isinstance(p.get("nb_tracks"), int) else None}
+    if subtitle:
+        item["subtitle"] = subtitle
+    kind = p.get("picture_type") if p.get("picture_type") in ("playlist", "cover") else "playlist"
+    cover = dz_image(kind, p.get("md5_image"))
+    if cover:
+        item["cover"] = cover
+    return item
+
+
+def fetch_dz_playlists(user):
+    items = [{"id": "dz:fav", "title": "Favorite tracks", "count": None, "subtitle": "Your loved tracks on Deezer"}]
+    mine = deezer(f"user/{user}/playlists", {"limit": 100}).get("data") or []
+    items += [i for i in (dz_playlist_item(p) for p in mine if not p.get("is_loved_track")) if i]
+    items.append({"id": "dz:chart", "title": "Top tracks", "count": None, "subtitle": "Deezer's chart right now"})
+    try:
+        charts = deezer("chart/0/playlists", {"limit": 20}).get("data") or []
+        items += [i for i in (dz_playlist_item(p, "Deezer chart") for p in charts) if i]
+    except RuntimeError:
+        pass
+    return {"items": items}
+
+
+def deezer_search(query):
+    items = [t for t in (dz_track(r) for r in deezer("search", {"q": query, "limit": 50}).get("data") or []) if t]
+    remember_dz_tracks(items)
+    write_json_atomic(tracks_cache_path("dz:search", "none"),
+                      {"title": query, "items": items, "fetchedAt": int(time.time())})
+    return items
 
 
 # ---- podcasts ---------------------------------------------------------------------
@@ -5147,7 +5329,7 @@ def taste_profile(browser="none"):
         if label.strip():
             songs[label] = songs.get(label, 0) + w
     likes = []
-    for list_id in ["LM", "sp:liked"] + ([f"sc:likes:{u}"] if (u := sc_user(widget_settings().get("soundcloudUser"))) else []):
+    for list_id in liked_list_ids():
         cached = read_json(tracks_cache_path(list_id, browser))
         for t in (cached.get("items") if isinstance(cached, dict) else None) or []:
             if isinstance(t, dict) and t.get("title"):

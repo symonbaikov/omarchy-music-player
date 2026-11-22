@@ -10,11 +10,11 @@ var MAX_TEXT = 300
 // A list: a YouTube playlist id, or one of the other services' lists
 // (sc:… SoundCloud, sp:… Spotify, mix:… your mixes, cl:… your cloud storage:
 // a source, or one folder in it).
-var PLAYLIST_ID_RE = /^(?:[A-Za-z0-9_-]{2,80}|sc:(?:likes|sets):[A-Za-z0-9_-]{1,100}|sc:set:[A-Za-z0-9_-]{1,100}\/[A-Za-z0-9_-]{1,200}|sc:search|sp:liked|sp:pl:[A-Za-z0-9]{22}|mix:all|mix:[a-f0-9]{8}|cl:[a-f0-9]{8}(?::[a-f0-9]{16})?|rd:(?:fav|top|vote|search|country:[A-Z]{2}|tag:[a-z0-9-]{1,40})|ms:[a-f0-9]{8}:(?:fav|rnd|al:[A-Za-z0-9_-]{1,64}|pl:[A-Za-z0-9_-]{1,64})|pc:(?:new|[a-f0-9]{16})|ai:mix|hist:recent)$/
+var PLAYLIST_ID_RE = /^(?:[A-Za-z0-9_-]{2,80}|sc:(?:likes|sets):[A-Za-z0-9_-]{1,100}|sc:set:[A-Za-z0-9_-]{1,100}\/[A-Za-z0-9_-]{1,200}|sc:search|sp:liked|sp:pl:[A-Za-z0-9]{22}|mix:all|mix:[a-f0-9]{8}|cl:[a-f0-9]{8}(?::[a-f0-9]{16})?|rd:(?:fav|top|vote|search|country:[A-Z]{2}|tag:[a-z0-9-]{1,40})|ms:[a-f0-9]{8}:(?:fav|rnd|al:[A-Za-z0-9_-]{1,64}|pl:[A-Za-z0-9_-]{1,64})|pc:(?:new|[a-f0-9]{16})|dz:(?:fav|chart|search|pl:[0-9]{1,20})|ai:mix|hist:recent)$/
 var VIDEO_ID_RE = /^[A-Za-z0-9_-]{11}$/
 // A track from any service: a YouTube video id, sc:…, sp:… or cl:….
-var TRACK_KEY_RE = /^(?:[A-Za-z0-9_-]{11}|sc:(?:[0-9]{1,20}|[A-Za-z0-9_-]{1,100}\/[A-Za-z0-9_-]{1,200})|sp:[A-Za-z0-9]{22}|cl:[a-f0-9]{8}\/[a-f0-9]{16}|rd:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|ms:[a-f0-9]{8}\/[A-Za-z0-9_-]{1,64}|pc:[a-f0-9]{16}\/[a-f0-9]{16})$/
-var SERVICES = ["yt", "sp", "sc", "cl", "rd", "pc", "my"]
+var TRACK_KEY_RE = /^(?:[A-Za-z0-9_-]{11}|sc:(?:[0-9]{1,20}|[A-Za-z0-9_-]{1,100}\/[A-Za-z0-9_-]{1,200})|sp:[A-Za-z0-9]{22}|cl:[a-f0-9]{8}\/[a-f0-9]{16}|rd:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|ms:[a-f0-9]{8}\/[A-Za-z0-9_-]{1,64}|pc:[a-f0-9]{16}\/[a-f0-9]{16}|dz:[0-9]{1,20})$/
+var SERVICES = ["yt", "sp", "dz", "sc", "cl", "rd", "pc", "my"]
 // Tabs shown unless the user picks others (the "+" tab).
 var DEFAULT_TABS = "yt,sp,sc,cl,rd,pc,my"
 
@@ -53,7 +53,7 @@ var SECRET_FIELDS = ["pass", "secret_access_key"]
 function serviceOf(key) {
   var k = String(key || "")
   var p = k.slice(0, 3)
-  return p === "sc:" || p === "sp:" || p === "cl:" || p === "rd:" || p === "ms:" || p === "pc:" ? k.slice(0, 2) : "yt"
+  return p === "sc:" || p === "sp:" || p === "cl:" || p === "rd:" || p === "ms:" || p === "pc:" || p === "dz:" ? k.slice(0, 2) : "yt"
 }
 
 // Liking, adding to a YouTube playlist and radio are YouTube Music's.
@@ -92,6 +92,7 @@ var GLYPH = {
   settings: String.fromCodePoint(0xF0493),
   youtube: String.fromCodePoint(0xF05C3),
   spotify: String.fromCodePoint(0xF04C7),
+  deezer: String.fromCodePoint(0xF0EA2),
   soundcloud: String.fromCodePoint(0xF04C0),
   alert: String.fromCodePoint(0xF0026),
   explore: String.fromCodePoint(0xF018B),
@@ -272,7 +273,7 @@ function repeatCommands(mode) {
 // for a downloaded song saved without one, else YouTube's thumbnail.
 // Spotify's album images and SoundCloud's artwork, the only remote covers
 // besides YouTube's own thumbnails.
-var REMOTE_COVER_RE = /^https:\/\/(?:i\.scdn\.co\/image\/[A-Za-z0-9]{1,100}|i[0-9]?\.sndcdn\.com\/[A-Za-z0-9_.\/-]{1,300}|(?:(?:lh3|yt3)\.googleusercontent\.com|yt3\.ggpht\.com|i[0-9]?\.ytimg\.com)\/[A-Za-z0-9_.\/=%~&?-]{1,500}|is[0-9]-ssl\.mzstatic\.com\/image\/thumb\/[A-Za-z0-9_.\/=%-]{1,400})$/
+var REMOTE_COVER_RE = /^https:\/\/(?:i\.scdn\.co\/image\/[A-Za-z0-9]{1,100}|i[0-9]?\.sndcdn\.com\/[A-Za-z0-9_.\/-]{1,300}|(?:(?:lh3|yt3)\.googleusercontent\.com|yt3\.ggpht\.com|i[0-9]?\.ytimg\.com)\/[A-Za-z0-9_.\/=%~&?-]{1,500}|is[0-9]-ssl\.mzstatic\.com\/image\/thumb\/[A-Za-z0-9_.\/=%-]{1,400}|cdn-images\.dzcdn\.net\/images\/(?:cover|playlist|artist)\/[a-f0-9-]{32,131}\/[0-9]{2,4}x[0-9]{2,4}-[0-9a-z-]{1,40}\.jpg)$/
 
 function trackCover(track, size) {
   if (!track) return ""
@@ -415,7 +416,7 @@ function parseLine(line) {
     // `auth`: a sign-in problem, so the panel offers a "Sign in" button.
     // `setup`: a service that needs connecting first (sp, sc).
     return { type: "error", message: cleanText(msg.message), auth: msg.auth === true,
-      setup: ["sp", "sc", "cl", "rclone", "numpy"].indexOf(msg.setup) >= 0 ? msg.setup : "",
+      setup: ["sp", "dz", "sc", "cl", "rclone", "numpy"].indexOf(msg.setup) >= 0 ? msg.setup : "",
       service: SERVICES.indexOf(msg.service) >= 0 ? msg.service : "" }
   case "cloud":
     return sanitizeCloud(msg)

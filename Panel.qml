@@ -122,6 +122,7 @@ Panel {
   readonly property var serviceTabs: [
     { id: "yt", glyph: Model.GLYPH.youtube, color: "#FF0033", label: strings.t("tab.yt") },
     { id: "sp", glyph: Model.GLYPH.spotify, color: "#1ED760", label: strings.t("tab.sp") },
+    { id: "dz", glyph: Model.GLYPH.deezer, color: "#A238FF", label: strings.t("tab.dz") },
     { id: "sc", glyph: Model.GLYPH.soundcloud, color: "#FF5500", label: strings.t("tab.sc") },
     { id: "cl", glyph: Model.GLYPH.cloud, color: "#4FA3FF", label: strings.t("tab.cl") },
     { id: "rd", glyph: Model.GLYPH.radioService, color: "#B388FF", label: strings.t("tab.rd") },
@@ -130,6 +131,7 @@ Panel {
   ]
   // Per service: { items, loading, error, setup } ("setup": needs connecting).
   property var svc: ({ sp: { items: [], loading: false, error: "", setup: "" },
+                       dz: { items: [], loading: false, error: "", setup: "" },
                        sc: { items: [], loading: false, error: "", setup: "" },
                        cl: { items: [], loading: false, error: "", setup: "" },
                        rd: { items: [], loading: false, error: "", setup: "" },
@@ -137,6 +139,7 @@ Panel {
                        my: { items: [], loading: false, error: "", setup: "" } })
   readonly property string spClientId: String(setting("spotifyClientId", "") || "")
   readonly property string scUserSetting: String(setting("soundcloudUser", "") || "")
+  readonly property string dzUserSetting: String(setting("deezerUser", "") || "")
   property bool spotifyWaiting: false
   readonly property var scSearchEntry: ({ kind: "explore", id: "__scsearch", title: strings.t("sc.searchEntry"),
     artist: strings.t("sc.searchHint") })
@@ -997,6 +1000,7 @@ Panel {
     var v = String(value || "").trim()
     if (v === "") return
     if (name === "sc") saveSettings({ soundcloudUser: v })
+    else if (name === "dz") saveSettings({ deezerUser: v })
     else if (name === "sp") saveSettings({ spotifyClientId: v })
     setSvc(name, { setup: "", error: "", items: [] })
     Qt.callLater(function() { loadService(name, true) })
@@ -1264,7 +1268,7 @@ Panel {
     if (view !== "explore") {
       if (view === "addTo") closeAddTo()
       searchReturnView = view === "settings" || view === "download" ? "playlists" : view
-      exploreService = service === "sc" || service === "rd" || service === "pc" ? service : "yt"
+      exploreService = service === "sc" || service === "rd" || service === "pc" || service === "dz" ? service : "yt"
     }
     view = "explore"
     runSearch(q)
@@ -1325,7 +1329,7 @@ Panel {
     // A SoundCloud result plays with the other results after it.
     if (item.kind === "song" && !Model.isYouTube(item.id)) {
       var at = exploreRowsData.indexOf(item)
-      openPlaylist = { id: exploreService === "rd" ? "rd:search" : "sc:search", title: exploreTitle, count: null }
+      openPlaylist = { id: exploreService === "rd" || exploreService === "dz" ? exploreService + ":search" : "sc:search", title: exploreTitle, count: null }
       tracks = exploreRowsData
       tracksFromExplore = true
       play(at >= 0 ? at : Math.max(0, cursorIndex), false)
@@ -2391,7 +2395,7 @@ Panel {
             readonly property string where: root.view === "explore" ? root.exploreService : root.service
             text: root.view === "countries" ? strings.t("rd.countryField")
               : where === "sc" ? strings.t("sc.searchField") : where === "rd" ? strings.t("rd.searchField")
-              : where === "pc" ? strings.t("pc.searchField") : strings.t("explore.search")
+              : where === "pc" ? strings.t("pc.searchField") : where === "dz" ? strings.t("dz.searchField") : strings.t("explore.search")
             color: root.dim
             font.pixelSize: Style.font.subtitle
           }
@@ -3109,10 +3113,10 @@ Panel {
         // ---------- connect Spotify / SoundCloud ----------
         BorderSurface {
           id: setupCard
-          readonly property string target: root.view === "playlists" && (root.service === "sp" || root.service === "sc")
+          readonly property string target: root.view === "playlists" && (root.service === "sp" || root.service === "sc" || root.service === "dz")
             ? root.svc[root.service].setup : ""
           // Spotify with a Client ID but no login only needs the Connect button.
-          readonly property bool needsField: target === "sc" || (target === "sp" && root.spClientId === "")
+          readonly property bool needsField: target === "sc" || target === "dz" || (target === "sp" && root.spClientId === "")
           visible: target !== ""
           width: parent.width
           implicitHeight: setupColumn.implicitHeight + Style.space(24)
@@ -3130,7 +3134,7 @@ Panel {
 
             PlainText {
               width: parent.width
-              text: setupCard.target === "sp" ? strings.t("sp.setupTitle") : strings.t("sc.setupTitle")
+              text: strings.t(setupCard.target + ".setupTitle")
               font.pixelSize: Style.font.title
               font.bold: true
             }
@@ -3138,7 +3142,7 @@ Panel {
               width: parent.width
               text: setupCard.target === "sp"
                 ? (setupCard.needsField ? strings.t("sp.setupBody") : strings.t("sp.connectBody"))
-                : strings.t("sc.setupBody").arg(root.browser)
+                : setupCard.target === "dz" ? strings.t("dz.setupBody") : strings.t("sc.setupBody").arg(root.browser)
               color: root.dim
               wrapMode: Text.Wrap
               elide: Text.ElideNone
@@ -3169,7 +3173,7 @@ Panel {
                 anchors.fill: setupField
                 verticalAlignment: Text.AlignVCenter
                 visible: setupField.text === ""
-                text: setupCard.target === "sp" ? strings.t("sp.setupField") : strings.t("sc.setupField")
+                text: strings.t(setupCard.target + ".setupField")
                 color: root.dim
               }
               MouseArea {
@@ -3615,6 +3619,27 @@ Panel {
               }
             }
             Row {
+              visible: root.dzUserSetting !== ""
+              spacing: Style.space(8)
+              PlainText {
+                anchors.verticalCenter: parent.verticalCenter
+                text: Model.GLYPH.deezer + "  " + strings.t("accounts.dz").arg(root.dzUserSetting)
+              }
+              Button {
+                text: strings.t("accounts.change")
+                fontSize: Style.font.bodySmall
+                foreground: root.fg
+                fontFamily: root.fontFamily
+                bordered: true
+                onClicked: {
+                  root.saveSettings({ deezerUser: "" })
+                  root.setSvc("dz", { items: [], setup: "dz" })
+                  root.setTabShown("dz", true)
+                  root.switchService("dz")
+                }
+              }
+            }
+            Row {
               spacing: Style.space(8)
               PlainText {
                 anchors.verticalCenter: parent.verticalCenter
@@ -3780,6 +3805,8 @@ Panel {
                     if (rowItem.modelData.id === "new") return Model.GLYPH.playlistAdd
                     if (/^mix:/.test(rowItem.modelData.id) || rowItem.kind === "mixTarget") return Model.GLYPH.supermix
                     if (rowItem.modelData.id === "sp:liked") return Model.GLYPH.spotify
+                    if (rowItem.modelData.id === "dz:fav") return Model.GLYPH.heart
+                    if (rowItem.modelData.id === "dz:chart") return Model.GLYPH.deezer
                     if (/^sc:likes:/.test(rowItem.modelData.id)) return Model.GLYPH.soundcloud
                     if (/^cl:[a-f0-9]{8}$/.test(rowItem.modelData.id)) return Model.GLYPH.cloud
                     if (rowItem.modelData.id === "rd:fav") return Model.GLYPH.heart

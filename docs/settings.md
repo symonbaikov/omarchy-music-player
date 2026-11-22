@@ -23,9 +23,10 @@ omarchy bar set io.github.symonbaikov.ytmusic-mpv playbackCookies On
 | `transition` | `Off` | `Peak mix`: switch songs climax to climax. |
 | `crossfade` | `6` | How long the two climaxes overlap in a peak mix, 2–16 seconds. |
 | `aiMix` | `Off` | `On`: your AI agent makes you a mix each day ([AI Mix](ai-mix.md)). |
-| `tabs` | `yt,sp,sc,cl,rd,pc,my` | The tabs shown (the `+` tab sets it). |
+| `tabs` | `yt,sp,sc,cl,rd,pc,my` | The tabs shown (the `+` tab sets it; Deezer is `dz`). |
 | `radioCountry` | (empty) | The Radio tab's country, e.g. `DE`. Empty: from your language setting. |
 | `soundcloudUser` | (empty) | Your SoundCloud name or profile link (the SoundCloud tab sets it). |
+| `deezerUser` | (empty) | Your Deezer profile link or number (the Deezer tab sets it). |
 | `spotifyClientId` | (empty) | Your Spotify app's Client ID (the Spotify tab sets it). |
 | `downloadDir` | `~/Music` | Where downloads go. |
 | `downloadFormat` | `mp3` | `mp3`, `m4a`, `opus`, `flac` or `wav`. |

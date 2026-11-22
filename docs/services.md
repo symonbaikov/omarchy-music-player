@@ -8,6 +8,7 @@ are always there.
 |---|---|---|
 | <img src="icons/youtubemusic.svg" width="20" height="20" alt="" align="center" />&nbsp;YouTube&nbsp;Music | Your playlists, Liked Music, My Supermix, Explore, search, radio, likes, add to playlist | The browser you're signed in with ([settings](settings.md)) |
 | <img src="icons/spotify.svg" width="20" height="20" alt="" align="center" />&nbsp;Spotify | Your Liked Songs and the playlists you own or collaborate on | Once: your own Spotify app (below) |
+| <img src="icons/deezer.svg" width="20" height="20" alt="" align="center" />&nbsp;Deezer | Your favorite tracks and playlists, Deezer's charts, search | Your profile link |
 | <img src="icons/soundcloud.svg" width="20" height="20" alt="" align="center" />&nbsp;SoundCloud | Your likes and playlists, and search across SoundCloud | Your profile name or link |
 | <img src="icons/cloud.svg" width="20" height="20" alt="" align="center" />&nbsp;Files | Your Music folder, your music server and your own storage, with covers | One click for ~/Music; a server's address and sign-in; or a storage |
 | <img src="icons/radio.svg" width="20" height="20" alt="" align="center" />&nbsp;Radio | About 50,000 stations: top, most liked, a country's, genres, search, favorites | Nothing |
@@ -15,7 +16,7 @@ are always there.
 | <img src="icons/mymusic.svg" width="20" height="20" alt="" align="center" />&nbsp;My&nbsp;Music | AI Mix, My Mix, your own mixes, Recently played, Downloads | Nothing |
 
 A search field sits under the tabs: `Enter` (or `/` to get there) searches
-YouTube Music, or SoundCloud, radio stations or podcasts on their tabs. Back returns
+YouTube Music, or Deezer, SoundCloud, radio stations or podcasts on their tabs. Back returns
 to where you were.
 
 ## YouTube Music
@@ -50,6 +51,16 @@ Reading your library needs a Spotify app of your own, and its owner needs
 
 Only playlists you own or collaborate on can be read: Spotify doesn't give
 apps the songs of other people's playlists.
+
+## Deezer
+
+Read from Deezer's public API, no account or app needed. Like Spotify,
+Deezer keeps its audio to its own apps, so songs play from their **YouTube
+Music match** (title, artist and length). Paste your profile link into the
+Deezer tab (in Deezer: your profile → Share → Copy link); the profile has to
+be public. You get your **Favorite tracks**, your playlists, Deezer's **Top
+tracks** and chart playlists, and search across Deezer. The tab is off until
+you switch it on in the `+` tab.
 
 ## SoundCloud
 
@@ -123,8 +134,8 @@ feed link into the search to add any podcast that has an RSS feed.
 ## My Music
 
 - **AI Mix**: see [AI Mix](ai-mix.md).
-- **My Mix**: your likes from every service, alternating between them; the
-  order stays the same all day.
+- **My Mix**: your likes from every service (YouTube Music, Spotify, Deezer,
+  SoundCloud), alternating between them; the order stays the same all day.
 - **Your mixes**: the add button beside any song adds it to one of your
   mixes or starts a new one. In a mix, the stop-square button on a row
   removes that song.

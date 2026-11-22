@@ -422,6 +422,10 @@ function parseLine(line) {
       service: SERVICES.indexOf(msg.service) >= 0 ? msg.service : "" }
   case "cloud":
     return sanitizeCloud(msg)
+  case "scrobble":
+    return { type: "scrobble", listenbrainz: cleanText(msg.listenbrainz, 80), lastfm: cleanText(msg.lastfm, 80) }
+  case "scrobbleWaiting":
+    return { type: "scrobbleWaiting" }
   case "lyrics":
     return sanitizeLyrics(msg)
   case "radioCountries": {

@@ -29,6 +29,7 @@ Commands (every result is one JSON object per line on stdout):
   tracks DOWNLOADS   the downloaded songs (they play from their files)
   cloud | cloud-add (form as JSON on stdin) | cloud-remove <source> | cloud-stop
   podcast-sub [<pc:show> [--remove 1]]   subscribe to a podcast; lists them
+  scrobble [--set (form on stdin) | --remove listenbrainz|lastfm]   Last.fm / ListenBrainz
   lyrics <track> [--title T] [--artist A] [--duration S]
   chords <track> [PLAYER] | scores <track> [--title T] [--artist A] | open-score <url>
   playlists --service cl   your cloud storage's folders (rclone)
@@ -4575,6 +4576,203 @@ def audius_stream_url(key):
     return f"{AUDIUS_API}tracks/{key[3:]}/stream?app_name={AUDIUS_APP}"
 
 
+# ---- scrobbling: Last.fm and ListenBrainz --------------------------------------------
+# A song played long enough (half of it, or 4 minutes; songs over 30 s) is
+# sent to Last.fm and/or ListenBrainz when its play is noted (history-add).
+# Radio and podcasts aren't. ListenBrainz needs your user token; Last.fm an
+# API account of your own (key and secret) and a sign-in in the browser,
+# which gives a session key. They live owner-only in scrobble.json, and come
+# to the helper on stdin, never on a command line.
+
+SCROBBLE_PATH = os.path.join(DATA_DIR, "scrobble.json")
+LASTFM_API = "https://ws.audioscrobbler.com/2.0/"
+LISTENBRAINZ_API = "https://api.listenbrainz.org/1/"
+SCROBBLE_KEY_RE = re.compile(r"^[A-Za-z0-9-]{8,64}$")
+
+
+def scrobble_config():
+    data = read_json(SCROBBLE_PATH)
+    return data if isinstance(data, dict) else {}
+
+
+def write_scrobble_config(cfg):
+    os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
+    write_json_atomic(SCROBBLE_PATH, cfg)
+    os.chmod(SCROBBLE_PATH, 0o600)
+
+
+def scrobble_status(cfg=None):
+    cfg = scrobble_config() if cfg is None else cfg
+    lb, lf = cfg.get("listenbrainz") or {}, cfg.get("lastfm") or {}
+    return {"type": "scrobble", "listenbrainz": clean_text(lb.get("user"), 80) if lb.get("token") else "",
+            "lastfm": clean_text(lf.get("user"), 80) if lf.get("session") else ""}
+
+
+def lastfm_sig(params, secret):
+    text = "".join(k + str(params[k]) for k in sorted(params) if k not in ("format", "callback")) + secret
+    return hashlib.md5(text.encode("utf-8")).hexdigest()
+
+
+def lastfm_call(method, params, key, secret, post=False):
+    params = dict(params, method=method, api_key=key)
+    params["api_sig"] = lastfm_sig(params, secret)
+    params["format"] = "json"
+    data = urllib.parse.urlencode(params).encode()
+    request = urllib.request.Request(LASTFM_API if post else LASTFM_API + "?" + data.decode(),
+                                     data=data if post else None, headers={"User-Agent": "omarchy-music-player"})
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            out = json.loads(response.read(1024 * 1024))
+    except urllib.error.HTTPError as exc:
+        try:
+            out = json.loads(exc.read(1024 * 1024))
+        except ValueError:
+            raise RuntimeError(f"Last.fm answered {exc.code}") from exc
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("Last.fm can't be reached") from exc
+    if isinstance(out, dict) and out.get("error"):
+        raise RuntimeError("Last.fm: " + clean_text(out.get("message"), 160))
+    return out
+
+
+def listenbrainz_call(path, token, payload=None):
+    request = urllib.request.Request(LISTENBRAINZ_API + path, data=json.dumps(payload).encode() if payload else None,
+                                     headers={"Authorization": "Token " + token, "Content-Type": "application/json",
+                                              "User-Agent": "omarchy-music-player"})
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            return json.loads(response.read(1024 * 1024) or b"{}")
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError("ListenBrainz refused it: check your token" if exc.code in (400, 401) else
+                           f"ListenBrainz answered {exc.code}") from exc
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("ListenBrainz can't be reached") from exc
+
+
+def scrobble_names(title, artist):
+    """(artist, title) to scrobble: YouTube titles lose "(Official Video)"
+    and the like; "Artist - Title" is split when the channel isn't the artist."""
+    pairs = lyric_names(title, artist)
+    clean_artist = re.sub(r"\s*-\s*Topic$|VEVO$", "", clean_text(artist, 200), flags=re.I).strip()
+    title = clean_text(title, 200)
+    # "Song - Remastered 2011" is the song's own title; "Band - Song" names the band.
+    version = re.search(r" - .*\b(remaster(ed)?|live|version|edit|mix|acoustic|demo|mono|stereo|instrumental)\b",
+                        title, flags=re.I)
+    if clean_artist and (version or " - " not in title):
+        mine = [p for p in pairs if p[0] == clean_artist]
+        if mine:
+            return mine[0]
+    return pairs[0] if pairs else ("", "")
+
+
+def scrobble(track, played, duration, started):
+    """Send one listen where scrobbling is set up; failures are only logged."""
+    cfg = scrobble_config()
+    if not (cfg.get("listenbrainz") or {}).get("token") and not (cfg.get("lastfm") or {}).get("session"):
+        return
+    if duration and duration <= 30:
+        return
+    if not (played >= 240 or (duration and played >= duration / 2)):
+        return
+    artist, title = scrobble_names(track.get("title"), track.get("artist"))
+    if not artist or not title:
+        return
+    album = clean_text(track.get("album"), 200)
+    lb = cfg.get("listenbrainz") or {}
+    if lb.get("token"):
+        meta = {"artist_name": artist, "track_name": title,
+                "additional_info": {"submission_client": "Omarchy Music Player", "media_player": "mpv"}}
+        if album:
+            meta["release_name"] = album
+        if duration:
+            meta["additional_info"]["duration_ms"] = int(duration * 1000)
+        try:
+            listenbrainz_call("submit-listens", lb["token"],
+                              {"listen_type": "single", "payload": [{"listened_at": started, "track_metadata": meta}]})
+        except RuntimeError as exc:
+            log_scrobble_error("listenbrainz", str(exc))
+    lf = cfg.get("lastfm") or {}
+    if lf.get("session"):
+        params = {"artist": artist, "track": title, "timestamp": started, "sk": lf["session"]}
+        if album:
+            params["album"] = album
+        if duration:
+            params["duration"] = int(duration)
+        try:
+            lastfm_call("track.scrobble", params, lf["key"], lf["secret"], post=True)
+        except RuntimeError as exc:
+            log_scrobble_error("lastfm", str(exc))
+
+
+def log_scrobble_error(where, message):
+    try:
+        os.makedirs(CACHE_DIR, mode=0o700, exist_ok=True)
+        with open(API_LOG, "a", encoding="utf-8") as fh:
+            fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {where}: {clean_text(message, 200)}\n")
+    except OSError:
+        pass
+
+
+def cmd_scrobble(args):
+    """scrobble [--remove listenbrainz|lastfm]: shows what's connected.
+    scrobble --set: connects one; the form comes as JSON on stdin:
+    {"service": "listenbrainz", "token"} or {"service": "lastfm", "key", "secret"}
+    (Last.fm then opens its sign-in in the browser and waits for it)."""
+    cfg = scrobble_config()
+    removing = opt(args, "--remove", "")
+    if removing in ("listenbrainz", "lastfm"):
+        cfg.pop(removing, None)
+        write_scrobble_config(cfg)
+    elif "--set" in args:
+        try:
+            form = json.loads(sys.stdin.readline(16 * 1024) or "{}")
+        except ValueError:
+            form = {}
+        service = form.get("service") if isinstance(form, dict) else None
+        if service == "listenbrainz":
+            token = str(form.get("token") or "").strip()
+            if not SCROBBLE_KEY_RE.match(token):
+                fail("That isn't a ListenBrainz token: copy it from listenbrainz.org/settings")
+            try:
+                check = listenbrainz_call("validate-token", token)
+            except RuntimeError as exc:
+                fail(str(exc))
+            if not check.get("valid"):
+                fail("ListenBrainz doesn't know this token: copy it again from listenbrainz.org/settings")
+            cfg["listenbrainz"] = {"token": token, "user": clean_text(check.get("user_name"), 80)}
+        elif service == "lastfm":
+            key, secret = str(form.get("key") or "").strip(), str(form.get("secret") or "").strip()
+            if not (re.match(r"^[a-f0-9]{32}$", key) and re.match(r"^[a-f0-9]{32}$", secret)):
+                fail("Paste your Last.fm API key and shared secret (32 letters and digits each)")
+            try:
+                token = lastfm_call("auth.getToken", {}, key, secret).get("token")
+                if not re.match(r"^[A-Za-z0-9]{16,64}$", str(token or "")):
+                    fail("Last.fm didn't start the sign-in")
+                emit({"type": "scrobbleWaiting", "service": "lastfm"})
+                subprocess.Popen(["xdg-open", f"https://www.last.fm/api/auth/?api_key={key}&token={token}"],
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 start_new_session=True)
+                session = None
+                for _ in range(60):
+                    time.sleep(3)
+                    try:
+                        session = lastfm_call("auth.getSession", {"token": token}, key, secret).get("session")
+                        break
+                    except RuntimeError as exc:
+                        if "unauthorized" not in str(exc).lower() and "not been authorized" not in str(exc).lower():
+                            raise
+                if not isinstance(session, dict) or not session.get("key"):
+                    fail("Last.fm's sign-in wasn't finished in time: try again")
+            except RuntimeError as exc:
+                fail(str(exc))
+            cfg["lastfm"] = {"key": key, "secret": secret, "session": str(session["key"]),
+                             "user": clean_text(session.get("name"), 80)}
+        else:
+            fail("scrobble --set needs a service")
+        write_scrobble_config(cfg)
+    emit(scrobble_status(cfg))
+
+
 # ---- podcasts ---------------------------------------------------------------------
 # Apple Podcasts' public directory (search and the top shows, no account) finds
 # shows; each show is its own RSS feed, read here. Subscriptions, and where you
@@ -5455,6 +5653,7 @@ def cmd_history_add(args):
             os.replace(HISTORY_PATH + ".tmp", HISTORY_PATH)
     except OSError:
         pass
+    scrobble(dict(track, title=entry["title"], artist=entry["artist"]), played, duration, int(time.time()) - played)
 
 
 def read_history(limit=HISTORY_MAX):
@@ -5912,6 +6111,7 @@ def main():
         "radio-countries": cmd_radio_countries,
         "radio-favs": cmd_radio_favs,
         "podcast-sub": cmd_podcast_sub,
+        "scrobble": cmd_scrobble,
         "chords": cmd_chords,
         "scores": cmd_scores,
         "open-score": cmd_open_score,

@@ -1085,6 +1085,59 @@ class MixcloudAudius(unittest.TestCase):
         self.assertTrue(h.cache_name("au:V66vyPP").startswith("au") and "-" not in h.cache_name("au:V66vyPP"))
 
 
+class Scrobbling(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.saved = (h.DATA_DIR, h.SCROBBLE_PATH, h.listenbrainz_call, h.lastfm_call)
+        h.DATA_DIR = self.tmp.name
+        h.SCROBBLE_PATH = os.path.join(self.tmp.name, "scrobble.json")
+        self.sent = []
+        h.listenbrainz_call = lambda path, token, payload=None: self.sent.append(("lb", path, token, payload)) or {}
+        h.lastfm_call = lambda method, params, key, secret, post=False: self.sent.append(("lf", method, params)) or {}
+
+    def tearDown(self):
+        h.DATA_DIR, h.SCROBBLE_PATH, h.listenbrainz_call, h.lastfm_call = self.saved
+        self.tmp.cleanup()
+
+    def test_only_long_enough_plays_where_connected(self):
+        song = {"title": "Ghost Love Score (Official Live Video)", "artist": "NightwishVEVO", "album": "Once"}
+        h.scrobble(song, 600, 600, 1000)
+        self.assertEqual(self.sent, [])
+        h.write_scrobble_config({"listenbrainz": {"token": "tok-12345678", "user": "me"},
+                                 "lastfm": {"key": "k", "secret": "s", "session": "sk", "user": "me"}})
+        self.assertEqual(oct(os.stat(h.SCROBBLE_PATH).st_mode & 0o777), "0o600")
+        h.scrobble(song, 100, 600, 1000)
+        h.scrobble(dict(song, title="Jingle"), 25, 25, 1000)
+        self.assertEqual(self.sent, [])
+        h.scrobble(song, 300, 600, 1000)
+        lb = self.sent[0]
+        self.assertEqual(lb[1], "submit-listens")
+        meta = lb[3]["payload"][0]["track_metadata"]
+        self.assertEqual((meta["artist_name"], meta["track_name"], meta["release_name"]), ("Nightwish", "Ghost Love Score", "Once"))
+        self.assertEqual(lb[3]["payload"][0]["listened_at"], 1000)
+        lf = self.sent[1]
+        self.assertEqual((lf[1], lf[2]["artist"], lf[2]["track"], lf[2]["timestamp"], lf[2]["sk"]),
+                         ("track.scrobble", "Nightwish", "Ghost Love Score", 1000, "sk"))
+        self.sent.clear()
+        h.scrobble(dict(song, title="An epic"), 250, 3600, 1000)
+        self.assertEqual(len(self.sent), 2)
+
+    def test_signature_and_status(self):
+        import hashlib
+        sig = h.lastfm_sig({"method": "auth.getSession", "api_key": "k", "token": "t", "format": "json"}, "s")
+        self.assertEqual(sig, hashlib.md5(b"api_keykmethodauth.getSessiontokents").hexdigest())
+        h.write_scrobble_config({"lastfm": {"key": "k", "secret": "s", "session": "sk", "user": "me"}})
+        out = capture(h.cmd_scrobble, [])
+        self.assertEqual(out[-1], {"type": "scrobble", "listenbrainz": "", "lastfm": "me"})
+        out = capture(h.cmd_scrobble, ["--remove", "lastfm"])
+        self.assertEqual(out[-1]["lastfm"], "")
+
+    def test_names(self):
+        self.assertEqual(h.scrobble_names("Song - Remastered 2011", "Queen"), ("Queen", "Song - Remastered 2011"))
+        self.assertEqual(h.scrobble_names("Wardruna - Helvegen", "Some Channel"), ("Wardruna", "Helvegen"))
+        self.assertEqual(h.scrobble_names("Helvegen", "Wardruna - Topic"), ("Wardruna", "Helvegen"))
+
+
 class Podcasts(unittest.TestCase):
     FEED = b"""<?xml version="1.0"?>
 <rss xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel>

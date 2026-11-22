@@ -76,6 +76,12 @@ before use.
   Only while Notes is open, the title and artist go to `songsterr.com`; the
   MuseScore and Ultimate Guitar buttons only open their search in your
   browser.
+- **Scrobbling**, only when you connect it: each song played long enough
+  goes to ListenBrainz (`api.listenbrainz.org`) and/or Last.fm
+  (`ws.audioscrobbler.com`) as artist, title, album, length and when it
+  played. Your token, or Last.fm's key, secret and session, are kept
+  owner-only in `scrobble.json`; they reach the helper on stdin, never on a
+  command line. Failures are noted in `api.log` without them.
 - **Listening history** stays in `history.jsonl`. With **AI Mix** on, a
   summary (top artists and songs, likes, skipped artists, your mood) goes to
   your AI agent's provider through the agent, run without tools. Nothing

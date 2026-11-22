@@ -32,6 +32,20 @@ audio's loudness: the loudest stretch, entered at its sharpest rise. The
 transition is rendered with `ffmpeg` into one file that mpv joins without a
 gap. Not for live radio.
 
+## Scrobbling
+
+Settings → **Last.fm** / **ListenBrainz** → Connect. Every song you play
+long enough (half of it, or 4 minutes; songs over 30 seconds) is
+scrobbled, from any service, including each time round on repeat one. Radio
+and podcasts aren't. Names are tidied first: "Band - Song (Official Video)"
+becomes the band and the song.
+
+- **ListenBrainz**: paste your user token from
+  [listenbrainz.org/settings](https://listenbrainz.org/settings/).
+- **Last.fm**: create a free [API account](https://www.last.fm/api/account/create)
+  (any name; leave the callback empty), paste its API key and shared secret,
+  and allow it on the page Connect opens.
+
 ## Downloads
 
 The arrow beside the heart (or `d`): pick MP3, M4A, Opus, FLAC or WAV and a

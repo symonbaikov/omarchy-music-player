@@ -528,3 +528,9 @@ test("Mixcloud and Audius songs and lists", () => {
   assert.ok(M.validCover("https://thumbnailer.mixcloud.com/unsafe/300x300/extaudio/e/c/c/e/e421-6f4e"))
   assert.equal(Array.from(M.visibleTabs("mc,au")).join(","), "yt,mc,au,my")
 })
+
+test("scrobbling status is sanitized", () => {
+  const m = M.parseLine(JSON.stringify({ type: "scrobble", listenbrainz: "me\u0000", lastfm: "" }))
+  assert.deepEqual({ ...m }, { type: "scrobble", listenbrainz: "me", lastfm: "" })
+  assert.equal(M.parseLine(JSON.stringify({ type: "scrobbleWaiting" })).type, "scrobbleWaiting")
+})

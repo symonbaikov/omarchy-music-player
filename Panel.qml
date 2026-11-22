@@ -753,6 +753,46 @@ Panel {
 
   Process { id: installProc }
 
+  // ---- scrobbling: Last.fm and ListenBrainz ------------------------------------------
+  // Who's connected ("" when not); the form open in settings, if any.
+  property var scrobbleState: ({ listenbrainz: "", lastfm: "" })
+  property string scrobbleForm: ""
+  property bool scrobbleWaiting: false
+  function connectScrobble(service, values) {
+    if (scrobbleProc.running) return
+    scrobbleProc.form = JSON.stringify(Object.assign({ service: service }, values))
+    scrobbleProc.command = helper(["scrobble", "--set"])
+    scrobbleProc.running = true
+  }
+  function disconnectScrobble(service) {
+    if (scrobbleProc.running) return
+    scrobbleProc.form = ""
+    scrobbleProc.command = helper(["scrobble", "--remove", service])
+    scrobbleProc.running = true
+  }
+  Process {
+    id: scrobbleProc
+    property string form: ""
+    stdinEnabled: true
+    onStarted: write(form + "\n")
+    stdout: SplitParser {
+      onRead: function(line) {
+        var msg = Model.parseLine(line)
+        if (!msg) return
+        if (msg.type === "scrobbleWaiting") { root.scrobbleWaiting = true; root.showNotice(strings.t("scrobble.approve")) }
+        else if (msg.type === "error") root.showNotice(msg.message, false, true)
+        else if (msg.type === "scrobble") {
+          root.scrobbleState = { listenbrainz: msg.listenbrainz, lastfm: msg.lastfm }
+          if (scrobbleProc.form !== "") {
+            root.scrobbleForm = ""
+            root.showNotice(strings.t("scrobble.connected"))
+          }
+        }
+      }
+    }
+    onExited: { root.scrobbleWaiting = false; form = "" }
+  }
+
   Process {
     id: cloudRemoveProc
     stdout: SplitParser { onRead: function(line) { root.handleHelperLine(line, "cloud") } }
@@ -2204,6 +2244,8 @@ Panel {
     radioFavProc.running = true
     podcastSubProc.command = helper(["podcast-sub"])
     podcastSubProc.running = true
+    scrobbleProc.command = helper(["scrobble"])
+    scrobbleProc.running = true
     pathsProc.running = true
     likedProc.running = true
     // Settings may have changed while the shell wasn't running.
@@ -3661,6 +3703,88 @@ Panel {
                   spotifyLogoutProc.running = true
                   root.saveSettings({ spotifyClientId: "" })
                   root.setSvc("sp", { items: [], setup: "sp" })
+                }
+              }
+            }
+
+            // Scrobbling: Last.fm and ListenBrainz, each connected or with its form.
+            Repeater {
+              model: [{ id: "lastfm", fields: ["key", "secret"], help: "https://www.last.fm/api/account/create" },
+                      { id: "listenbrainz", fields: ["token"], help: "https://listenbrainz.org/settings/" }]
+              Column {
+                id: scrobbleRow
+                required property var modelData
+                readonly property string who: root.scrobbleState[modelData.id] || ""
+                readonly property bool formOpen: root.scrobbleForm === modelData.id && who === ""
+                property var values: ({})
+                width: parent.width
+                spacing: Style.space(6)
+                Row {
+                  spacing: Style.space(8)
+                  PlainText {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: Model.GLYPH.history + "  " + strings.t("scrobble." + scrobbleRow.modelData.id)
+                      .arg(scrobbleRow.who !== "" ? scrobbleRow.who : strings.t("accounts.none"))
+                  }
+                  Button {
+                    text: strings.t(scrobbleRow.who !== "" ? "accounts.disconnect" : scrobbleRow.formOpen ? "scrobble.cancel" : "scrobble.connect")
+                    fontSize: Style.font.bodySmall
+                    foreground: root.fg
+                    fontFamily: root.fontFamily
+                    bordered: true
+                    enabled: !scrobbleProc.running
+                    onClicked: {
+                      if (scrobbleRow.who !== "") root.disconnectScrobble(scrobbleRow.modelData.id)
+                      else root.scrobbleForm = scrobbleRow.formOpen ? "" : scrobbleRow.modelData.id
+                    }
+                  }
+                }
+                PlainText {
+                  visible: scrobbleRow.formOpen
+                  width: parent.width
+                  text: strings.t("scrobble." + scrobbleRow.modelData.id + "Help")
+                  color: root.dim
+                  wrapMode: Text.Wrap
+                  elide: Text.ElideNone
+                }
+                Repeater {
+                  model: scrobbleRow.formOpen ? scrobbleRow.modelData.fields : []
+                  CloudField {
+                    required property var modelData
+                    width: scrobbleRow.width
+                    label: strings.t("scrobble.field." + modelData)
+                    secret: modelData !== "key"
+                    onEdited: function(value) {
+                      var next = Object.assign({}, scrobbleRow.values)
+                      next[modelData] = value
+                      scrobbleRow.values = next
+                    }
+                    onSubmitted: root.connectScrobble(scrobbleRow.modelData.id, scrobbleRow.values)
+                  }
+                }
+                Row {
+                  visible: scrobbleRow.formOpen
+                  spacing: Style.space(8)
+                  Button {
+                    iconText: scrobbleProc.running ? Model.GLYPH.loading : Model.GLYPH.check
+                    iconSpinning: scrobbleProc.running
+                    text: strings.t(root.scrobbleWaiting ? "scrobble.waiting" : "scrobble.connect")
+                    fontSize: Style.font.bodySmall
+                    foreground: root.fg
+                    fontFamily: root.fontFamily
+                    bordered: true
+                    enabled: !scrobbleProc.running
+                    onClicked: root.connectScrobble(scrobbleRow.modelData.id, scrobbleRow.values)
+                  }
+                  Button {
+                    iconText: Model.GLYPH.forward
+                    text: strings.t("scrobble." + scrobbleRow.modelData.id + "Where")
+                    fontSize: Style.font.bodySmall
+                    foreground: root.fg
+                    fontFamily: root.fontFamily
+                    bordered: true
+                    onClicked: { openUrlProc.command = ["xdg-open", scrobbleRow.modelData.help]; openUrlProc.running = true }
+                  }
                 }
               }
             }

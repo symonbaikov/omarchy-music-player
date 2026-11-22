@@ -90,6 +90,8 @@ Commands: `playlists`, `tracks`, `play`, `radio`, `search`, `explore`,
   repeat one, each time the song comes round counts. For a podcast episode
   `history-add` only saves where you stopped (`podcasts.json`), and
   `resolve` hands back `start`, which the script sets as the file's start.
+  `history-add` also scrobbles (`scrobble()`), so whatever counts as a play
+  counts for Last.fm and ListenBrainz.
 
 ## The panel and the window
 

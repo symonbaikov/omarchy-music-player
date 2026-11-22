@@ -53,6 +53,7 @@ subscription of its own.
 - **🛡 It keeps playing.** When YouTube changes something, songs come from
   backup sources; dropped streams reopen; one click files a filled-in bug
   report; a watchdog finds breakages and proposes fixes before you notice.
+- **📊 Scrobbling** to Last.fm and ListenBrainz, from every service.
 - **⬇️ Downloads** in MP3, M4A, Opus, FLAC or WAV, with covers, playable offline.
 
 ## Install
@@ -89,7 +90,7 @@ Everything else, the shortcuts and the commands for your own key bindings:
 | [Services](docs/services.md) | YouTube Music, Spotify, Deezer, SoundCloud, Mixcloud, Audius, Files and servers, Radio, Podcasts, My Music |
 | [The player window](docs/player-window.md) | The window, Lyrics, Notes |
 | [AI Mix](docs/ai-mix.md) | How it learns your taste, and what it sends |
-| [Playback](docs/playback.md) | Peak mix, fades, radio and autoplay, downloads, backup sources, updates |
+| [Playback](docs/playback.md) | Peak mix, fades, radio and autoplay, scrobbling, downloads, backup sources, updates |
 | [Usage](docs/usage.md) | The bar, keys, IPC |
 | [Settings](docs/settings.md) | Every setting |
 | [Privacy](docs/privacy.md) | What goes where, and what stays on your machine |

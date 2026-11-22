@@ -159,5 +159,12 @@
   "accounts.none": "not connected",
   "accounts.connected": "connected",
   "accounts.change": "Change",
-  "accounts.disconnect": "Disconnect"
+  "accounts.disconnect": "Disconnect",
+  "report.button": "Report the problem",
+  "report.preparing": "Preparing the report…",
+  "report.opened": "The report is open in your browser with everything filled in: just press Submit.",
+  "report.troubleTitle": "Music isn't playing",
+  "report.troubleBody": "Nothing could play this time. Send the details to the developer in one click: the report is written for you, without your songs, accounts or paths.",
+  "report.notifyBody": "Nothing could play. Open the player: one click sends the details to the developer.",
+  "report.updateHint": "Updating yt-dlp often fixes this: omarchy update"
 }

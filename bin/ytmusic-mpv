@@ -2656,6 +2656,144 @@ def cmd_download(args):
     emit({"type": "downloaded", "id": video_id, "path": target, "folder": folder})
 
 
+# ---- problem reports ------------------------------------------------------------
+# One click in the panel: everything about the error is gathered here and
+# opened as a filled-in GitHub issue in the browser, so the user only presses
+# Submit. Nothing is sent before that. The issue is public, so the report
+# carries no paths, user names, browser profiles, song ids or tokens.
+
+REPO_URL = "https://github.com/symonbaikov/omarchy-ytmusic-mpv"
+REPORT_TEST_SONG = "dQw4w9WgXcQ"
+REPORT_MAX_URL = 7500
+
+
+def redact(text):
+    text = str(text or "")
+    # Emails first: the user name inside one would otherwise hide it.
+    text = re.sub(r"[\w.+-]+@[\w-]+\.[\w.]+", "<email>", text)
+    home = os.path.expanduser("~")
+    if home and home != "/":
+        text = text.replace(home, "~")
+    user = os.environ.get("USER") or os.path.basename(home)
+    if user and len(user) > 2:
+        text = re.sub(re.escape(user), "<user>", text, flags=re.I)
+    # A browser setting's profile part (firefox:~/.config/zen/abc.Default …).
+    text = re.sub(r"((?:firefox|chrome|chromium|brave|vivaldi|edge|opera|whale)(?:\+\w+)?):[^\s,;|)\]]+(?: \([^)\n]{0,40}\))?",
+                  r"\1:<profile>", text)
+    # Which songs someone plays is theirs: mask ids in yt-dlp's messages and URLs.
+    text = re.sub(r"(\[(?:youtube|soundcloud)[^\]]*\] )[A-Za-z0-9_-]{6,}:", r"\1<song>:", text)
+    text = re.sub(r"(watch\?v=|youtu\.be/|/vi/)[A-Za-z0-9_-]{11}", r"\1<song>", text)
+    text = re.sub(r"(soundcloud\.com/)[A-Za-z0-9_/-]+", r"\1<track>", text)
+    text = re.sub(r"(spotify[:/]+(?:track/)?)[A-Za-z0-9]{22}", r"\1<song>", text)
+    text = re.sub(r"\bsp:[A-Za-z0-9]{22}\b", "sp:<song>", text)
+    text = re.sub(r"(?i)(token|secret|key|sapisid|cookie)[\"'=: ]+[A-Za-z0-9_\-./+=]{12,}", r"\1=<hidden>", text)
+    return text
+
+
+def version_of(cmd):
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=15, stdin=subprocess.DEVNULL).stdout
+        return out.strip().splitlines()[0][:80] if out.strip() else "?"
+    except (OSError, subprocess.TimeoutExpired):
+        return "missing"
+
+
+def recent_errors(limit=12):
+    lines = []
+    try:
+        with open(MPV_LOG, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if "][e][" in line or "][w][ytmusic]" in line:
+                    lines.append(line.rstrip()[:240])
+    except OSError:
+        pass
+    try:
+        with open(API_LOG, encoding="utf-8", errors="replace") as fh:
+            lines += [l.rstrip()[:240] for l in fh.readlines()[-4:]]
+    except OSError:
+        pass
+    return [redact(l) for l in lines[-limit:]]
+
+
+def probe_clients():
+    """Which YouTube clients serve a public song right now (no cookies)."""
+    out = []
+    for client in (None, "mweb", "tv"):
+        cmd = ["yt-dlp", "--ignore-config", "--no-warnings", "-J", "-f", "bestaudio/best", "--no-playlist",
+               "--socket-timeout", "15"]
+        if client:
+            cmd += ["--extractor-args", f"youtube:player_client={client}"]
+        try:
+            proc = subprocess.run(cmd + ["--", f"https://music.youtube.com/watch?v={REPORT_TEST_SONG}"],
+                                  capture_output=True, text=True, timeout=45, stdin=subprocess.DEVNULL)
+            ok = proc.returncode == 0 and '"url"' in proc.stdout
+            why = "" if ok else ([l for l in proc.stderr.splitlines() if l.startswith("ERROR")] or [proc.stderr[-160:]])[-1]
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            ok, why = False, str(exc)
+        out.append(f"{client or 'default'}: {'ok' if ok else redact(why)[:160]}")
+    return out
+
+
+SERVICE_NAMES = {"yt": "YouTube Music", "sp": "Spotify", "sc": "SoundCloud", "my": "My Music"}
+
+
+def build_report(where, error, service, facts, probes, errors):
+    """The issue's title and the new-issue URL. The error log is trimmed,
+    oldest first, until the URL fits GitHub's limit."""
+    title = f"[Report] {where}: {error.splitlines()[0][:80] if error else 'music does not play'}"
+    head = [
+        "**What happened**", "",
+        f"In the **{where}** ({SERVICE_NAMES.get(service, service)} tab):",
+        "", "```", error or "(no message)", "```", "",
+        "**Versions and setup** (no accounts or paths)", "", *[f"- {f}" for f in facts],
+        "", "**YouTube right now** (a public test song, no cookies)", "", "```", *probes, "```",
+    ]
+    tail = ["", "_Sent from the player's “Report the problem” button._"]
+    errors = list(errors)
+    while True:
+        log = ["", "**Recent errors** (song ids and paths removed)", "", "```", *errors, "```"] if errors else []
+        body = "\n".join(head + log + tail)
+        url = f"{REPO_URL}/issues/new?" + urllib.parse.urlencode({"title": title, "body": body})
+        if len(url) <= REPORT_MAX_URL or not errors:
+            return title, url
+        errors = errors[1:]
+
+
+def cmd_report(args):
+    where = clean_text(opt(args, "--where", "panel"), 60)
+    error = redact(clean_text(opt(args, "--error", ""), 600))
+    service = opt(args, "--service", "yt")
+    browser = check_browser(opt(args, "--browser", "none"))
+    settings = widget_settings()
+    manifest = read_json(os.path.join(PLUGIN_DIR, "manifest.json")) or {}
+    try:
+        commit = git("rev-parse", "--short", "HEAD").stdout.strip() or "?"
+    except (OSError, subprocess.TimeoutExpired):
+        commit = "?"
+    try:
+        from yt_dlp.version import __version__ as ytdlp
+    except Exception:
+        ytdlp = "missing"
+    facts = [
+        f"Plugin: {clean_text(manifest.get('version'), 20)} ({commit})",
+        f"yt-dlp: {ytdlp}",
+        f"mpv: {version_of(['mpv', '--version'])}",
+        f"ffmpeg: {version_of(['ffmpeg', '-version'])[:40]}",
+        f"Omarchy: {version_of(['omarchy', 'version'])}",
+        f"Python: {sys.version.split()[0]}, kernel {os.uname().release}",
+        f"Browser for cookies: {browser.split(':')[0].split('+')[0]}; playback cookies: {settings.get('playbackCookies', 'Off')}",
+        f"Transitions: {settings.get('transition', 'Off')}; backup mirrors: {settings.get('backupMirrors', 'Off')}",
+        f"Spotify connected: {'yes' if spotify_connected() else 'no'}; SoundCloud profile set: {'yes' if sc_user(settings.get('soundcloudUser')) else 'no'}",
+    ]
+    title, url = build_report(where, error, service, [redact(f) for f in facts], probe_clients(), recent_errors())
+    try:
+        subprocess.Popen(browser_command(browser) + [url], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError as exc:
+        fail(f"Couldn't open the browser: {exc}")
+    emit({"type": "report", "opened": True, "title": title})
+
+
 # ---- updates ------------------------------------------------------------------
 
 PLUGIN_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
@@ -2750,6 +2888,7 @@ def main():
         "explore": cmd_explore,
         "mixes": cmd_mixes,
         "resolve": cmd_resolve,
+        "report": cmd_report,
         "spotify-login": cmd_spotify_login,
         "spotify-logout": cmd_spotify_logout,
         "mix-add": cmd_mix_add,

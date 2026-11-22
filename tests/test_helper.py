@@ -770,5 +770,32 @@ class Services(unittest.TestCase):
                 h.MIXES_PATH, h.DATA_DIR, h.CACHE_DIR, h.widget_settings = saved
 
 
+class Reports(unittest.TestCase):
+    def test_redact_removes_everything_personal(self):
+        home = os.path.expanduser("~")
+        text = (f"ERROR: [youtube] dQw4w9WgXcQ: bot check; cookies from firefox:{home}/.config/zen/29yzqria.Default (release) "
+                "mail me@example.com token=abcdefghijklmnopqrstuvwxyz watch?v=kJQP7kiw5Fk "
+                "https://soundcloud.com/joey/warm ytmusic-spotify://4uLU6hMCjMI75M1A2tKUQC sp:4uLU6hMCjMI75M1A2tKUQC "
+                f"{home}/Music/My Song.mp3")
+        out = h.redact(text)
+        for leak in (home, "29yzqria", "dQw4w9WgXcQ", "kJQP7kiw5Fk", "example.com", "abcdefghijklmnop", "joey",
+                     "4uLU6hMCjMI75M1A2tKUQC"):
+            self.assertNotIn(leak, out, leak)
+        self.assertIn("bot check", out)                        # the reason stays
+        self.assertIn("~/Music", out)
+
+    def test_report_url_fits_and_keeps_the_newest_errors(self):
+        import urllib.parse
+        errors = [f"[e] error number {i} " + "x" * 200 for i in range(80)]
+        title, url = h.build_report("Liked Music", "Couldn't load", "yt", ["Plugin: 0.6.0"], ["default: ok"], errors)
+        self.assertLessEqual(len(url), h.REPORT_MAX_URL)
+        self.assertTrue(url.startswith(h.REPO_URL + "/issues/new?"))
+        body = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)["body"][0]
+        self.assertIn("error number 79", body)                 # newest kept
+        self.assertNotIn("error number 0 ", body)              # oldest dropped
+        self.assertIn("Couldn't load", body)
+        self.assertEqual(title, "[Report] Liked Music: Couldn't load")
+
+
 if __name__ == "__main__":
     unittest.main()

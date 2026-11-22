@@ -1,6 +1,6 @@
 # Omarchy Music Player
 
-**The only Apple like music player on Omarchy that you need!**
+**The only Apple Music experience on Omarchy you ever need!**
 
 ![Omarchy Music Player panel](preview.png)
 
@@ -121,6 +121,14 @@ Playback keeps going when it can:
   copy, and autoplay falls back to songs from your saved Liked Music and My
   Supermix lists, so the queue doesn't run dry.
 - **Lists can't be refreshed**: the saved copies stay in use.
+- **Something broke and nothing plays**: wherever it happened (the player,
+  a list, Explore, a service tab) there is a **Report the problem** button,
+  and a desktop notification leads to it if the panel is closed. One click
+  opens a GitHub issue in your browser with everything filled in: what
+  failed, the versions of the plugin, yt-dlp, mpv, ffmpeg and Omarchy, which
+  YouTube clients work right now, and the recent errors. You only press
+  Submit. Song ids, paths, user names, browser profiles, emails and tokens
+  are removed first; nothing is sent until you press Submit.
 - **Songs keep failing** (two in a row with no source working): the panel
   says so. That almost always means yt-dlp needs an update
   (`omarchy update`).

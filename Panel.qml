@@ -174,6 +174,7 @@ Panel {
   property var updateInfo: null
   property string updateDeclined: ""
   property bool youtubeFailing: false
+  property string healthReason: ""
   onMirrorsOnChanged: if (mirrorsOn) mirrorOffer = null
   property string retryVideoId: ""
 
@@ -535,6 +536,17 @@ Panel {
   Process { id: openUrlProc }
 
   Process {
+    id: reportProc
+    stdout: SplitParser {
+      onRead: function(line) {
+        var msg = Model.parseMpvLine(line)
+        if (msg && msg.type === "report") root.showNotice(strings.t("report.opened"), false, true)
+        else if (msg && msg.type === "error") root.showNotice(Model.cleanText(msg.message), false, true)
+      }
+    }
+  }
+
+  Process {
     id: spotifyLogoutProc
     command: root.helper(["spotify-logout"])
   }
@@ -891,6 +903,20 @@ Panel {
     cursorIndex = -1
   }
 
+  // ---- problem reports -------------------------------------------------------
+  // Everything about an error, gathered by the helper and opened as a
+  // filled-in GitHub issue: the user only presses Submit.
+  function reportProblem(where, message) {
+    if (reportProc.running) return
+    reportProc.command = helper(["report", "--where", String(where || "panel"), "--error", String(message || ""),
+      "--service", service, "--browser", browser])
+    reportProc.running = true
+  }
+
+  // The error a report is about: what's on screen, else YouTube's own reason.
+  readonly property string troubleText: playError !== "" ? playError
+    : youtubeFailing ? (healthReason || ytdlError.replace(/^ERROR: /, "") || strings.t("report.troubleTitle")) : ""
+
   // ---- plugin updates ------------------------------------------------------
   function checkForUpdate(maxAge) {
     if (!updateCheckOn || updateCheckProc.running || updateApplyProc.running) return
@@ -907,11 +933,21 @@ Panel {
     if (fresh && youtubeFailing && !opened) notifyUpdate(u.version)
   }
 
+  function notifyTrouble() {
+    if (notifyProc.running) return
+    var peers = bar && typeof bar.moduleWidgets === "function" ? bar.moduleWidgets(moduleName) : []
+    if (peers.length > 0 && peers[0] !== root) return
+    notifyProc.command = ["notify-send", "--app-name=Omarchy Music Player", "--icon=dialog-warning",
+      "--action=open=" + strings.t("offer.notifyOpen"),
+      strings.t("report.troubleTitle"), strings.t("report.notifyBody")]
+    notifyProc.running = true
+  }
+
   function notifyUpdate(version) {
     if (notifyProc.running) return
     var peers = bar && typeof bar.moduleWidgets === "function" ? bar.moduleWidgets(moduleName) : []
     if (peers.length > 0 && peers[0] !== root) return
-    notifyProc.command = ["notify-send", "--app-name=YouTube Music", "--icon=software-update-available",
+    notifyProc.command = ["notify-send", "--app-name=Omarchy Music Player", "--icon=software-update-available",
       "--action=open=" + strings.t("offer.notifyOpen"),
       strings.t("update.notifyTitle"), strings.t("update.notifyBody").arg(version)]
     notifyProc.running = true
@@ -938,7 +974,7 @@ Panel {
     var peers = bar && typeof bar.moduleWidgets === "function" ? bar.moduleWidgets(moduleName) : []
     for (var i = 0; i < peers.length; i++) if (peers[i] && peers[i].opened) return
     if (peers.length > 0 && peers[0] !== root) return
-    notifyProc.command = ["notify-send", "--app-name=YouTube Music", "--icon=audio-x-generic",
+    notifyProc.command = ["notify-send", "--app-name=Omarchy Music Player", "--icon=audio-x-generic",
       "--action=open=" + strings.t("offer.notifyOpen"),
       strings.t("offer.notifyTitle"), strings.t("offer.notifyBody").arg(title)]
     notifyProc.running = true
@@ -1073,9 +1109,11 @@ Panel {
     case "user-data/ytmusic/health": {
       var health = Model.recentReport(data, Date.now() / 1000)
       if (health && health.state === "failing") {
-        showNotice(strings.t("notice.youtubeFailing").arg(Model.truncate(Model.cleanText(health.reason), 120)), false, true)
+        // The "Music isn't playing" card says it, with the report button.
+        healthReason = Model.truncate(Model.cleanText(health.reason), 200)
         youtubeFailing = true
         checkForUpdate(600)        // a fix may be out already
+        if (!opened) notifyTrouble()
       } else if (health && health.state === "ok") {
         youtubeFailing = false
       }
@@ -1928,13 +1966,55 @@ Panel {
           }
         }
 
-        PlainText {
-          visible: root.playError !== ""
+        // ---------- music isn't playing: report it in one click ----------
+        BorderSurface {
+          visible: root.troubleText !== "" && !root.starting
           width: parent.width
-          text: strings.t("error.prefix").arg(root.playError)
-          wrapMode: Text.Wrap
-          elide: Text.ElideNone
-          font.pixelSize: Style.font.bodySmall
+          implicitHeight: troubleColumn.implicitHeight + Style.space(24)
+          radius: Style.cornerRadius
+          color: Qt.rgba(Commons.Color.accent.r, Commons.Color.accent.g, Commons.Color.accent.b, 0.10)
+          borderSpec: Border.flat(Commons.Color.accent, 1)
+
+          Column {
+            id: troubleColumn
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.margins: Style.space(12)
+            spacing: Style.space(8)
+
+            PlainText {
+              width: parent.width
+              text: Model.GLYPH.alert + "  " + strings.t("report.troubleTitle")
+              font.pixelSize: Style.font.title
+              font.bold: true
+            }
+            PlainText {
+              width: parent.width
+              text: root.troubleText
+              color: root.dim
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.Wrap
+              elide: Text.ElideNone
+            }
+            PlainText {
+              width: parent.width
+              text: strings.t("report.troubleBody")
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.Wrap
+              elide: Text.ElideNone
+            }
+            PlainText {
+              width: parent.width
+              visible: root.youtubeFailing
+              text: strings.t("report.updateHint")
+              color: root.dim
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.Wrap
+              elide: Text.ElideNone
+            }
+            ReportButton { where: "playback"; message: root.troubleText }
+          }
         }
 
         // ---------- a newer version of the plugin ----------
@@ -2910,16 +2990,28 @@ Panel {
           }
         }
 
-        // The library didn't load: most often not signed in to that browser.
-        Button {
-          visible: root.view === "playlists" && root.playlistsError !== "" && root.browser !== "none"
-          iconText: Model.GLYPH.login
-          text: strings.t("controls.signIn")
-          fontSize: Style.font.bodySmall
-          foreground: root.fg
-          fontFamily: root.fontFamily
-          bordered: true
-          onClicked: root.signIn()
+        // A list didn't load: sign in (most often the cause) or report it.
+        Row {
+          readonly property string error: root.view === "tracks" ? root.tracksError
+            : root.view === "explore" ? root.exploreError
+            : root.view === "playlists" ? (root.service === "yt" ? root.playlistsError : root.svc[root.service].error) : ""
+          visible: error !== ""
+          spacing: Style.space(8)
+          Button {
+            visible: root.view === "playlists" && root.service === "yt" && root.playlistsError !== "" && root.browser !== "none"
+            iconText: Model.GLYPH.login
+            text: strings.t("controls.signIn")
+            fontSize: Style.font.bodySmall
+            foreground: root.fg
+            fontFamily: root.fontFamily
+            bordered: true
+            onClicked: root.signIn()
+          }
+          ReportButton {
+            where: root.view === "tracks" ? root.playlistTitle(root.openPlaylist)
+              : root.view === "explore" ? root.exploreTitle : strings.t("tab." + root.service)
+            message: parent.error
+          }
         }
       }
     }
@@ -2943,6 +3035,21 @@ Panel {
       loops: Animation.Infinite
       running: spinner.visible && !Style.reduceMotion
     }
+  }
+
+  // "Report the problem": a filled-in GitHub issue for `message`.
+  component ReportButton: Button {
+    property string where: ""
+    property string message: ""
+    iconText: reportProc.running ? Model.GLYPH.loading : Model.GLYPH.alert
+    iconSpinning: reportProc.running
+    text: reportProc.running ? strings.t("report.preparing") : strings.t("report.button")
+    enabled: !reportProc.running
+    fontSize: Style.font.bodySmall
+    foreground: root.fg
+    fontFamily: root.fontFamily
+    bordered: true
+    onClicked: root.reportProblem(where, message)
   }
 
   // A service tab: its logo in the service's color, its name when selected.

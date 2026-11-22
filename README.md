@@ -2,7 +2,7 @@
   <h1>Omarchy Music Player</h1>
   <img width="150" height="150" alt="enlarge-the-orange-rose" src="https://github.com/user-attachments/assets/af554851-8580-419b-b75e-3bc756cfbcd3" />
 
-  <p><strong>The only Apple Music experience on Omarchy you ever need!</strong></p>
+  <p><strong>The only Music Player for Omarchy you ever need!</strong></p>
 
   <p>
     <img src="docs/icons/youtubemusic.svg" width="32" height="32" alt="YouTube Music" title="YouTube Music" />&nbsp;&nbsp;

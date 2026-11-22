@@ -460,6 +460,9 @@ Panel {
       else if (msg.state === "done") {
         aiState = ""
         loadService("my", true)
+        // A desktop notification: making one takes half a minute, and the
+        // panel has usually been closed by then.
+        notifyAiMix(msg.title, msg.count)
         if (!aiProc.auto) {
           showNotice(strings.t("ai.ready").arg(msg.title).arg(msg.count))
           openList({ id: "ai:mix", title: msg.title, count: msg.count })
@@ -1083,6 +1086,31 @@ Panel {
     aiProc.command = helper(["ai-mix", "--browser", browser].concat(wish ? ["--prompt", wish] : [])
       .concat(auto ? ["--if-older", "86400"] : []))
     aiProc.running = true
+  }
+
+  function notifyAiMix(title, count) {
+    if (aiNotifyProc.running) return
+    var peers = bar && typeof bar.moduleWidgets === "function" ? bar.moduleWidgets(moduleName) : []
+    if (peers.length > 0 && peers[0] !== root) return
+    aiNotifyProc.title = title
+    aiNotifyProc.command = ["notify-send", "--app-name=Omarchy Music Player", "--icon=audio-x-generic",
+      "--action=play=" + strings.t("ai.notifyPlay"), "--action=open=" + strings.t("ai.notifyOpen"),
+      strings.t("ai.notifyTitle").arg(title), strings.t("ai.notifyBody").arg(count)]
+    aiNotifyProc.running = true
+  }
+  Process {
+    id: aiNotifyProc
+    property string title: ""
+    stdout: SplitParser {
+      onRead: function(line) {
+        var action = String(line).trim()
+        if (action !== "play" && action !== "open") return
+        if (root.service !== "my") root.switchService("my")
+        root.openList({ id: "ai:mix", title: aiNotifyProc.title, count: null })
+        if (action === "play") root.play(0, false)
+        else root.open()
+      }
+    }
   }
 
   Process {

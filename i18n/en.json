@@ -288,5 +288,9 @@
   "ai.ready": "%1: %2 songs picked for you",
   "ai.privacy": "Sent to your AI agent: the artists and songs you play most, your likes and the artists you skip. Your history itself stays on this computer.",
   "ai.madeForYou": "Made for you",
-  "full.recent": "Recently played"
+  "full.recent": "Recently played",
+  "ai.notifyTitle": "Your AI Mix is ready: %1",
+  "ai.notifyBody": "%1 songs picked for you from what you listen to.",
+  "ai.notifyPlay": "Play",
+  "ai.notifyOpen": "Open"
 }

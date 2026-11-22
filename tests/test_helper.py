@@ -1051,6 +1051,65 @@ class SoundCloudCovers(unittest.TestCase):
                 h.SC_META_PATH, h.http_json = saved
 
 
+class CoversEverywhere(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.saved = (h.COVERS_DIR, h.HISTORY_PATH, h.DATA_DIR, h.DZ_TRACKS_PATH)
+        h.COVERS_DIR = os.path.join(self.tmp.name, "covers")
+        os.makedirs(h.COVERS_DIR)
+        h.DATA_DIR = self.tmp.name
+        h.HISTORY_PATH = os.path.join(self.tmp.name, "history.jsonl")
+        h.DZ_TRACKS_PATH = os.path.join(self.tmp.name, "dz.json")
+
+    def tearDown(self):
+        h.COVERS_DIR, h.HISTORY_PATH, h.DATA_DIR, h.DZ_TRACKS_PATH = self.saved
+        self.tmp.cleanup()
+
+    def test_valid_cover(self):
+        local = os.path.join(h.COVERS_DIR, "au-V66vyPP.jpg")
+        pathlib.Path(local).write_bytes(b"x")
+        self.assertEqual(h.valid_cover(local), os.path.realpath(local))
+        self.assertEqual(h.valid_cover("https://cdn-images.dzcdn.net/images/cover/" + "a" * 32 + "/250x250-000000-80-0-0.jpg")[:8], "https://")
+        self.assertEqual(h.valid_cover("https://thumbnailer.mixcloud.com/unsafe/300x300/extaudio/a/b"), "https://thumbnailer.mixcloud.com/unsafe/300x300/extaudio/a/b")
+        outside = os.path.join(self.tmp.name, "x.jpg")
+        pathlib.Path(outside).write_bytes(b"x")
+        for bad in (outside, "https://evil.example/a.jpg", os.path.join(h.COVERS_DIR, "missing.jpg"), None, 3):
+            self.assertEqual(h.valid_cover(bad), "", bad)
+
+    def test_mixes_keep_any_services_cover(self):
+        local = os.path.join(h.COVERS_DIR, "rd-x.png")
+        pathlib.Path(local).write_bytes(b"x")
+        dz = "https://cdn-images.dzcdn.net/images/cover/" + "b" * 32 + "/250x250-000000-80-0-0.jpg"
+        self.assertEqual(h.clean_track({"id": "dz:1", "title": "a", "cover": dz})["cover"], dz)
+        self.assertEqual(h.clean_track({"id": "au:abc", "title": "a", "cover": local})["cover"], os.path.realpath(local))
+        self.assertNotIn("cover", h.clean_track({"id": "au:abc", "title": "a", "cover": "/etc/passwd"}))
+
+    def test_recently_played_has_covers(self):
+        dz = "https://cdn-images.dzcdn.net/images/cover/" + "c" * 32 + "/250x250-000000-80-0-0.jpg"
+        h.write_json_atomic(h.DZ_TRACKS_PATH, {"dz:2": {"title": "old", "cover": dz}})
+        with open(h.HISTORY_PATH, "w") as fh:
+            fh.write(json.dumps({"t": 1, "id": "dz:2", "title": "old", "played": 200, "duration": 200}) + "\n")
+            fh.write(json.dumps({"t": 2, "id": "dz:3", "title": "new", "played": 200, "duration": 200, "cover": dz}) + "\n")
+        recent = {t["id"]: t for t in h.recent_tracks()}
+        self.assertEqual(recent["dz:2"]["cover"], dz)
+        self.assertEqual(recent["dz:3"]["cover"], dz)
+
+    def test_embedded_cover_of_a_local_folder(self):
+        import shutil
+        import subprocess
+        if not shutil.which("ffmpeg"):
+            self.skipTest("ffmpeg")
+        music = os.path.join(self.tmp.name, "music", "Band", "Album")
+        os.makedirs(music)
+        art = os.path.join(self.tmp.name, "art.png")
+        subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=c=red:s=64x64", "-frames:v", "1", art], check=True)
+        subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=duration=1", "-i", art, "-map", "0:a", "-map", "1:v",
+                        "-c:v", "mjpeg", "-disposition:v:0", "attached_pic", os.path.join(music, "01 - Song.mp3")], check=True)
+        src = {"id": "0a1b2c3d", "kind": "local", "remote": "", "path": os.path.join(self.tmp.name, "music")}
+        idx = h.index_entries(src, h.local_entries(src["path"]))
+        self.assertTrue(os.path.isfile(idx["covers"]["Band/Album"]))
+
+
 class ServicePages(unittest.TestCase):
     def test_fixed_https_pages(self):
         for name, url in h.SERVICE_PAGES.items():

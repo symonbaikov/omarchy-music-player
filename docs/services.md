@@ -122,7 +122,8 @@ install it):
 A storage is checked once before it's added. Each folder with music becomes
 an album (named after the folder; the artist from the parent folder or an
 "Artist - Title" file name) with `cover.jpg` / `folder.jpg` / `front.png` as
-its cover, plus an "all songs" list per storage. The listing is kept for 6
+its cover (in a folder on this computer without one, the picture inside its
+first song), plus an "all songs" list per storage. The listing is kept for 6
 hours; refresh to read new files at once. Removing a storage (settings)
 never touches its files.
 

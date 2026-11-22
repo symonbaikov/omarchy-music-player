@@ -889,10 +889,47 @@ def clean_track(t):
     d = t.get("duration")
     out = {"id": t["id"], "title": clean_text(t.get("title"), 200) or t["id"], "artist": clean_text(t.get("artist"), 200),
            "duration": int(d) if isinstance(d, (int, float)) and 0 < d < 86400 else None}
-    cover = t.get("cover")
-    if isinstance(cover, str) and re.match(r"^https://(?:i\.scdn\.co|i[0-9]?\.sndcdn\.com)/[A-Za-z0-9_./-]{1,300}$", cover):
+    cover = valid_cover(t.get("cover"))
+    if cover:
         out["cover"] = cover
     return out
+
+
+# Where covers may come from: the services' own image hosts, or a picture the
+# helper saved in the covers folder (radio, Audius, podcasts, your files and
+# server, downloads).
+REMOTE_COVER_RE = re.compile(
+    r"^https://(?:i\.scdn\.co/image/[A-Za-z0-9]{1,100}|i[0-9]?\.sndcdn\.com/[A-Za-z0-9_./-]{1,300}"
+    r"|(?:(?:lh3|yt3)\.googleusercontent\.com|yt3\.ggpht\.com|i[0-9]?\.ytimg\.com)/[A-Za-z0-9_./=%~&?-]{1,500}"
+    r"|is[0-9]-ssl\.mzstatic\.com/image/thumb/[A-Za-z0-9_./=%-]{1,400}"
+    r"|thumbnailer\.mixcloud\.com/unsafe/[0-9x]{3,9}/[A-Za-z0-9_./-]{1,300}"
+    r"|cdn-images\.dzcdn\.net/images/(?:cover|playlist|artist)/[a-f0-9-]{32,131}/[0-9]{2,4}x[0-9]{2,4}-[0-9a-z-]{1,40}\.jpg)$")
+
+
+def valid_cover(cover):
+    if not isinstance(cover, str) or not cover:
+        return ""
+    if REMOTE_COVER_RE.match(cover):
+        return cover
+    if os.path.isabs(cover) and os.path.isfile(cover):
+        real = os.path.realpath(cover)
+        if os.path.dirname(real) == os.path.realpath(COVERS_DIR) and re.match(r"^[A-Za-z0-9_.-]{1,120}\.(?:jpg|png)$", os.path.basename(real)):
+            return real
+    return ""
+
+
+def known_cover(key):
+    """A cover for a song played before covers were noted in the history:
+    from what the helper keeps about it."""
+    if key.startswith("sp:"):
+        return valid_cover(((read_json(SP_TRACKS_PATH) or {}).get(key) or {}).get("cover"))
+    if key.startswith("dz:"):
+        return valid_cover(((read_json(DZ_TRACKS_PATH) or {}).get(key) or {}).get("cover"))
+    if key.startswith("sc:"):
+        return valid_cover(((read_json(SC_META_PATH) or {}).get(key) or {}).get("cover"))
+    if key.startswith("au:"):
+        return valid_cover(au_cover_path(key[3:]))
+    return ""
 
 
 def liked_list_ids():
@@ -3411,7 +3448,51 @@ def index_entries(src, entries):
         tracks.append({"id": f"cl:{src['id']}/{path_hash(rel)}", "rel": rel, "folder": folder, "size": size,
                        "title": title, "artist": artist, "album": album, "mtime": mtime[:19], "duration": None})
     tracks.sort(key=lambda t: natural_key(t["rel"]))
-    return {"tracks": tracks, "covers": fetch_cloud_covers(src, {f: c[1] for f, c in covers.items()})}
+    found = fetch_cloud_covers(src, {f: c[1] for f, c in covers.items()})
+    if src.get("kind") == "local":
+        found.update(embedded_covers(src, tracks, found))
+    return {"tracks": tracks, "covers": found}
+
+
+def embedded_covers(src, tracks, have):
+    """For a folder on this computer without a cover image: the picture
+    inside its first song (MP3, FLAC and M4A often carry one), saved next to
+    the other covers. Returns {folder: local file}."""
+    import concurrent.futures
+    first = {}
+    for t in tracks:
+        if t["folder"] not in have and t["folder"] not in first:
+            first[t["folder"]] = t["rel"]
+    todo = list(first.items())[:CLOUD_MAX_COVERS]
+
+    def one(item):
+        folder, rel = item
+        local = cloud_cover_path(src["id"], folder, "jpg")
+        if not os.path.isfile(local):
+            try:
+                path = local_file(src, rel)
+            except RuntimeError:
+                return folder, None
+            os.makedirs(COVERS_DIR, mode=0o700, exist_ok=True)
+            try:
+                subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", path, "-an", "-map", "0:v:0",
+                                "-frames:v", "1", "-vf", "scale=300:300:force_original_aspect_ratio=decrease",
+                                local + ".tmp.jpg"], capture_output=True, timeout=20, stdin=subprocess.DEVNULL)
+                if os.path.isfile(local + ".tmp.jpg") and os.path.getsize(local + ".tmp.jpg") > 0:
+                    os.replace(local + ".tmp.jpg", local)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            finally:
+                if os.path.exists(local + ".tmp.jpg"):
+                    os.unlink(local + ".tmp.jpg")
+        return folder, local if os.path.isfile(local) else None
+
+    out = {}
+    with concurrent.futures.ThreadPoolExecutor(4) as pool:
+        for folder, local in pool.map(one, todo):
+            if local:
+                out[folder] = local
+    return out
 
 
 def cloud_cover_path(src_id, folder, ext):
@@ -5703,6 +5784,8 @@ def cmd_history_add(args):
     entry = {"t": int(time.time()), "id": key, "title": clean_text(track.get("title"), 200),
              "artist": clean_text(track.get("artist"), 200), "played": played, "duration": duration,
              "finished": finished, "skipped": skipped}
+    if valid_cover(track.get("cover")):
+        entry["cover"] = valid_cover(track.get("cover"))
     os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
     with open(HISTORY_PATH, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -5741,7 +5824,11 @@ def recent_tracks(limit=100):
         if e["id"] in seen or e.get("skipped"):
             continue
         seen.add(e["id"])
-        out.append({"id": e["id"], "title": e.get("title") or e["id"], "artist": e.get("artist") or "", "duration": e.get("duration") or None})
+        t = {"id": e["id"], "title": e.get("title") or e["id"], "artist": e.get("artist") or "", "duration": e.get("duration") or None}
+        cover = valid_cover(e.get("cover")) or known_cover(e["id"])
+        if cover:
+            t["cover"] = cover
+        out.append(t)
         if len(out) >= limit:
             break
     return out

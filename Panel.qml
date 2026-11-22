@@ -1059,7 +1059,8 @@ Panel {
   function addToMix(target) {
     if (!addTrack || mixAddProc.running) return
     var t = { id: addTrack.id, title: addTrack.title || "", artist: addTrack.artist || "", duration: addTrack.duration || null }
-    if (addTrack.cover && String(addTrack.cover).indexOf("https://") === 0) t.cover = addTrack.cover
+    // Any cover the list showed; the helper keeps only allowed hosts and its own files.
+    if (addTrack.cover) t.cover = String(addTrack.cover)
     mixAddProc.command = helper(["mix-add", target.id, "--track", JSON.stringify(t)])
     mixAddProc.running = true
     closeAddTo()

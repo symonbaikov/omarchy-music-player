@@ -1087,7 +1087,23 @@ Panel {
     searchField.forceActiveFocus()
   }
 
+  // The search field under the tabs: results right away, wherever the panel
+  // was; Back returns there.
+  property string searchReturnView: ""
+  function searchFromBar(text) {
+    var q = String(text || "").trim()
+    if (q === "") return
+    if (view !== "explore") {
+      if (view === "addTo") closeAddTo()
+      searchReturnView = view === "settings" || view === "download" ? "playlists" : view
+      exploreService = service === "sc" ? "sc" : "yt"
+    }
+    view = "explore"
+    runSearch(q)
+  }
+
   function openExplore() {
+    searchReturnView = ""
     exploreService = "yt"
     view = "explore"
     cursorIndex = -1
@@ -1753,6 +1769,12 @@ Panel {
     if (view === "playlists" && cloudFormOpen && svc.cl.setup === "") { cloudFormOpen = false; return }
     if (view === "download") { view = viewBeforeDownload; cursorIndex = -1; return }
     if (view === "explore") {
+      if (exploreMode === "search" && searchReturnView !== "") {
+        view = searchReturnView
+        searchReturnView = ""
+        cursorIndex = -1
+        return
+      }
       if (exploreMode !== "home" && exploreService === "yt") showExploreHome()
       else { view = "playlists"; cursorIndex = 0 }
       return
@@ -1843,7 +1865,7 @@ Panel {
     case "d": openDownload(cursorOrCurrentTrack()); break
     case "e": openExplore(); break
     case "F": openFull(); break
-    case "/": if (view === "explore") searchField.forceActiveFocus(); else { openExplore(); searchField.forceActiveFocus() } break
+    case "/": searchField.forceActiveFocus(); break
     }
   }
 
@@ -1888,6 +1910,9 @@ Panel {
   onOpenedChanged: {
     if (!opened) return
     cursorIndex = -1
+    // The keys go to the panel's shortcuts, not the search field, until
+    // the field is clicked or "/" is pressed.
+    Qt.callLater(function() { if (searchField.activeFocus) searchField.focus = false; if (panel.loadedContent) panel.loadedContent.forceActiveFocus() })
     if (playlists.length === 0 || !playlistsLoading) loadYouTube(false)
     if (service !== "yt") loadService(service, false)
     if (svc.my.items.length === 0) loadService("my", false)
@@ -2013,6 +2038,66 @@ Panel {
               fontFamily: root.fontFamily
               onClicked: root.view === "settings" ? root.backToPlaylists() : root.openSettings()
             }
+          }
+        }
+
+        // ---------- search, across the panel under the tabs ----------
+        // YouTube Music's songs (SoundCloud's on its tab); Enter shows them.
+        BorderSurface {
+          width: parent.width
+          implicitHeight: Style.space(40)
+          radius: Style.cornerRadius
+          color: Style.controlFill(searchField.activeFocus, searchMouse.containsMouse, root.fg, Commons.Color.accent)
+          borderSpec: Border.controlSpec(searchField.activeFocus ? "focus" : "normal", root.fg, Commons.Color.accent)
+
+          MouseArea {
+            id: searchMouse
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.IBeamCursor
+            onClicked: searchField.forceActiveFocus()
+          }
+          PlainText {
+            id: searchIcon
+            anchors.left: parent.left
+            anchors.leftMargin: Style.space(12)
+            anchors.verticalCenter: parent.verticalCenter
+            text: Model.GLYPH.search
+            color: root.dim
+            font.pixelSize: Style.font.subtitle
+            elide: Text.ElideNone
+          }
+          TextInput {
+            id: searchField
+            anchors.left: searchIcon.right
+            anchors.leftMargin: Style.space(10)
+            anchors.right: parent.right
+            anchors.rightMargin: Style.space(12)
+            anchors.verticalCenter: parent.verticalCenter
+            clip: true
+            color: root.fg
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.subtitle
+            selectByMouse: true
+            onAccepted: { root.searchFromBar(text); focus = false }
+            Keys.onEscapePressed: function(event) {
+              if (text !== "") text = ""
+              else focus = false
+              event.accepted = true
+            }
+            Keys.onDownPressed: function(event) {
+              focus = false
+              root.cursorIndex = 0
+              event.accepted = true
+            }
+          }
+          PlainText {
+            anchors.fill: searchField
+            verticalAlignment: Text.AlignVCenter
+            visible: searchField.text === "" && !searchField.preeditText
+            text: (root.view === "explore" ? root.exploreService === "sc" : root.service === "sc") ? strings.t("sc.searchField") : strings.t("explore.search")
+            color: root.dim
+            font.pixelSize: Style.font.subtitle
           }
         }
 
@@ -2602,66 +2687,6 @@ Panel {
               fontFamily: root.fontFamily
               onClicked: root.refreshList()
             }
-          }
-        }
-
-        // ---------- explore: search ----------
-        BorderSurface {
-          visible: root.view === "explore"
-          width: parent.width
-          implicitHeight: Style.space(40)
-          radius: Style.cornerRadius
-          color: Style.controlFill(searchField.activeFocus, searchMouse.containsMouse, root.fg, Commons.Color.accent)
-          borderSpec: Border.controlSpec(searchField.activeFocus ? "focus" : "normal", root.fg, Commons.Color.accent)
-
-          PlainText {
-            id: searchIcon
-            anchors.left: parent.left
-            anchors.leftMargin: Style.space(12)
-            anchors.verticalCenter: parent.verticalCenter
-            text: Model.GLYPH.search
-            color: root.dim
-            font.pixelSize: Style.font.subtitle
-            elide: Text.ElideNone
-          }
-          TextInput {
-            id: searchField
-            anchors.left: searchIcon.right
-            anchors.leftMargin: Style.space(10)
-            anchors.right: parent.right
-            anchors.rightMargin: Style.space(12)
-            anchors.verticalCenter: parent.verticalCenter
-            clip: true
-            color: root.fg
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.subtitle
-            selectByMouse: true
-            onAccepted: { root.runSearch(text); focus = false }
-            Keys.onEscapePressed: function(event) {
-              if (text !== "") text = ""
-              else focus = false
-              event.accepted = true
-            }
-            Keys.onDownPressed: function(event) {
-              focus = false
-              root.cursorIndex = 0
-              event.accepted = true
-            }
-          }
-          PlainText {
-            anchors.fill: searchField
-            verticalAlignment: Text.AlignVCenter
-            visible: searchField.text === "" && !searchField.preeditText
-            text: root.exploreService === "sc" ? strings.t("sc.searchField") : strings.t("explore.search")
-            color: root.dim
-            font.pixelSize: Style.font.subtitle
-          }
-          MouseArea {
-            id: searchMouse
-            anchors.fill: parent
-            hoverEnabled: true
-            cursorShape: Qt.IBeamCursor
-            onClicked: searchField.forceActiveFocus()
           }
         }
 

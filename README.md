@@ -107,6 +107,9 @@ that song. Fades, Peak mix and Downloads work across services.
   through its best part. The climax comes from YouTube's "most replayed"
   graph where a song has one, and from the audio's loudness: the loudest
   stretch, entered at its sharpest rise.
+- **Search**, right under the service tabs, across the panel: type and
+  press `Enter` (or `/` to get there) for YouTube Music's songs, or
+  SoundCloud's on its tab; Back returns to where you were.
 - **Explore**, at the top of your playlists: search YouTube Music for
   songs, and browse new albums and singles, trending songs, new music
   videos, charts, and moods & genres. A song plays with its radio after

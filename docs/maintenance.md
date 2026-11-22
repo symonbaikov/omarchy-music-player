@@ -5,10 +5,17 @@ The repository looks after itself, with a human approving every change.
 - **Watchdog** (`.github/workflows/watchdog.yml`, every 3 hours):
   `tools/watchdog.py` plays public songs through the plugin's own helper with
   the latest yt-dlp: a radio list, real playback in mpv, each YouTube client,
-  the backup download, a peak mix and the mirrors. When playback is broken it
-  opens a `watchdog` issue, and closes it once playback works again. When
-  YouTube only refuses the CI runner itself (a bot check on a data-center
-  IP), the run is *inconclusive* and raises no alarm.
+  the backup download, a peak mix and the mirrors. It also checks every
+  service that needs no account, through the helper's own commands: Apple
+  Music and Deezer (charts, and a song's YouTube Music match), SoundCloud
+  (likes with covers, search, a stream), Mixcloud, Audius, radio and
+  podcasts (a list and a stream that opens), Explore, lyrics and tabs.
+  When YouTube playback is broken it opens a `watchdog` issue; when a
+  service is, a `watchdog-services` issue naming the broken ones. Each is
+  closed once things work again. When a service only refuses the CI runner
+  itself (a bot check on a data-center IP), the run is *inconclusive* and
+  raises no alarm. Run part of it locally with
+  `python3 tools/watchdog.py --only soundcloud,radio`.
 - **Fix**: for a new breakage, Claude (claude-code-action) reproduces it,
   finds the cause and opens a pull request with the fix, its tests and a
   version bump, labelled `auto-fix`. If only a newer yt-dlp helps, it says so

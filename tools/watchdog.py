@@ -12,6 +12,23 @@ playing to a null audio output:
   peakmix   `mixprep`: two songs downloaded, analyzed and mixed
   mirrors   which backup mirrors answer (for information only)
 
+and every other service that works without an account, each through the
+helper's own commands: its lists (with covers) and a stream that opens.
+
+  apple       Apple Music's chart, search, a song's YouTube Music match
+  deezer      Deezer's chart and a song's YouTube Music match
+  soundcloud  a public profile's likes (covers from oEmbed), search, a stream
+  mixcloud    popular mixes in a genre and a mix's stream
+  audius      trending songs (covers) and a song's stream
+  radio       the top stations and a station's stream
+  podcasts    Apple Podcasts' search, a feed's episodes and an episode's file
+  explore     YouTube Music's Explore without an account
+  lyrics      LRCLIB's timed lyrics for a song
+  scores      Songsterr's tabs for a song
+
+(Spotify, your files, servers, scrobbling and AI Mix need an account or
+your own setup; the unit tests cover them.)
+
 Each check ends as ok, fail, or blocked. "blocked" means YouTube refused
 this machine itself (a bot check, rate limiting), which happens to
 data-center IPs such as CI runners and says nothing about users; it must
@@ -21,8 +38,13 @@ not raise an alarm. The overall status is:
   inconclusive  a core check was blocked, none failed
   ok            everything core worked
 
-Usage: watchdog.py [--json FILE] [--report FILE]
-Prints the status; writes `status=<status>` to $GITHUB_OUTPUT when set.
+The services get a status of their own the same way (broken if one of
+them failed for real), so a service that breaks is reported without
+calling YouTube playback broken.
+
+Usage: watchdog.py [--json FILE] [--report FILE] [--only NAME,NAME]
+Prints the status; writes `status=`, `services=` and `broken=` (the broken
+services) to $GITHUB_OUTPUT when set.
 """
 
 import json
@@ -200,12 +222,190 @@ def check_mirrors(env):
             "informational": True}
 
 
+# ---- other services ------------------------------------------------------------
+
+def last_of(lines, kind):
+    return next((m for m in reversed(lines) if m.get("type") == kind), None)
+
+
+def items_of(env, *args, kind="tracks", timeout=180):
+    proc, lines = env.helper(*args, timeout=timeout)
+    msg = last_of(lines, kind)
+    return (msg or {}).get("items") or [], ("" if msg else last_error(lines, proc))
+
+
+def covered(items):
+    return sum(1 for t in items if t.get("cover")) / max(1, len(items))
+
+
+def resolve(env, key):
+    proc, lines = env.helper("resolve", key, timeout=120)
+    msg = last_of(lines, "resolved")
+    return (msg or {}).get("url") or "", ("" if msg else last_error(lines, proc))
+
+
+def stream_opens(url, timeout=60):
+    """ffprobe reads the start of the stream: it's reachable and has audio."""
+    try:
+        proc = subprocess.run(["ffprobe", "-v", "error", "-rw_timeout", "20000000", "-show_entries",
+                               "stream=codec_type", "-of", "csv=p=0", url],
+                              capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return False, "the stream didn't answer in time"
+    ok = proc.returncode == 0 and "audio" in proc.stdout
+    return ok, "" if ok else ((proc.stderr or "").strip()[-200:] or "no audio in it")
+
+
+def ytdlp_stream(url):
+    proc = subprocess.run(["yt-dlp", "--ignore-config", "--no-warnings", "-g", "-f", "bestaudio/best", "--", url],
+                          capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
+    ok = proc.returncode == 0 and proc.stdout.strip().startswith("http")
+    err = "" if ok else ([l for l in proc.stderr.splitlines() if l.startswith("ERROR")] or [proc.stderr[-200:]])[-1]
+    return ok, err
+
+
+def need(items, least, what, err, cover=None):
+    """None when the list is fine, else why not."""
+    if len(items) < least:
+        return err or f"only {len(items)} {what}"
+    if cover is not None and covered(items) < cover:
+        return f"{what}: only {covered(items):.0%} have a cover"
+    return None
+
+
+def helper_module():
+    from importlib.machinery import SourceFileLoader
+    return SourceFileLoader("ytmusic_helper", HELPER).load_module()
+
+
+def check_apple(env):
+    items, err = items_of(env, "tracks", "am:top", "--max-age", "0")
+    bad = need(items, 50, "chart songs", err, cover=0.8)
+    if bad:
+        return outcome(False, bad)
+    found, err = items_of(env, "search", "Ghost Love Score Nightwish", "--service", "am", kind="search")
+    if not found:
+        return outcome(False, err or "search found nothing")
+    url, err = resolve(env, found[0]["id"])
+    if "music.youtube.com/watch?v=" not in url:
+        return outcome(False, err or "no YouTube Music match")
+    return outcome(True, f"chart {len(items)}, search {len(found)}, matched")
+
+
+def check_deezer(env):
+    items, err = items_of(env, "tracks", "dz:chart", "--max-age", "0")
+    bad = need(items, 50, "chart songs", err, cover=0.8)
+    if bad:
+        return outcome(False, bad)
+    url, err = resolve(env, items[0]["id"])
+    if "music.youtube.com/watch?v=" not in url:
+        return outcome(False, err or "no YouTube Music match")
+    return outcome(True, f"chart {len(items)}, matched")
+
+
+def check_soundcloud(env):
+    items, err = items_of(env, "tracks", "sc:likes:skrillex", "--browser", "none", "--max-age", "0")
+    bad = need(items, 5, "liked songs", err, cover=0.6)
+    if bad:
+        return outcome(False, bad)
+    found, err = items_of(env, "search", "lofi hip hop", "--service", "sc", "--browser", "none", kind="search")
+    if len(found) < 5:
+        return outcome(False, err or f"search found {len(found)}")
+    ok, err = ytdlp_stream(helper_module().sc_url(found[0]["id"]))
+    if not ok:
+        return outcome(False, err)
+    return outcome(True, f"likes {len(items)} ({covered(items):.0%} covers), search {len(found)}, stream ok")
+
+
+def check_mixcloud(env):
+    items, err = items_of(env, "tracks", "mc:hot:house", "--max-age", "0")
+    bad = need(items, 10, "mixes", err, cover=0.6)
+    if bad:
+        return outcome(False, bad)
+    ok, err = ytdlp_stream(helper_module().mc_url(items[0]["id"]))
+    return outcome(ok, f"{len(items)} mixes, stream ok" if ok else err)
+
+
+def check_audius(env):
+    items, err = items_of(env, "tracks", "au:trending", "--max-age", "0")
+    bad = need(items, 10, "songs", err, cover=0.6)
+    if bad:
+        return outcome(False, bad)
+    url, err = resolve(env, items[0]["id"])
+    if not url:
+        return outcome(False, err)
+    ok, err = stream_opens(url)
+    return outcome(ok, f"{len(items)} songs, stream ok" if ok else err)
+
+
+def check_radio(env):
+    items, err = items_of(env, "tracks", "rd:top", "--max-age", "0")
+    bad = need(items, 10, "stations", err)
+    if bad:
+        return outcome(False, bad)
+    last = ""
+    for station in items[:4]:          # stations come and go; one of the top must play
+        url, err = resolve(env, station["id"])
+        if url:
+            ok, err = stream_opens(url, timeout=40)
+            if ok:
+                return outcome(True, f"{len(items)} stations, a stream plays")
+        last = err
+    return outcome(False, "none of the top 4 stations opened: " + last)
+
+
+def check_podcasts(env):
+    shows, err = items_of(env, "search", "The Rest Is History", "--service", "pc", kind="search")
+    if not shows:
+        return outcome(False, err or "search found nothing")
+    eps, err = items_of(env, "tracks", shows[0]["id"], "--max-age", "0")
+    if not eps:
+        return outcome(False, err or "the feed has no episodes")
+    url, err = resolve(env, eps[0]["id"])
+    if not url:
+        return outcome(False, err)
+    ok, err = stream_opens(url)
+    return outcome(ok, f"{len(shows)} shows, {len(eps)} episodes, an episode opens" if ok else err)
+
+
+def check_explore(env):
+    proc, lines = env.helper("explore", "--max-age", "0")
+    sections = (last_of(lines, "explore") or {}).get("sections") or []
+    if len(sections) >= 3:
+        return outcome(True, f"{len(sections)} sections")
+    return outcome(False, last_error(lines, proc) if not sections else f"only {len(sections)} sections")
+
+
+def check_lyrics(env):
+    proc, lines = env.helper("lyrics", SONG_A, "--title", "Never Gonna Give You Up", "--artist", "Rick Astley",
+                             "--duration", "213")
+    msg = last_of(lines, "lyrics")
+    synced = (msg or {}).get("synced") or []
+    if len(synced) >= 10:
+        return outcome(True, f"{len(synced)} timed lines from {msg.get('source')}")
+    return outcome(False, last_error(lines, proc) if not msg else "no timed lyrics")
+
+
+def check_scores(env):
+    proc, lines = env.helper("scores", SONG_A, "--title", "Never Gonna Give You Up", "--artist", "Rick Astley")
+    msg = last_of(lines, "scores")
+    items = (msg or {}).get("items") or []
+    if items:
+        return outcome(True, f"{len(items)} tabs")
+    return outcome(False, last_error(lines, proc) if not msg else "no tabs found")
+
+
 CHECKS = [("lists", check_lists), ("playback", check_playback), ("clients", check_clients),
           ("backup", check_backup), ("peakmix", check_peakmix), ("mirrors", check_mirrors)]
+SERVICE_CHECKS = [("apple", check_apple), ("deezer", check_deezer), ("soundcloud", check_soundcloud),
+                  ("mixcloud", check_mixcloud), ("audius", check_audius), ("radio", check_radio),
+                  ("podcasts", check_podcasts), ("explore", check_explore), ("lyrics", check_lyrics),
+                  ("scores", check_scores)]
+SERVICES = [name for name, _ in SERVICE_CHECKS]
 
 
-def overall(results):
-    core = [results[name]["result"] for name in CORE if name in results]
+def overall(results, names=CORE):
+    core = [results[name]["result"] for name in names if name in results]
     if "fail" in core:
         return "broken"
     if "blocked" in core:
@@ -227,9 +427,10 @@ def versions():
     return out
 
 
-def markdown(status, results, vers):
+def markdown(status, results, vers, services="ok"):
     icon = {"ok": "✅", "fail": "❌", "blocked": "⛔"}
-    lines = [f"**Status: {status}**", "", "| Check | Result | Detail |", "|---|---|---|"]
+    lines = [f"**YouTube Music playback: {status}** · **Other services: {services}**", "",
+             "| Check | Result | Detail |", "|---|---|---|"]
     for name, r in results.items():
         detail = str(r.get("detail", "")).replace("|", "\\|").replace("\n", " ")[:300]
         extra = " (info)" if r.get("informational") else ""
@@ -244,10 +445,13 @@ def main():
     args = sys.argv[1:]
     def opt(name):
         return args[args.index(name) + 1] if name in args and args.index(name) + 1 < len(args) else None
+    only = set((opt("--only") or "").split(",")) - {""}
     env = Env()
     results = {}
     try:
-        for name, fn in CHECKS:
+        for name, fn in CHECKS + SERVICE_CHECKS:
+            if only and name not in only:
+                continue
             try:
                 results[name] = fn(env)
             except Exception as exc:          # a crash in a check is a failure of that check
@@ -257,19 +461,22 @@ def main():
     finally:
         env.cleanup()
     status = overall(results)
+    services = overall(results, SERVICES)
+    broken = [name for name in SERVICES if results.get(name, {}).get("result") == "fail"]
     vers = versions()
-    report = markdown(status, results, vers)
+    report = markdown(status, results, vers, services)
     if opt("--json"):
         with open(opt("--json"), "w") as fh:
-            json.dump({"status": status, "results": results, "versions": vers, "at": int(time.time())}, fh, indent=2)
+            json.dump({"status": status, "services": services, "broken": broken, "results": results,
+                       "versions": vers, "at": int(time.time())}, fh, indent=2)
     if opt("--report"):
         with open(opt("--report"), "w") as fh:
             fh.write(report)
     if os.environ.get("GITHUB_OUTPUT"):
         with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
-            fh.write(f"status={status}\n")
+            fh.write(f"status={status}\nservices={services}\nbroken={','.join(broken)}\n")
     print(report)
-    print(status)
+    print(status, "/ services:", services)
 
 
 if __name__ == "__main__":

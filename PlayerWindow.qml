@@ -2154,7 +2154,7 @@ FloatingWindow {
       anchors.fill: parent
       radius: Style.cornerRadius
       color: row.now ? Qt.rgba(win.accent.r, win.accent.g, win.accent.b, 0.16)
-        : rowMouse.containsMouse ? Qt.rgba(win.fg.r, win.fg.g, win.fg.b, 0.07) : "transparent"
+        : rowHover.hovered ? Qt.rgba(win.fg.r, win.fg.g, win.fg.b, 0.07) : "transparent"
     }
     Txt {
       id: rowNumber
@@ -2228,13 +2228,16 @@ FloatingWindow {
     MouseArea {
       id: rowMouse
       anchors.fill: parent
-      hoverEnabled: true
       cursorShape: Qt.PointingHandCursor
       onClicked: row.clicked()
     }
+    // Hover over the whole row, its buttons included: a MouseArea's hover
+    // leaves for the button under it, which hid the buttons, which brought
+    // the hover back, over and over.
+    HoverHandler { id: rowHover }
     // Like and radio for a YouTube song, over the row's time while hovered.
     Row {
-      visible: rowMouse.containsMouse && row.isSong && row.track && Model.isYouTube(row.track.id) && !row.compact
+      visible: rowHover.hovered && row.isSong && row.track && Model.isYouTube(row.track.id) && !row.compact
       anchors.right: rowTime.left
       anchors.rightMargin: Style.space(8)
       anchors.verticalCenter: parent.verticalCenter
@@ -2501,6 +2504,11 @@ FloatingWindow {
   // about three rows, eased; a touchpad moves exactly with the fingers.
   // (Qt's own wheel scrolling is a slow flick.) Sideways gestures scroll a
   // row of covers; up and down over one scrolls the page around it.
+  // Wheel and touchpad scrolling with inertia, like on a Mac: a wheel notch
+  // sets the list gliding (notches in a row add up), and a touchpad moves the
+  // list with the fingers and lets it glide on when they lift. The glide is
+  // the Flickable's own flick, so it slows down naturally and stops at the
+  // ends.
   component WheelScroll: WheelHandler {
     id: wheel
     signal scrolled()
@@ -2515,38 +2523,88 @@ FloatingWindow {
       return null
     }
 
+    // How far one wheel notch glides, and how much faster than the fingers
+    // a touchpad moves the list.
+    readonly property real notch: Style.space(240)
+    readonly property real touchGain: 1.6
     property var view: null
     property bool sideways: false
-    // A handler holds no children: the animation is a property.
-    property NumberAnimation ease: NumberAnimation {
-      target: wheel.view
-      property: wheel.sideways ? "contentX" : "contentY"
-      duration: Style.duration(140)
-      easing.type: Easing.OutCubic
+    // The glide we started last: its speed (px/s, + towards the start of
+    // the list, as Flickable.flick takes it) and when.
+    property real glideV: 0
+    property real glideAt: 0
+    // Touchpad samples of the last ~100 ms, for the speed when fingers lift.
+    property var samples: []
+
+    function glideLeft(now) {
+      if (wheel.glideV === 0 || !wheel.view) return 0
+      var decel = wheel.view.flickDeceleration
+      var v = Math.abs(wheel.glideV) - decel * (now - wheel.glideAt) / 1000
+      return v > 0 ? v * (wheel.glideV > 0 ? 1 : -1) : 0
+    }
+    function glide(v, velocity) {
+      if (Math.abs(velocity) < 60) return
+      v.maximumFlickVelocity = Math.max(v.maximumFlickVelocity, 12000)
+      wheel.glideV = velocity
+      wheel.glideAt = Date.now()
+      if (wheel.sideways) v.flick(velocity, 0)
+      else v.flick(0, velocity)
+    }
+    function move(v, by) {
+      var lo = wheel.sideways ? v.originX : v.originY
+      var hi = wheel.sideways ? v.originX + v.contentWidth - v.width : v.originY + v.contentHeight - v.height
+      var at = wheel.sideways ? v.contentX : v.contentY
+      var to = Math.max(lo, Math.min(hi, at - by))
+      if (wheel.sideways) v.contentX = to
+      else v.contentY = to
+    }
+
+    property Timer lift: Timer {
+      interval: 70
+      onTriggered: {
+        var v = wheel.view
+        var now = Date.now()
+        var recent = wheel.samples.filter(function(x) { return now - x.t < 120 })
+        wheel.samples = []
+        if (!v || recent.length < 2) return
+        var dist = 0
+        for (var i = 0; i < recent.length; i++) dist += recent[i].d
+        var span = Math.max(16, now - interval - recent[0].t)
+        wheel.glide(v, dist * wheel.touchGain / span * 1000 * 0.9)
+      }
     }
 
     onWheel: function(event) {
-      var dx = event.pixelDelta.x !== 0 ? event.pixelDelta.x : event.angleDelta.x / 120 * Style.space(110)
-      var dy = event.pixelDelta.y !== 0 ? event.pixelDelta.y : event.angleDelta.y / 120 * Style.space(110)
+      var touchpad = event.pixelDelta.x !== 0 || event.pixelDelta.y !== 0
+      var dx = touchpad ? event.pixelDelta.x : event.angleDelta.x / 120
+      var dy = touchpad ? event.pixelDelta.y : event.angleDelta.y / 120
       var side = Math.abs(dx) > Math.abs(dy)
       var v = scrollable(wheel.parent, side)
       if (!v) return
-      var touchpad = event.pixelDelta.x !== 0 || event.pixelDelta.y !== 0
-      var from = wheel.ease.running && wheel.view === v && wheel.sideways === side ? wheel.ease.to
-        : (side ? v.contentX : v.contentY)
-      var lo = side ? v.originX : v.originY
-      var hi = side ? v.originX + v.contentWidth - v.width : v.originY + v.contentHeight - v.height
-      var to = Math.max(lo, Math.min(hi, from - (side ? dx : dy)))
-      wheel.ease.stop()
-      if (touchpad || Style.reduceMotion) {
-        if (side) v.contentX = to
-        else v.contentY = to
+      var d = side ? dx : dy
+      var now = Date.now()
+      if (wheel.view !== v || wheel.sideways !== side) wheel.glideV = 0
+      wheel.view = v
+      wheel.sideways = side
+      if (Style.reduceMotion) {
+        wheel.move(v, touchpad ? d : d * wheel.notch)
+      } else if (touchpad) {
+        // Fingers on the pad: follow them, and glide on once they lift.
+        if (v.flicking) v.cancelFlick()
+        wheel.glideV = 0
+        wheel.move(v, d * wheel.touchGain)
+        wheel.samples = wheel.samples.concat([{ t: now, d: d }]).slice(-12)
+        if (event.phase === Qt.ScrollEnd) { wheel.lift.stop(); wheel.lift.triggered() }
+        else wheel.lift.restart()
       } else {
-        wheel.view = v
-        wheel.sideways = side
-        wheel.ease.from = side ? v.contentX : v.contentY
-        wheel.ease.to = to
-        wheel.ease.start()
+        // A wheel notch: glide this far, on top of what's left of the glide
+        // in the same direction (so quick notches speed it up).
+        var decel = v.flickDeceleration
+        var left = wheel.glideLeft(now)
+        var dir = d > 0 ? 1 : -1
+        var carried = left * dir > 0 ? left * left / (2 * decel) : 0
+        var dist = carried + Math.abs(d) * wheel.notch
+        wheel.glide(v, dir * Math.sqrt(2 * decel * dist))
       }
       event.accepted = true
       wheel.scrolled()

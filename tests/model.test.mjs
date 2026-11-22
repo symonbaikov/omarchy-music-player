@@ -553,6 +553,8 @@ test("untimed lyrics follow the song roughly", () => {
   assert.equal(M.roughLyricsFraction(290, 300), 1)         // the outro
   assert.equal(M.roughLyricsFraction(50, 0), 0)
   assert.equal(M.roughLyricsFraction(NaN, 300), 0)
+})
+
 test("AI Mix song languages", () => {
   assert.deepEqual(Array.from(M.aiLanguages("ru, EN,xx,ru,instrumental")), ["ru", "en", "instrumental"])
   assert.deepEqual(Array.from(M.aiLanguages("")), [])

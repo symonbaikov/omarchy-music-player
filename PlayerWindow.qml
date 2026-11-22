@@ -229,19 +229,31 @@ FloatingWindow {
     id: ambient
     anchors.fill: parent
     visible: win.bigCover !== "" && ambientImage.status === Image.Ready
-    Image {
-      id: ambientImage
+    // The cover cropped to the window's shape, a little larger than the
+    // window so the blur has no dark rim. Cropping happens by clipping, so
+    // the blur gets a clipped layer of it (given the Image itself, it would
+    // take the whole uncropped picture and stretch it).
+    Item {
+      id: ambientBox
       anchors.fill: parent
-      source: win.bigCover
-      sourceSize.width: 160
-      sourceSize.height: 160
-      fillMode: Image.PreserveAspectCrop
-      asynchronous: true
+      anchors.margins: -Style.space(80)
+      clip: true
       visible: false
+      layer.enabled: true
+      Image {
+        id: ambientImage
+        anchors.fill: parent
+        source: win.bigCover
+        sourceSize.width: 160
+        sourceSize.height: 160
+        fillMode: Image.PreserveAspectCrop
+        asynchronous: true
+      }
     }
     MultiEffect {
-      anchors.fill: parent
-      source: ambientImage
+      anchors.fill: ambientBox
+      source: ambientBox
+      autoPaddingEnabled: false
       blurEnabled: true
       blur: 1.0
       blurMax: 64
@@ -1090,13 +1102,15 @@ FloatingWindow {
 
       // The cover as big as fits with the names and controls under it, also
       // in a small window.
-      readonly property real artSize: Math.max(Style.space(96), Math.min(height - Style.space(300), width * 0.36))
+      readonly property real artSize: Math.max(Style.space(96), Math.min(height - Style.space(400), width * 0.36))
 
       Column {
         id: nowLeft
-        anchors.verticalCenter: parent.verticalCenter
+        // Centered, but always below the back button.
+        y: Math.max(Style.space(72), (parent.height - height) / 2)
         x: Math.max(win.gutter, (parent.width * 0.55 - width) / 2)
-        width: nowPage.artSize
+        // As wide as the cover, but never too narrow for the title.
+        width: Math.max(nowPage.artSize, Math.min(parent.width * 0.5, Style.space(420)))
         spacing: Style.space(18)
 
         Cover {
@@ -1108,6 +1122,8 @@ FloatingWindow {
           shadow: true
           onStatusFailed: if (win.p.currentTrack && String(url).indexOf("maxresdefault") >= 0) win.p.largeCoverFailedFor = win.p.currentTrack.id
         }
+        // Room for the cover's shadow, so the title starts below it.
+        Item { width: 1; height: Style.space(14) }
         Column {
           width: parent.width
           spacing: Style.space(4)
@@ -1156,6 +1172,8 @@ FloatingWindow {
           }
         }
         Row {
+          // In a short window the player along the bottom is enough.
+          visible: nowPage.height >= Style.space(620)
           anchors.horizontalCenter: parent.horizontalCenter
           spacing: Style.space(28)
           Transport { glyph: Model.GLYPH.previous; size: Style.font.displayLarge; onClicked: win.p.previous() }
@@ -1935,9 +1953,9 @@ FloatingWindow {
       source: shadowShape
       visible: cover.shadow && cover.shown
       shadowEnabled: true
-      shadowBlur: 0.8
-      shadowOpacity: 0.5
-      shadowVerticalOffset: Style.space(10)
+      shadowBlur: 0.7
+      shadowOpacity: 0.35
+      shadowVerticalOffset: Style.space(6)
     }
 
     // The cover itself, cropped square by clipping. Rounded corners come

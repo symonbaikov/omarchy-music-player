@@ -7,7 +7,7 @@
   "license": "MIT",
   "homepage": "https://github.com/symonbaikov/omarchy-ytmusic-mpv",
   "repository": "https://github.com/symonbaikov/omarchy-ytmusic-mpv",
-  "description": "The only Apple Music experience on Omarchy you ever need! YouTube Music, Spotify, SoundCloud and your own cloud storage (S3, Google Drive, Dropbox, SFTP, SMB, WebDAV) in one bar widget and a full-screen player, played by mpv without a browser: mixes across services, Peak mix, fades, downloads.",
+  "description": "The only Apple Music experience on Omarchy you ever need! YouTube Music, Spotify, SoundCloud, your own files and music server, 50,000 radio stations and podcasts in one bar widget and a player window, played by mpv without a browser: an AI Mix made from what you listen to, lyrics in time, chords for learning a song, Peak mix, downloads.",
   "keywords": [
     "cloud",
     "mpv",

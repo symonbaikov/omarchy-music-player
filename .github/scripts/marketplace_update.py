@@ -20,8 +20,8 @@ import urllib.request
 
 MARKETPLACE = "omacom/omarchy-plugin-marketplace"
 PLUGIN_ID = "io.github.symonbaikov.ytmusic-mpv"
-SOURCE = "https://github.com/symonbaikov/omarchy-ytmusic-mpv"
-SUBMISSION_TITLE = "[Plugin]: YouTube Music (mpv)"
+SOURCE = "https://github.com/symonbaikov/omarchy-music-player"
+SUBMISSION_TITLE = "[Plugin]: Omarchy Music Player"
 REGISTRY = f"https://raw.githubusercontent.com/{MARKETPLACE}/main/registry.json"
 
 VERIFY_BODY = """### Verification action

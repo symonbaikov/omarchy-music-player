@@ -4,6 +4,14 @@
 
   <p><strong>The only Apple Music experience on Omarchy you ever need!</strong></p>
 
+  <p>
+    <img src="docs/icons/youtubemusic.svg" width="32" height="32" alt="YouTube Music" title="YouTube Music" />&nbsp;&nbsp;
+    <img src="docs/icons/spotify.svg" width="32" height="32" alt="Spotify" title="Spotify" />&nbsp;&nbsp;
+    <img src="docs/icons/soundcloud.svg" width="32" height="32" alt="SoundCloud" title="SoundCloud" />&nbsp;&nbsp;
+    <img src="docs/icons/cloud.svg" width="32" height="32" alt="Your cloud storage" title="Your cloud storage: S3, Google Drive, Dropbox, OneDrive, SFTP, SMB, WebDAV, FTP" />&nbsp;&nbsp;
+    <img src="docs/icons/mymusic.svg" width="32" height="32" alt="My Music" title="My Music: mixes across services" />
+  </p>
+
   <img alt="The panel: Liked Music" src="preview.png" width="360" />
   <br /><br />
   <img alt="Full screen: Now Playing" src="preview-full.jpg" />
@@ -24,11 +32,11 @@ permanent. It started as a YouTube Music player.)
 
 | Tab | What you get | Setup |
 |---|---|---|
-| YouTube Music | Your playlists, Liked Music, My Supermix, Explore, search, radio, likes, add to playlist | The browser you're signed in with (see Settings) |
-| Spotify | Your Liked Songs and the playlists you own or collaborate on | Once: your own Spotify app (below) |
-| SoundCloud | Your likes and playlists, and search across SoundCloud | Your profile name or link |
-| Cloud | The music folders in your own storage: every folder an album, with its cover | Pick the storage and sign in (below) |
-| My Music | **My Mix** (your likes from every service, alternating), your own mixed playlists, Downloads | Nothing |
+| <img src="docs/icons/youtubemusic.svg" width="20" height="20" alt="" align="center" />&nbsp;YouTube&nbsp;Music | Your playlists, Liked Music, My Supermix, Explore, search, radio, likes, add to playlist | The browser you're signed in with (see Settings) |
+| <img src="docs/icons/spotify.svg" width="20" height="20" alt="" align="center" />&nbsp;Spotify | Your Liked Songs and the playlists you own or collaborate on | Once: your own Spotify app (below) |
+| <img src="docs/icons/soundcloud.svg" width="20" height="20" alt="" align="center" />&nbsp;SoundCloud | Your likes and playlists, and search across SoundCloud | Your profile name or link |
+| <img src="docs/icons/cloud.svg" width="20" height="20" alt="" align="center" />&nbsp;Cloud | The music folders in your own storage: every folder an album, with its cover | Pick the storage and sign in (below) |
+| <img src="docs/icons/mymusic.svg" width="20" height="20" alt="" align="center" />&nbsp;My&nbsp;Music | **My Mix** (your likes from every service, alternating), your own mixed playlists, Downloads | Nothing |
 
 **Spotify** keeps its own audio locked to Spotify's apps, so its songs play
 from their **YouTube Music match** (found by ISRC, then title, artist and

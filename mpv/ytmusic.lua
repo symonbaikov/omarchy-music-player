@@ -220,6 +220,11 @@ local function is_content_error(text)
     return false
 end
 
+-- Spotify and cloud songs are queued under these schemes (see "Spotify and
+-- cloud songs" below).
+local SPOTIFY = "ytmusic-spotify://"
+local CLOUD = "ytmusic-cloud://"
+
 local function watch_id(url)
     return url and url:match("^https://music%.youtube%.com/watch%?v=([%w_-]+)$")
 end
@@ -315,7 +320,9 @@ mp.register_event("end-file", function(e)
     for i, item in ipairs(list) do
         if item.id == entry_id then index, entry = i - 1, item end
     end
-    if not entry or not watch_id(entry.filename) then return end
+    local name = entry and entry.filename or ""
+    if not entry or not (watch_id(name) or name:sub(1, #SPOTIFY) == SPOTIFY or name:sub(1, #CLOUD) == CLOUD
+        or name:match("^https://[%w.]*soundcloud%.com/")) then return end
     -- A mix ending this song early, or the song simply finishing.
     if mix and mix.state == "ready" and mix.pos == index then return end
     if e.reason == "eof" and (last_duration <= 0 or t > last_duration - 4) then return end
@@ -329,6 +336,70 @@ mp.register_event("end-file", function(e)
     mp.command_native({ "loadfile", entry.filename, "insert-at", index + 1, file_opts })
     mp.command_native({ "playlist-remove", index })
     mp.command_native({ "playlist-play-index", index })
+end)
+
+-- ---- Spotify and cloud songs ------------------------------------------------
+-- A Spotify song is queued as ytmusic-spotify://<id>, a file in the user's
+-- cloud storage as ytmusic-cloud://<source>/<hash>. Before yt-dlp looks at
+-- one (ytdl_hook's on_load runs at priority 10), ask the helper what to open:
+-- the Spotify song's YouTube Music match, or the file on the local rclone
+-- server. The entry keeps its name, so the panel still knows which song it is.
+local function resolved_ok(kind, url)
+    if kind == "sp" then return watch_id(url) ~= nil end
+    return url:match("^http://[%w]+:[%w]+@127%.0%.0%.1:%d+/") ~= nil
+end
+
+local used_cloud = false
+
+mp.add_hook("on_load", 5, function(hook)
+    local url = mp.get_property("stream-open-filename") or ""
+    if opts.helper == "" then return end
+    local kind, key
+    if url:sub(1, #SPOTIFY) == SPOTIFY then
+        kind, key = "sp", url:sub(#SPOTIFY + 1)
+        if not key:match("^[%w]+$") then return end
+    elseif url:sub(1, #CLOUD) == CLOUD then
+        kind, key = "cl", url:sub(#CLOUD + 1)
+        if not key:match("^[%x]+/[%x]+$") then return end
+        used_cloud = true
+    else
+        return
+    end
+    hook:defer()
+    mp.command_native_async({
+        name = "subprocess",
+        playback_only = false,
+        capture_stdout = true,
+        args = { opts.python, "-I", opts.helper, "resolve", kind .. ":" .. key },
+    }, function(success, res)
+        local out
+        if success and res then
+            for line in (res.stdout or ""):gmatch("[^\n]+") do
+                local d = utils.parse_json(line)
+                if type(d) == "table" and (d.type == "resolved" or d.type == "error") then out = d end
+            end
+        end
+        if out and out.type == "resolved" and type(out.url) == "string" and resolved_ok(kind, out.url) then
+            mp.set_property("stream-open-filename", out.url)
+        elseif kind == "sp" then
+            msg.warn("no YouTube Music match for Spotify song " .. key .. ": " .. tostring(out and out.message or "helper failed"))
+        else
+            msg.error("cloud song " .. key .. " can't be opened: " .. tostring(out and out.message or "helper failed"))
+        end
+        hook:cont()
+    end)
+end)
+
+-- The local rclone server only serves this player: stop it with the player.
+mp.register_event("shutdown", function()
+    if opts.helper == "" or not used_cloud then return end
+    mp.command_native({
+        name = "subprocess",
+        detach = true,
+        playback_only = false,
+        -- Unless a newer player (another pid) took over and may be using it.
+        args = { opts.python, "-I", opts.helper, "cloud-stop", "--player", tostring(mp.get_property("pid") or "") },
+    })
 end)
 
 -- ---- events ----------------------------------------------------------------

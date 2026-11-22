@@ -1,16 +1,81 @@
-
 <div align="center">
   <h1>Omarchy Music Player</h1>
   <img width="150" height="150" alt="enlarge-the-orange-rose" src="https://github.com/user-attachments/assets/af554851-8580-419b-b75e-3bc756cfbcd3" />
 
+  <p><strong>The only Apple Music experience on Omarchy you ever need!</strong></p>
 
-
-
-![YouTube Music (mpv) panel](preview.png)
+  <img alt="The panel: Liked Music" src="preview.png" width="360" />
+  <br /><br />
+  <img alt="Full screen: Now Playing" src="preview-full.jpg" />
 </div>
-An Omarchy bar widget that lists your **YouTube Music playlists** and plays them
-through a headless `mpv`. You don't need a browser window, browser extension or
-web app open while it plays.
+
+An Omarchy bar widget for your music on **YouTube Music, Spotify,
+SoundCloud and your own cloud storage** (S3, Google Drive, Dropbox,
+OneDrive, SFTP, SMB, WebDAV, FTP), switched like tabs at the top of the
+panel, played through a headless `mpv`. You don't need a browser window,
+browser extension or web app open while it plays. Mix songs from all of
+them in one queue, and open the whole player **full screen**, like Apple
+Music's window.
+
+(The plugin ID stays `io.github.symonbaikov.ytmusic-mpv`: marketplace IDs are
+permanent. It started as a YouTube Music player.)
+
+## Services
+
+| Tab | What you get | Setup |
+|---|---|---|
+| YouTube Music | Your playlists, Liked Music, My Supermix, Explore, search, radio, likes, add to playlist | The browser you're signed in with (see Settings) |
+| Spotify | Your Liked Songs and the playlists you own or collaborate on | Once: your own Spotify app (below) |
+| SoundCloud | Your likes and playlists, and search across SoundCloud | Your profile name or link |
+| Cloud | The music folders in your own storage: every folder an album, with its cover | Pick the storage and sign in (below) |
+| My Music | **My Mix** (your likes from every service, alternating), your own mixed playlists, Downloads | Nothing |
+
+**Spotify** keeps its own audio locked to Spotify's apps, so its songs play
+from their **YouTube Music match** (found by ISRC, then title, artist and
+duration). Reading your library needs a Spotify app of your own, because
+Spotify only lets personal apps read a library, and its owner needs
+**Premium** (Spotify's 2026 rules):
+
+1. Open [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard)
+   and create an app with the **Web API**.
+2. Add the redirect URI `http://127.0.0.1/callback` (any port is allowed on
+   a loopback address).
+3. Paste its **Client ID** into the Spotify tab and press **Connect Spotify**:
+   you sign in to Spotify in your browser.
+
+Only playlists you own or collaborate on can be read (Spotify doesn't give
+apps the songs of other people's playlists).
+
+**SoundCloud** is read with yt-dlp, like YouTube. Enter your profile name or
+link in the SoundCloud tab. Private likes need you signed in to SoundCloud in
+the browser the plugin reads cookies from.
+
+**Cloud** plays the audio files in your own storage through
+[rclone](https://rclone.org) (`omarchy pkg add rclone`; the tab offers to
+install it). In the Cloud tab pick where your music lives:
+
+- **Google Drive, Dropbox, OneDrive**: your browser opens the provider's
+  sign-in; Google Drive gets read-only access.
+- **S3** (Amazon, or anything S3-compatible: Cloudflare R2, Backblaze B2,
+  MinIO, Wasabi): access key, secret key, and the endpoint unless it's
+  Amazon. The folder is `bucket/path`.
+- **SFTP, SMB, WebDAV** (Nextcloud, ownCloud, a NAS), **FTP**: host or URL,
+  user and password. SFTP without a password uses your SSH key.
+- **rclone**: any remote you already set up with `rclone config` (it's
+  offered first when there is one).
+
+The folder is checked once before it's added. Then each folder with music
+becomes an album (named after the folder, artist from the parent folder or
+an "Artist - Title" file name), with `cover.jpg` / `folder.jpg` /
+`front.png` as its cover, plus an "all songs" list per storage. Songs play
+straight from the storage (seeking works), fade, Peak mix, go into your
+mixes and download like any other. The listing is kept for 6 hours; refresh
+to read new files at once. Remove a storage in settings: its files are
+never touched.
+
+**Mixes**: the add button next to a song (any service) adds it to one of your
+mixes or starts a new one. In a mix, the stop-square button on a row removes
+that song. Fades, Peak mix and Downloads work across services.
 
 - `yt-dlp` reads your library (your playlists plus Liked Music) and each
   playlist's tracks. To see your private library it reads your browser's
@@ -46,6 +111,13 @@ web app open while it plays.
   in your playlists, lists every song you saved (newest first, with its
   cover if you kept the cover) and plays them from your disk, offline.
   A file you delete or move drops out of the list.
+- **Full screen** (the icon beside the gear, `Shift+F`): the whole player
+  on the whole screen, like Apple Music's window. A sidebar with Listen
+  Now, Explore, every service and your mixes; big covers and shelves; each
+  playlist with its artwork, Play and Shuffle; the player along the
+  bottom; and **Now Playing**, with the song's cover big, blurred behind
+  everything, and what's up next. `Esc` goes back, then leaves; `Space`
+  plays and pauses, `/` searches.
 - A **settings** screen (the gear in the panel's top right corner) for
   fades, peak mix, autoplay, playing with your account, covers and the bar
   title.
@@ -88,6 +160,14 @@ Playback keeps going when it can:
   copy, and autoplay falls back to songs from your saved Liked Music and My
   Supermix lists, so the queue doesn't run dry.
 - **Lists can't be refreshed**: the saved copies stay in use.
+- **Something broke and nothing plays**: wherever it happened (the player,
+  a list, Explore, a service tab) there is a **Report the problem** button,
+  and a desktop notification leads to it if the panel is closed. One click
+  opens a GitHub issue in your browser with everything filled in: what
+  failed, the versions of the plugin, yt-dlp, mpv, ffmpeg and Omarchy, which
+  YouTube clients work right now, and the recent errors. You only press
+  Submit. Song ids, paths, user names, browser profiles, emails and tokens
+  are removed first; nothing is sent until you press Submit.
 - **Songs keep failing** (two in a row with no source working): the panel
   says so. That almost always means yt-dlp needs an update
   (`omarchy update`).
@@ -106,7 +186,7 @@ shell; the music keeps playing. Turn it off with `updateCheck: Off`.
 - Omarchy (Quattro shell)
 - `python3`, `yt-dlp`, `mpv`
 - `ffmpeg` for peak mix (Arch's `mpv` already depends on it)
-- Optional: `mpv-mpris` (media keys and the OSD)
+- Optional: `mpv-mpris` (media keys and the OSD), `rclone` (cloud storage)
 - A browser signed in to YouTube Music (Chromium, Brave, Chrome, Firefox,
   Zen, Vivaldi, Edge or Opera) to read your private library. Public playlists
   work without one. The browser doesn't have to be running.
@@ -147,7 +227,7 @@ Removal doesn't touch the cached lists. Delete them yourself if you like:
 In the panel: `j`/`k` move, `Enter` opens a playlist or plays a track,
 `h`/`Backspace` goes back, `p` play/pause, `n` next, `b` previous,
 `s` shuffle the open playlist, `Shift+R` cycle repeat, `m` start radio,
-`,` settings, `e` Explore, `/` search, `d` download,
+`,` settings, `e` Explore, `/` search, `d` download, `Shift+F` full screen,
 `f` like / remove like, `a` add to a playlist (all three act on the
 highlighted track, or the playing one), `r` refresh, `+`/`-` volume, `Esc`
 closes. Hovering a track shows like, add-to-playlist and radio buttons;
@@ -168,7 +248,11 @@ omarchy-shell io.github.symonbaikov.ytmusic-mpv toggleLike  # like the playing s
 omarchy-shell io.github.symonbaikov.ytmusic-mpv addToPlaylist # pick a playlist for it
 omarchy-shell io.github.symonbaikov.ytmusic-mpv openSettings  # the settings screen
 omarchy-shell io.github.symonbaikov.ytmusic-mpv explore       # Explore
+omarchy-shell io.github.symonbaikov.ytmusic-mpv tab sp        # a tab: yt, sp, sc, cl or my
 omarchy-shell io.github.symonbaikov.ytmusic-mpv download      # download the playing song
+omarchy-shell io.github.symonbaikov.ytmusic-mpv fullscreen    # full screen on / off
+omarchy-shell io.github.symonbaikov.ytmusic-mpv full nowplaying # full screen on a page: home, browse, nowplaying, yt, sp, sc, cl, my
+omarchy-shell io.github.symonbaikov.ytmusic-mpv cloud         # connect a cloud storage
 ```
 
 ## Settings
@@ -195,6 +279,8 @@ omarchy bar set io.github.symonbaikov.ytmusic-mpv playbackCookies On
 | `fadeOut` | `0` | Seconds each song fades out over at its end. `0` is off. |
 | `transition` | `Off` | `Peak mix` switches songs climax to climax (see above). |
 | `crossfade` | `6` | How long the two climaxes overlap in a peak mix, 2–16 seconds. |
+| `soundcloudUser` | (empty) | Your SoundCloud name or profile link (the SoundCloud tab sets it). |
+| `spotifyClientId` | (empty) | Your Spotify app's Client ID (the Spotify tab sets it). |
 | `downloadDir` | `~/Music` | Where downloads go. The download screen's folder picker sets it. |
 | `downloadFormat` | `mp3` | `mp3`, `m4a`, `opus`, `flac` or `wav`. The download screen sets it. |
 | `downloadCover` | `On` | Embed the cover in downloads (MP3, M4A, FLAC) and show it in Downloads. |
@@ -229,6 +315,25 @@ omarchy bar set io.github.symonbaikov.ytmusic-mpv playbackCookies On
 - Radio, autoplay and My Supermix are read from YouTube Music with the same
   cookies as your library, so they're personalized like in the app. Autoplay
   makes one request when the last song in the queue starts, and only then.
+- **Spotify**: the login is Spotify's Authorization Code flow with PKCE,
+  answered on a one-shot server on `127.0.0.1`. The tokens are kept owner-only
+  in `~/.local/share/io.github.symonbaikov.ytmusic-mpv/spotify.json` and sent
+  only to `accounts.spotify.com` and `api.spotify.com`. Spotify songs are
+  matched by searching YouTube Music without an account; matches are cached.
+  Disconnect in settings.
+- **SoundCloud** is read by yt-dlp with the same browser cookies as
+  YouTube. Album art comes from Spotify's (`i.scdn.co`) and SoundCloud's
+  (`sndcdn.com`) image hosts.
+- **Your mixes** are kept in `~/.local/share/io.github.symonbaikov.ytmusic-mpv/mixes.json`.
+- **Cloud storage** is reached only by rclone, and only the storage you
+  connected. A new storage's settings go into rclone's own config (passwords
+  obscured the way rclone stores them); the form sends them to the helper
+  over stdin, never on a command line. Songs reach mpv through
+  `rclone serve http` on `127.0.0.1`: read-only, with a random user and
+  password made for each run (passed in the environment, kept owner-only in
+  the runtime folder), stopped with the player. Folder covers are copied to
+  the cache. Problem reports name only the kinds of storage, never hosts,
+  folders or files.
 - **Explore and search** ask YouTube Music's web API without an account:
   no cookies are read or sent, and the results are the same as for anyone
   in your region. Explore is cached for 6 hours.

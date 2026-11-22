@@ -2,6 +2,7 @@
 # No network and no browser cookies: only the helper's pure parts.
 import json
 import os
+import urllib.parse
 import pathlib
 import sys
 import tempfile
@@ -685,6 +686,274 @@ class Downloads(unittest.TestCase):
         self.assertTrue(h.track_url({"id": "dQw4w9WgXcQ"}).startswith("https://music.youtube.com/"))
         h.record_download({"id": "dQw4w9WgXcQ", "title": "A again", "artist": "X", "duration": 200, "path": a, "cover": cover})
         self.assertEqual([t["title"] for t in h.downloaded_tracks()], ["A again", "B"])   # same file, one entry
+
+
+class Services(unittest.TestCase):
+    def test_track_keys_and_lists(self):
+        for key in ("dQw4w9WgXcQ", "sc:forss/flickermood", "sc:417474360", "sp:4uLU6hMCjMI75M1A2tKUQC"):
+            self.assertTrue(h.TRACK_KEY_RE.match(key), key)
+        for bad in ("sc:../etc", "sp:short", "sc:a/b/c", "yt:dQw4w9WgXcQ"):
+            self.assertFalse(h.TRACK_KEY_RE.match(bad), bad)
+        for lid in ("LM", "sc:likes:forss", "sc:set:forss/ecclesia", "sp:liked", "sp:pl:37i9dQZF1DXcBWIGoYBM5M", "mix:all", "mix:fa9e05eb"):
+            self.assertTrue(h.is_list_id(lid), lid)
+        self.assertFalse(h.is_list_id("sc:set:a/b/../c"))
+        self.assertEqual(h.source_of("sp:4uLU6hMCjMI75M1A2tKUQC"), "sp")
+
+    def test_soundcloud_urls(self):
+        self.assertEqual(h.sc_user("https://soundcloud.com/forss"), "forss")
+        self.assertEqual(h.sc_user("forss"), "forss")
+        self.assertEqual(h.sc_user("https://evil.example/forss"), "")
+        self.assertEqual(h.sc_track_key("https://soundcloud.com/joeypecoraro/warm"), "sc:joeypecoraro/warm")
+        self.assertEqual(h.sc_track_key("https://soundcloud.com/lordafi/sets/acid-jazz"), "")       # a set, not a track
+        self.assertEqual(h.sc_track_key("https://api.soundcloud.com/tracks/soundcloud%3Atracks%3A417474360"), "sc:417474360")
+        self.assertEqual(h.track_url({"id": "sc:417474360"}), "https://api.soundcloud.com/tracks/417474360")
+        self.assertEqual(h.track_url({"id": "sp:4uLU6hMCjMI75M1A2tKUQC"}), "ytmusic-spotify://4uLU6hMCjMI75M1A2tKUQC")
+
+    def test_spotify_track_objects(self):
+        obj = {"type": "track", "id": "4uLU6hMCjMI75M1A2tKUQC", "name": "Never Gonna Give You Up",
+               "artists": [{"name": "Rick Astley"}], "duration_ms": 213573, "external_ids": {"isrc": "GBARL9300135"},
+               "album": {"images": [{"url": "https://i.scdn.co/image/ab67616d0000b273", "width": 640},
+                                    {"url": "https://i.scdn.co/image/ab67616d00001e02", "width": 300}]}}
+        saved = h.SP_TRACKS_PATH
+        with tempfile.TemporaryDirectory() as d:
+            h.SP_TRACKS_PATH = os.path.join(d, "t.json")
+            try:
+                t = h.sp_track(obj)
+            finally:
+                h.SP_TRACKS_PATH = saved
+        self.assertEqual((t["id"], t["artist"], t["duration"], t["isrc"]), ("sp:4uLU6hMCjMI75M1A2tKUQC", "Rick Astley", 213, "GBARL9300135"))
+        self.assertEqual(t["cover"], "https://i.scdn.co/image/ab67616d00001e02")
+        self.assertIsNone(h.sp_track({"type": "episode", "id": "4uLU6hMCjMI75M1A2tKUQC"}))
+
+    def test_matching_prefers_the_same_song(self):
+        want = {"title": "Never Gonna Give You Up", "artist": "Rick Astley", "duration": 213}
+        right = {"title": "Never Gonna Give You Up", "artist": "Rick Astley", "duration": 214}
+        cover = {"title": "Never Gonna Give You Up (Cover)", "artist": "Some Band", "duration": 180}
+        live = {"title": "Never Gonna Give You Up (Live)", "artist": "Rick Astley", "duration": 290}
+        self.assertGreater(h.match_score(want, right), h.match_score(want, cover))
+        self.assertGreater(h.match_score(want, right), h.match_score(want, live))
+
+    def test_mixes_and_my_mix(self):
+        with tempfile.TemporaryDirectory() as d:
+            saved = (h.MIXES_PATH, h.DATA_DIR, h.CACHE_DIR, h.widget_settings)
+            h.MIXES_PATH, h.DATA_DIR, h.CACHE_DIR = os.path.join(d, "mixes.json"), d, d
+            h.widget_settings = lambda: {"soundcloudUser": "forss"}
+            os.makedirs(os.path.join(d, "tracks"))
+            try:
+                import io, contextlib
+                def run(fn, args):
+                    out = io.StringIO()
+                    with contextlib.redirect_stdout(out):
+                        fn(args)
+                    return json.loads(out.getvalue().strip().splitlines()[-1])
+                made = run(h.cmd_mix_add, ["new", "--title", "Road trip", "--track",
+                                           json.dumps({"id": "dQw4w9WgXcQ", "title": "A", "cover": "https://evil.example/x.jpg"})])
+                mix = made["id"]
+                self.assertTrue(h.MIX_ID_RE.match(mix))
+                run(h.cmd_mix_add, [mix, "--track", json.dumps({"id": "sc:joeypecoraro/warm", "title": "Warm"})])
+                again = run(h.cmd_mix_add, [mix, "--track", json.dumps({"id": "sc:joeypecoraro/warm", "title": "Warm"})])
+                self.assertTrue(again["already"])
+                items = h.mix_tracks(mix, "none")["items"]
+                self.assertEqual([t["id"] for t in items], ["dQw4w9WgXcQ", "sc:joeypecoraro/warm"])
+                self.assertNotIn("cover", items[0])                                  # only known cover hosts
+                run(h.cmd_mix_remove, [mix, "dQw4w9WgXcQ"])
+                self.assertEqual([t["id"] for t in h.mix_tracks(mix, "none")["items"]], ["sc:joeypecoraro/warm"])
+                with self.assertRaises(SystemExit), contextlib.redirect_stdout(io.StringIO()):
+                    h.cmd_mix_add([mix, "--track", json.dumps({"id": "../../etc"})])
+                # My Mix alternates the services and keeps its order all day.
+                h.write_json_atomic(h.tracks_cache_path("LM", "none"), {"items": [{"id": f"yt{i:09d}", "title": str(i)} for i in range(3)]})
+                h.write_json_atomic(h.tracks_cache_path("sc:likes:forss", "none"), {"items": [{"id": f"sc:u/t{i}", "title": str(i)} for i in range(3)]})
+                first = [t["id"] for t in h.liked_everywhere("none")]
+                self.assertEqual(len(first), 6)
+                self.assertEqual([h.source_of(k) for k in first], ["yt", "sc"] * 3)
+                self.assertEqual(first, [t["id"] for t in h.liked_everywhere("none")])
+            finally:
+                h.MIXES_PATH, h.DATA_DIR, h.CACHE_DIR, h.widget_settings = saved
+
+
+@unittest.skipUnless(h.shutil_which("rclone") and h.shutil_which("ffmpeg"), "needs rclone and ffmpeg")
+class Cloud(unittest.TestCase):
+    """Your own storage through rclone, against a local folder remote."""
+
+    def setUp(self):
+        import subprocess
+        self.dir = tempfile.TemporaryDirectory()
+        d = self.dir.name
+        self.store = os.path.join(d, "store")
+        album = os.path.join(self.store, "Artist A", "Album One")
+        os.makedirs(album)
+        os.makedirs(os.path.join(self.store, "Artist B - Two"))
+        for path, freq in ((os.path.join(album, "01 - Song One.mp3"), 440),
+                           (os.path.join(album, "02 Song Two.flac"), 550),
+                           (os.path.join(self.store, "Artist B - Two", "Track Three.ogg"), 660)):
+            subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i", f"sine=frequency={freq}:duration=3", path],
+                           check=True)
+        subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i", "color=c=red:s=64x64:d=1",
+                        "-frames:v", "1", os.path.join(album, "cover.jpg")], check=True)
+        pathlib.Path(self.store, "notes.txt").write_text("not music")
+        self.conf = os.path.join(d, "rclone.conf")
+        pathlib.Path(self.conf).write_text("[lib]\ntype = local\n")
+        self.env_saved = os.environ.get("RCLONE_CONFIG")
+        os.environ["RCLONE_CONFIG"] = self.conf
+        self.saved = {k: getattr(h, k) for k in ("CLOUD_PATH", "CLOUD_DIR", "COVERS_DIR", "CLOUD_SERVER_PATH",
+                                                 "CLOUD_LOG", "DATA_DIR", "MIX_DIR", "PID_PATH")}
+        h.DATA_DIR = os.path.join(d, "data")
+        h.CLOUD_PATH = os.path.join(d, "data", "cloud.json")
+        h.CLOUD_DIR = os.path.join(d, "cloud")
+        h.COVERS_DIR = os.path.join(d, "covers")
+        h.CLOUD_SERVER_PATH = os.path.join(d, "server.json")
+        h.CLOUD_LOG = os.path.join(d, "rclone.log")
+        h.MIX_DIR = os.path.join(d, "mix")
+        h.PID_PATH = os.path.join(d, "mpv.pid")
+        h.write_cloud([{"id": "0a1b2c3d", "remote": "lib", "path": self.store, "kind": "remote", "title": "Lib", "created": False}])
+
+    def tearDown(self):
+        h.stop_cloud_server()
+        for k, v in self.saved.items():
+            setattr(h, k, v)
+        if self.env_saved is None:
+            os.environ.pop("RCLONE_CONFIG", None)
+        else:
+            os.environ["RCLONE_CONFIG"] = self.env_saved
+        self.dir.cleanup()
+
+    def test_keys_and_lists(self):
+        self.assertTrue(h.TRACK_KEY_RE.match("cl:0a1b2c3d/0123456789abcdef"))
+        self.assertFalse(h.TRACK_KEY_RE.match("cl:0a1b2c3d/../etc"))
+        for lid in ("cl:0a1b2c3d", "cl:0a1b2c3d:0123456789abcdef"):
+            self.assertTrue(h.is_list_id(lid), lid)
+        self.assertEqual(h.source_of("cl:0a1b2c3d/0123456789abcdef"), "cl")
+        self.assertEqual(h.track_url({"id": "cl:0a1b2c3d/0123456789abcdef"}), "ytmusic-cloud://0a1b2c3d/0123456789abcdef")
+        self.assertEqual(h.mix_entry("ytmusic-cloud://0a1b2c3d/0123456789abcdef")[0], "cl:0a1b2c3d/0123456789abcdef")
+
+    def test_names_from_paths(self):
+        self.assertEqual(h.cloud_names("Artist A/Album One/01 - Song One.mp3"), ("Song One", "Artist A", "Album One"))
+        self.assertEqual(h.cloud_names("Artist A/Album One/02 Song Two.flac"), ("Song Two", "Artist A", "Album One"))
+        self.assertEqual(h.cloud_names("Mixed/Daft Punk - One More Time.mp3"), ("One More Time", "Daft Punk", "Mixed"))
+        self.assertEqual(h.cloud_names("Band - Album/1-03 Intro.m4a"), ("Intro", "Band", "Band - Album"))
+        self.assertEqual(h.cloud_names("song.mp3"), ("song", "", ""))
+
+    def test_index_lists_and_tracks(self):
+        src = h.read_cloud()[0]
+        index = h.cloud_index(src)
+        self.assertEqual(sorted(t["title"] for t in index["tracks"]), ["Song One", "Song Two", "Track Three"])
+        lists = h.cloud_lists(src, index)
+        self.assertEqual(lists[0]["id"], "cl:0a1b2c3d")
+        self.assertEqual(lists[0]["count"], 3)
+        album = next(l for l in lists if l["title"] == "Album One")
+        self.assertTrue(os.path.isfile(album["cover"]))             # the folder's cover.jpg, copied
+        self.assertEqual(os.path.dirname(album["cover"]), h.COVERS_DIR)
+        got = h.cloud_tracks(album["id"])
+        self.assertEqual([t["title"] for t in got["items"]], ["Song One", "Song Two"])
+        self.assertEqual(got["items"][0]["cover"], album["cover"])
+        for t in got["items"]:
+            self.assertTrue(h.TRACK_KEY_RE.match(t["id"]))
+
+    def test_served_read_only_with_a_password_and_stopped(self):
+        import urllib.request, urllib.error, base64
+        src = h.read_cloud()[0]
+        key = next(t["id"] for t in h.cloud_index(src)["tracks"] if t["title"] == "Track Three")
+        url = h.cloud_stream_url(key)
+        parts = urllib.parse.urlsplit(url)
+        self.assertEqual(parts.hostname, "127.0.0.1")
+        state = h.read_json(h.CLOUD_SERVER_PATH)
+        self.assertEqual(os.stat(h.CLOUD_SERVER_PATH).st_mode & 0o777, 0o600)
+        with open(f"/proc/{state['pid']}/cmdline", "rb") as fh:
+            self.assertNotIn(state["pass"].encode(), fh.read())        # never on a command line
+        plain = urllib.parse.urlunsplit((parts.scheme, f"127.0.0.1:{parts.port}", parts.path, "", ""))
+        with self.assertRaises(urllib.error.HTTPError) as err:
+            urllib.request.urlopen(plain, timeout=10)
+        self.assertEqual(err.exception.code, 401)
+        req = urllib.request.Request(plain, headers={"Authorization": "Basic " + base64.b64encode(
+            f"{parts.username}:{parts.password}".encode()).decode()})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            self.assertEqual(r.read(4), b"OggS")
+        put = urllib.request.Request(plain.rsplit("/", 1)[0] + "/new.mp3", data=b"x", method="PUT",
+                                     headers=dict(req.header_items()))
+        with self.assertRaises(urllib.error.HTTPError):
+            urllib.request.urlopen(put, timeout=10)
+        self.assertEqual(h.cloud_stream_url(key), url)                 # reused while it runs
+        h.stop_cloud_server()
+        time.sleep(0.3)
+        self.assertFalse(h.pid_is_rclone_server(state["pid"]))
+
+    def test_peak_mix_and_download_copy_the_file(self):
+        src = h.read_cloud()[0]
+        key = h.cloud_index(src)["tracks"][0]["id"]
+        meta, via = h.download_audio(key, {})
+        self.assertEqual(via, "cloud")
+        self.assertTrue(os.path.isfile(os.path.join(h.MIX_DIR, meta["audio"])))
+        self.assertNotIn("-", h.cache_name(key))       # segment names stay unambiguous
+        self.assertNotIn("-", h.cache_name("sc:forss/flickermood"))
+
+    def test_new_remote_is_written_safely(self):
+        h.write_remote("omarchy-music-sftp", "sftp", {"host": "nas.local", "user": "me", "pass": "hunter2"})
+        text = pathlib.Path(self.conf).read_text()
+        self.assertIn("[omarchy-music-sftp]\ntype = sftp\nhost = nas.local\nuser = me\npass = ", text)
+        self.assertNotIn("hunter2", text)                              # stored obscured, like rclone does
+        with self.assertRaises(RuntimeError):
+            h.write_remote("x", "webdav", {"url": "http://a\n[evil]\ntype = local"})
+        with self.assertRaises(RuntimeError):
+            h.write_remote("x", "sftp", {"user": "me"})                # host is needed
+        h.write_remote("omarchy-music-s3", "s3", {"access_key_id": "AK", "secret_access_key": "SK"})
+        self.assertIn("provider = AWS", pathlib.Path(self.conf).read_text())
+        pathlib.Path(self.conf).write_text("# Encrypted rclone configuration File\n\nRCLONE_ENCRYPT_V0:\nabc")
+        with self.assertRaises(RuntimeError):
+            h.write_remote("y", "ftp", {"host": "a"})
+
+    def test_add_and_remove_through_the_command(self):
+        import subprocess
+        d = self.dir.name
+        env = dict(os.environ, XDG_DATA_HOME=os.path.join(d, "xdata"), XDG_CACHE_HOME=os.path.join(d, "xcache"),
+                   XDG_RUNTIME_DIR=os.path.join(d, "xrun"), RCLONE_CONFIG=self.conf)
+        def run(*args, stdin=""):
+            proc = subprocess.run([sys.executable, "-I", str(HELPER), *args], input=stdin, capture_output=True,
+                                  text=True, env=env, timeout=120)
+            return [json.loads(l) for l in proc.stdout.splitlines()]
+        out = run("cloud-add", stdin=json.dumps({"kind": "remote", "remote": "lib", "path": self.store, "title": "Mine"}) + "\n")
+        self.assertEqual(out[-1]["state"], "added")
+        src = out[-1]["id"]
+        lists = [m for m in run("playlists", "--service", "cl") if m["type"] == "playlists"][-1]["items"]
+        self.assertEqual(lists[0]["id"], f"cl:{src}")
+        bad = run("cloud-add", stdin=json.dumps({"kind": "remote", "remote": "lib", "path": self.store + "/missing"}) + "\n")
+        self.assertEqual(bad[-1]["type"], "error")
+        self.assertIn("storage", bad[-1]["message"])
+        self.assertEqual(run("cloud-remove", src)[-1]["state"], "removed")
+        self.assertEqual(run("playlists", "--service", "cl")[-1].get("setup"), "cl")
+        self.assertIn("[lib]", pathlib.Path(self.conf).read_text())   # a remote we didn't make stays
+
+    def test_redact_hides_the_server_and_files(self):
+        out = h.redact("open http://u12ab:deadbeefcafe@127.0.0.1:43210/0a1b2c3d/My%20Band/Song.flac failed; "
+                       "ytmusic-cloud://0a1b2c3d/0123456789abcdef")
+        for leak in ("deadbeefcafe", "My%20Band", "0123456789abcdef"):
+            self.assertNotIn(leak, out)
+
+
+class Reports(unittest.TestCase):
+    def test_redact_removes_everything_personal(self):
+        home = os.path.expanduser("~")
+        text = (f"ERROR: [youtube] dQw4w9WgXcQ: bot check; cookies from firefox:{home}/.config/zen/29yzqria.Default (release) "
+                "mail me@example.com token=abcdefghijklmnopqrstuvwxyz watch?v=kJQP7kiw5Fk "
+                "https://soundcloud.com/joey/warm ytmusic-spotify://4uLU6hMCjMI75M1A2tKUQC sp:4uLU6hMCjMI75M1A2tKUQC "
+                f"{home}/Music/My Song.mp3")
+        out = h.redact(text)
+        for leak in (home, "29yzqria", "dQw4w9WgXcQ", "kJQP7kiw5Fk", "example.com", "abcdefghijklmnop", "joey",
+                     "4uLU6hMCjMI75M1A2tKUQC"):
+            self.assertNotIn(leak, out, leak)
+        self.assertIn("bot check", out)                        # the reason stays
+        self.assertIn("~/Music", out)
+
+    def test_report_url_fits_and_keeps_the_newest_errors(self):
+        import urllib.parse
+        errors = [f"[e] error number {i} " + "x" * 200 for i in range(80)]
+        title, url = h.build_report("Liked Music", "Couldn't load", "yt", ["Plugin: 0.6.0"], ["default: ok"], errors)
+        self.assertLessEqual(len(url), h.REPORT_MAX_URL)
+        self.assertTrue(url.startswith(h.REPO_URL + "/issues/new?"))
+        body = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)["body"][0]
+        self.assertIn("error number 79", body)                 # newest kept
+        self.assertNotIn("error number 0 ", body)              # oldest dropped
+        self.assertIn("Couldn't load", body)
+        self.assertEqual(title, "[Report] Liked Music: Couldn't load")
 
 
 if __name__ == "__main__":

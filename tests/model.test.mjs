@@ -8,7 +8,7 @@ const source = readFileSync(new URL("../Model.js", import.meta.url), "utf8").rep
 const M = {}
 // QML's V4 engine lacks some newer built-ins; remove them so tests catch their use.
 const V4_MISSING = "delete String.prototype.trimEnd; delete String.prototype.trimStart; delete Array.prototype.at; delete Object.hasOwn;\n"
-vm.runInNewContext(V4_MISSING + source + "\n;Object.assign(__out, { cleanText, plain, truncate, formatTime, parseLine, parseSession, clampIndex, mpvCommand, GLYPH, normalizeRepeat, nextRepeat, repeatFromMpv, repeatCommands, coverUrl, OBSERVED, SUPERMIX_ID, isMix, radioListId, autoplaySeed, isLoading, addTargets, likedSet, withLiked, playbackFailure, seconds, stepChoice, recentReport, mirrorOffer, parseUpdate, exploreRows, DOWNLOAD_FORMATS, trackCover })", { __out: M })
+vm.runInNewContext(V4_MISSING + source + "\n;Object.assign(__out, { cleanText, plain, truncate, formatTime, parseLine, parseSession, clampIndex, mpvCommand, GLYPH, normalizeRepeat, nextRepeat, repeatFromMpv, repeatCommands, coverUrl, OBSERVED, SUPERMIX_ID, isMix, radioListId, autoplaySeed, isLoading, addTargets, likedSet, withLiked, playbackFailure, seconds, stepChoice, recentReport, mirrorOffer, parseUpdate, exploreRows, DOWNLOAD_FORMATS, trackCover, serviceOf, isYouTube, TRACK_KEY_RE, cloudForm, tileHue, CLOUD_KINDS, SERVICES })", { __out: M })
 
 const MARKUP = '<img src="https://example.invalid/tracker">Song'
 
@@ -345,4 +345,59 @@ test("downloaded songs keep their file and their own cover", () => {
   assert.equal(M.trackCover(b, "small"), "")                       // saved without a cover
   assert.equal(c.path, undefined)
   assert.ok(M.trackCover(c, "small").startsWith("https://i.ytimg.com/vi/kJQP7kiw5Fk/"))
+})
+
+test("tracks from every service, with their own covers", () => {
+  const msg = M.parseLine(JSON.stringify({ type: "tracks", playlistId: "mix:fa9e05eb", items: [
+    { id: "dQw4w9WgXcQ", title: "YT" },
+    { id: "sc:joeypecoraro/warm", title: "SC" },
+    { id: "sp:4uLU6hMCjMI75M1A2tKUQC", title: "SP", cover: "https://i.scdn.co/image/ab67616d00001e02" },
+    { id: "sp:4uLU6hMCjMI75M1A2tKUQC", title: "bad cover", cover: "https://evil.example/x.jpg" },
+    { id: "sc:../../etc", title: "bad" } ] }))
+  assert.deepEqual(Array.from(msg.items, t => M.serviceOf(t.id)), ["yt", "sc", "sp", "sp"])
+  assert.equal(M.trackCover(msg.items[2], "small"), "https://i.scdn.co/image/ab67616d00001e02")
+  assert.equal(M.trackCover(msg.items[3], "small"), "")
+  assert.equal(M.trackCover(msg.items[1], "small"), "")
+  assert.ok(M.isYouTube("dQw4w9WgXcQ") && !M.isYouTube("sc:joeypecoraro/warm"))
+  assert.equal(M.parseLine('{"type":"playlists","service":"sc","items":[{"id":"sc:likes:forss","title":"Likes"}]}').service, "sc")
+  const err = M.parseLine('{"type":"error","message":"Connect Spotify","setup":"sp","service":"sp"}')
+  assert.deepEqual([err.setup, err.service], ["sp", "sp"])
+})
+
+test("cloud songs and lists are recognized, sanitized and keep their covers", () => {
+  assert.ok(M.TRACK_KEY_RE.test("cl:0a1b2c3d/0123456789abcdef"))
+  assert.ok(!M.TRACK_KEY_RE.test("cl:0a1b2c3d/../x"))
+  assert.equal(M.serviceOf("cl:0a1b2c3d/0123456789abcdef"), "cl")
+  assert.ok(M.SERVICES.includes("cl"))
+  const lists = M.parseLine(JSON.stringify({ type: "playlists", service: "cl", items: [
+    { id: "cl:0a1b2c3d", title: "NAS", count: 3, subtitle: "WebDAV", cover: "/home/u/.cache/x/covers/cl-0a1b2c3d-0123456789abcdef.png" },
+    { id: "cl:0a1b2c3d:0123456789abcdef", title: "Album", count: 2, cover: "/etc/passwd" },
+    { id: "cl:../../x", title: "bad" }] }))
+  assert.equal(lists.service, "cl")
+  assert.equal(lists.items.length, 2)
+  assert.equal(lists.items[0].subtitle, "WebDAV")
+  assert.ok(lists.items[0].cover.endsWith(".png"))
+  assert.equal(lists.items[1].cover, undefined)
+  const tracks = M.parseLine(JSON.stringify({ type: "tracks", playlistId: "cl:0a1b2c3d", items: [
+    { id: "cl:0a1b2c3d/0123456789abcdef", title: "Song", artist: "A", album: "Album", cover: "/h/.cache/p/covers/cl-0a1b2c3d-0123456789abcdef.jpg" }] }))
+  assert.equal(tracks.items[0].album, "Album")
+  assert.equal(M.trackCover(tracks.items[0], "small"), "file:///h/.cache/p/covers/cl-0a1b2c3d-0123456789abcdef.jpg")
+})
+
+test("cloud messages and the connect form", () => {
+  const msg = M.parseLine(JSON.stringify({ type: "cloud", state: "list", rclone: true,
+    sources: [{ id: "0a1b2c3d", title: "NAS", kind: "webdav", remote: "omarchy-music-webdav", path: "" }, { id: "nope" }],
+    remotes: [{ name: "googledrive", type: "drive" }, { name: "bad name!", type: "x" }] }))
+  assert.equal(msg.sources.length, 1)
+  assert.deepEqual(Array.from(msg.remotes, r => r.name), ["googledrive"])
+  assert.equal(M.parseLine(JSON.stringify({ type: "cloud", state: "hacked" })), null)
+  const err = M.parseLine(JSON.stringify({ type: "error", message: "Connect your storage", setup: "cl", service: "cl" }))
+  assert.equal(err.setup, "cl")
+  assert.equal(err.service, "cl")
+  const form = JSON.parse(M.cloudForm("sftp", { host: " nas ", pass: "pw", url: "ignored" }, "", "/music/", "NAS"))
+  assert.deepEqual(form, { kind: "sftp", path: "/music/", title: "NAS", fields: { host: "nas", pass: "pw" } })
+  assert.equal(JSON.parse(M.cloudForm("remote", {}, "googledrive", "Music", "")).remote, "googledrive")
+  assert.equal(M.cloudForm("nope", {}, "", "", ""), null)
+  assert.equal(M.tileHue("mix:all"), M.tileHue("mix:all"))
+  assert.ok(M.tileHue("x") >= 0 && M.tileHue("x") < 1)
 })

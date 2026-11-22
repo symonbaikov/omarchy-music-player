@@ -1,14 +1,15 @@
 {
   "schemaVersion": 1,
   "id": "io.github.symonbaikov.ytmusic-mpv",
-  "name": "YouTube Music (mpv)",
-  "version": "0.5.0",
+  "name": "Omarchy Music Player",
+  "version": "0.6.0",
   "author": "Symon Baikov",
   "license": "MIT",
   "homepage": "https://github.com/symonbaikov/omarchy-ytmusic-mpv",
   "repository": "https://github.com/symonbaikov/omarchy-ytmusic-mpv",
-  "description": "Your YouTube Music in the Omarchy bar without a browser: playlists, likes and add-to-playlist, My Supermix, song radio and autoplay recommendations, cover art and Apple Music-style repeat, played through a headless mpv. yt-dlp reads your saved login cookies from disk.",
+  "description": "The only Apple Music experience on Omarchy you ever need! YouTube Music, Spotify, SoundCloud and your own cloud storage (S3, Google Drive, Dropbox, SFTP, SMB, WebDAV) in one bar widget and a full-screen player, played by mpv without a browser: mixes across services, Peak mix, fades, downloads.",
   "keywords": [
+    "cloud",
     "mpv",
     "music",
     "playlists",
@@ -24,8 +25,8 @@
     "barWidget": "Panel.qml"
   },
   "barWidget": {
-    "displayName": "YouTube Music (mpv)",
-    "description": "Click to browse playlists and control playback; right-click to play / pause; middle-click for the next track.",
+    "displayName": "Omarchy Music Player",
+    "description": "Click to browse your music and control playback; right-click to play / pause; middle-click for the next track.",
     "category": "Media",
     "allowMultiple": false,
     "defaultSection": "left",
@@ -46,7 +47,9 @@
       "updateCheck": "On",
       "downloadDir": "~/Music",
       "downloadFormat": "mp3",
-      "downloadCover": "On"
+      "downloadCover": "On",
+      "soundcloudUser": "",
+      "spotifyClientId": ""
     },
     "schema": [
       {
@@ -219,6 +222,20 @@
         ],
         "defaultValue": "On",
         "description": "Embed the cover in downloaded files (MP3, M4A, FLAC) and show it in Downloads."
+      },
+      {
+        "key": "soundcloudUser",
+        "type": "string",
+        "label": "SoundCloud profile",
+        "defaultValue": "",
+        "description": "Your SoundCloud name or profile link, for the SoundCloud tab (likes and playlists)."
+      },
+      {
+        "key": "spotifyClientId",
+        "type": "string",
+        "label": "Spotify app Client ID",
+        "defaultValue": "",
+        "description": "The Client ID of your own app at developer.spotify.com (Spotify requires one per person, and Premium). Redirect URI: http://127.0.0.1/callback."
       }
     ]
   }

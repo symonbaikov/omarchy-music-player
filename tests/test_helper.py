@@ -1021,6 +1021,36 @@ def capture(fn, args):
     return [json.loads(line) for line in out.getvalue().splitlines()]
 
 
+class SoundCloudCovers(unittest.TestCase):
+    def test_covers_from_search_thumbnails(self):
+        items = h.sc_items({"entries": [{"url": "https://api.soundcloud.com/tracks/soundcloud%3Atracks%3A945191926",
+                                         "title": "X", "uploader": "Lucabn't", "thumbnails": [
+                                             {"id": "mini", "url": "https://i1.sndcdn.com/artworks-Gz-HoUyKA-mini.jpg"},
+                                             {"id": "t300x300", "url": "https://i1.sndcdn.com/artworks-Gz-HoUyKA-t300x300.jpg"}]},
+                                        {"url": "https://soundcloud.com/kggn/skytearer", "title": "skytearer",
+                                         "thumbnails": [{"id": "t300x300", "url": "https://evil.example/x.jpg"}]}]})
+        self.assertEqual(items[0]["cover"], "https://i1.sndcdn.com/artworks-Gz-HoUyKA-t300x300.jpg")
+        self.assertNotIn("cover", items[1])
+
+    def test_likes_get_cover_and_artist_from_oembed_once(self):
+        calls = []
+        saved = (h.SC_META_PATH, h.http_json)
+        with tempfile.TemporaryDirectory() as d:
+            h.SC_META_PATH = os.path.join(d, "meta.json")
+            h.http_json = lambda url, max_bytes=0, timeout=0: calls.append(url) or {
+                "author_name": "kuru", "thumbnail_url": "https://i1.sndcdn.com/artworks-RQH2KPnushgBas2T-epCnaA-t500x500.jpg"}
+            try:
+                items = [{"id": "sc:kggn/skytearer", "title": "skytearer", "artist": "kggn"}]
+                out = h.with_sc_meta(items)
+                self.assertEqual(out[0]["artist"], "kuru")
+                self.assertEqual(out[0]["cover"], "https://i1.sndcdn.com/artworks-RQH2KPnushgBas2T-epCnaA-t300x300.jpg")
+                self.assertIn("url=https%3A%2F%2Fsoundcloud.com%2Fkggn%2Fskytearer", calls[0])
+                h.with_sc_meta(items)
+                self.assertEqual(len(calls), 1)
+            finally:
+                h.SC_META_PATH, h.http_json = saved
+
+
 class ServicePages(unittest.TestCase):
     def test_fixed_https_pages(self):
         for name, url in h.SERVICE_PAGES.items():

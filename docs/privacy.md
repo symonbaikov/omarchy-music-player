@@ -45,6 +45,8 @@ before use.
   the audio from Audius' community nodes), identified only as
   `omarchy-music-player`. Covers are fetched once by the helper and cached.
 - **SoundCloud**: read by yt-dlp with the same browser login as YouTube.
+  Covers and artist names of liked songs come from SoundCloud's public
+  oEmbed (`soundcloud.com/oembed`, no account), once per song, cached.
   Album art from Spotify's and SoundCloud's image hosts.
 - **Music servers**: only your server (and plex.tv for Plex's sign-in and to
   find your server). Never the password: Subsonic keeps a salted token,

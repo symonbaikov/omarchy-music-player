@@ -49,8 +49,15 @@ FloatingWindow {
   function t(key) { return p.i18n.t(key) }
 
   // ---- lyrics ----------------------------------------------------------------
-  property bool lyricsMode: false
+  // What Now Playing shows beside the cover: "lyrics", "notes" or "queue".
+  property string side: "queue"
+  readonly property bool lyricsMode: side === "lyrics"
   readonly property bool lyricsShown: shown && page === "nowplaying" && lyricsMode
+  readonly property bool notesShown: shown && page === "nowplaying" && side === "notes"
+  readonly property bool chordsReady: !!p.chords && !!p.currentTrack && p.chords.key === p.currentTrack.id && p.chords.segments.length > 0
+  readonly property bool scoresReady: !!p.scores && !!p.currentTrack && p.scores.key === p.currentTrack.id
+  readonly property int chordLine: chordsReady ? Model.lyricIndex(p.chords.segments, lyricTime + 0.1) : -1
+  readonly property string chordNow: chordLine >= 0 ? p.chords.segments[chordLine].name : ""
   readonly property bool lyricsReady: !!p.lyrics && !!p.currentTrack && p.lyrics.key === p.currentTrack.id
   readonly property bool lyricsSynced: lyricsReady && p.lyrics.synced === true
   // Big, but never more than about 14 characters across the lyrics column
@@ -62,23 +69,27 @@ FloatingWindow {
   property real positionAt: 0
   readonly property int lyricLine: lyricsSynced ? Model.lyricIndex(p.lyrics.lines, lyricTime + 0.2) : -1
 
-  Binding { target: win.p; property: "fastPosition"; value: win.lyricsShown }
+  Binding { target: win.p; property: "fastPosition"; value: win.lyricsShown || win.notesShown }
   Connections {
     target: win.p
     function onPositionChanged() { win.positionAt = Date.now(); win.lyricTime = win.p.position }
-    function onCurrentTrackChanged() { if (win.lyricsShown) win.p.loadLyrics(win.p.currentTrack) }
+    function onCurrentTrackChanged() {
+      if (win.lyricsShown) win.p.loadLyrics(win.p.currentTrack)
+      if (win.notesShown) win.p.loadNotes(win.p.currentTrack)
+    }
   }
   onLyricsShownChanged: if (lyricsShown) p.loadLyrics(p.currentTrack)
+  onNotesShownChanged: if (notesShown) p.loadNotes(p.currentTrack)
   Timer {
     interval: 50
     repeat: true
-    running: win.lyricsShown && win.lyricsSynced && win.p.playing
+    running: (win.lyricsShown && win.lyricsSynced || win.notesShown && win.chordsReady) && win.p.playing
     onTriggered: win.lyricTime = win.p.position + Math.min(1.5, (Date.now() - win.positionAt) / 1000)
   }
 
   function showLyrics() {
     if (lyricsShown) { back(); return }
-    lyricsMode = true
+    side = "lyrics"
     go("nowplaying")
   }
 
@@ -257,6 +268,7 @@ FloatingWindow {
       else if (event.text === "-") { win.p.setVolume(win.p.volume - 5); event.accepted = true }
       else if (event.text === "F" || event.key === Qt.Key_F11) { win.fullscreen = !win.fullscreen; event.accepted = true }
       else if (event.text === "l") { win.showLyrics(); event.accepted = true }
+      else if (event.text === "c") { win.side = "notes"; win.go("nowplaying"); event.accepted = true }
     }
 
     // ---- sidebar ----------------------------------------------------------------
@@ -1162,19 +1174,24 @@ FloatingWindow {
           spacing: Style.space(10)
           Chip {
             label: Model.GLYPH.lyrics + "  " + win.t("full.lyrics")
-            selected: win.lyricsMode
-            onClicked: win.lyricsMode = true
+            selected: win.side === "lyrics"
+            onClicked: win.side = "lyrics"
+          }
+          Chip {
+            label: Model.GLYPH.notes + "  " + win.t("notes.tab")
+            selected: win.side === "notes"
+            onClicked: win.side = "notes"
           }
           Chip {
             label: Model.GLYPH.queue + "  " + win.t("full.upNext")
-            selected: !win.lyricsMode
-            onClicked: win.lyricsMode = false
+            selected: win.side === "queue"
+            onClicked: win.side = "queue"
           }
         }
 
         // Up next: the queue from the playing song on.
         Column {
-          visible: !win.lyricsMode
+          visible: win.side === "queue"
           anchors.left: parent.left
           anchors.right: parent.right
           anchors.top: nowTabs.bottom
@@ -1201,7 +1218,7 @@ FloatingWindow {
             readonly property int from: Math.max(0, win.p.playlistPos)
             onFromChanged: positionViewAtBeginning()
             onVisibleChanged: if (visible) positionViewAtBeginning()
-            model: win.page === "nowplaying" && !win.lyricsMode ? win.queue.slice(from) : []
+            model: win.page === "nowplaying" && win.side === "queue" ? win.queue.slice(from) : []
             delegate: TrackRow {
               required property var modelData
               required property int index
@@ -1213,6 +1230,259 @@ FloatingWindow {
               onClicked: {
                 win.p.send(["playlist-play-index", queueView.from + index])
                 win.p.send(["set_property", "pause", false])
+              }
+            }
+          }
+        }
+
+        // Notes, for learning the song: its chords in time with it (heard
+        // from the audio: the one playing big, on a guitar and a keyboard,
+        // the next ones after it), and the sheet music and tabs found for it.
+        Flickable {
+          id: notesPane
+          visible: win.side === "notes"
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.top: nowTabs.bottom
+          anchors.topMargin: Style.space(22)
+          anchors.bottom: parent.bottom
+          contentHeight: notesColumn.implicitHeight + Style.space(20)
+          clip: true
+          boundsBehavior: Flickable.StopAtBounds
+          ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+          Column {
+            id: notesColumn
+            width: notesPane.width
+            spacing: Style.space(16)
+
+            Txt {
+              visible: text !== ""
+              width: parent.width
+              wrapMode: Text.Wrap
+              elide: Text.ElideNone
+              color: win.dim
+              font.pixelSize: Style.font.heading
+              text: !win.p.currentTrack ? win.t("now.idle")
+                : win.chordsReady ? ""
+                : win.p.numpyMissing ? win.t("notes.needNumpy")
+                : win.p.chordsError !== "" ? win.t("error.prefix").arg(win.p.chordsError)
+                : win.p.chordsStage === "listen" ? win.t("notes.listening")
+                : win.p.chordsStage === "audio" ? win.t("notes.fetching") : ""
+            }
+            BigButton {
+              visible: win.p.numpyMissing
+              glyph: Model.GLYPH.download
+              label: win.t("notes.installNumpy")
+              filled: true
+              onClicked: win.p.installNumpy()
+            }
+
+            // The chord playing now.
+            Row {
+              visible: win.chordsReady
+              spacing: Style.space(26)
+              Column {
+                anchors.verticalCenter: parent.verticalCenter
+                width: Style.space(150)
+                spacing: Style.space(2)
+                Txt {
+                  text: win.t("notes.now").toUpperCase()
+                  color: win.accent
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                  font.letterSpacing: 1.3
+                }
+                Txt {
+                  text: win.chordNow === "" || win.chordNow === "N" ? "–" : Model.chordLabel(win.chordNow)
+                  font.pixelSize: Math.round(Style.font.displayLarge * 2.4)
+                  font.bold: true
+                }
+                Txt {
+                  text: Model.chordNoteNames(win.chordNow).join("  ·  ")
+                  color: win.dim
+                  font.pixelSize: Style.font.heading
+                }
+              }
+              GuitarChord {
+                anchors.verticalCenter: parent.verticalCenter
+                chord: win.chordNow
+              }
+            }
+            PianoChord {
+              visible: win.chordsReady
+              width: Math.min(parent.width, Style.space(460))
+              chord: win.chordNow
+            }
+
+            // The chords to come: click one to go there.
+            Txt {
+              visible: win.chordsReady
+              topPadding: Style.space(6)
+              text: win.t("notes.chords").toUpperCase()
+              color: win.dim
+              font.pixelSize: Style.font.caption
+              font.bold: true
+              font.letterSpacing: 1.3
+            }
+            ListView {
+              id: chordStrip
+              visible: win.chordsReady
+              width: parent.width
+              height: Style.space(58)
+              orientation: ListView.Horizontal
+              spacing: Style.space(8)
+              clip: true
+              boundsBehavior: Flickable.StopAtBounds
+              model: win.chordsReady ? win.p.chords.segments.filter(function(s) { return s.name !== "N" }) : []
+              function follow() {
+                if (!visible || count === 0 || moving) return
+                var at = 0
+                for (var i = 0; i < count; i++) if (model[i].t <= win.lyricTime + 0.1) at = i
+                var from = contentX
+                positionViewAtIndex(at, ListView.Beginning)
+                var to = contentX
+                contentX = from
+                stripAnim.to = to
+                stripAnim.restart()
+              }
+              NumberAnimation { id: stripAnim; target: chordStrip; property: "contentX"; duration: 400; easing.type: Easing.OutCubic }
+              Connections {
+                target: win
+                function onChordLineChanged() { chordStrip.follow() }
+              }
+              delegate: Rectangle {
+                required property var modelData
+                readonly property bool now: win.chordsReady && win.chordLine >= 0 && win.p.chords.segments[win.chordLine].t === modelData.t
+                width: Math.max(Style.space(64), stripName.implicitWidth + Style.space(28))
+                height: chordStrip.height
+                radius: Style.cornerRadius * 2
+                color: now ? win.accent : (stripMouse.containsMouse ? Qt.rgba(win.fg.r, win.fg.g, win.fg.b, 0.16) : Qt.rgba(win.fg.r, win.fg.g, win.fg.b, 0.08))
+                Column {
+                  anchors.centerIn: parent
+                  Text {
+                    id: stripName
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    textFormat: Text.PlainText
+                    text: Model.chordLabel(modelData.name)
+                    color: now ? win.bg : win.fg
+                    font.family: win.fontFamily
+                    font.pixelSize: Style.font.display
+                    font.bold: true
+                  }
+                  Text {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    textFormat: Text.PlainText
+                    text: Model.formatTime(modelData.t, Commons.I18n.formatNumber)
+                    color: now ? win.bg : win.dim
+                    font.family: win.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                }
+                MouseArea {
+                  id: stripMouse
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: win.p.seek(modelData.t)
+                }
+              }
+            }
+            Txt {
+              visible: win.chordsReady
+              width: parent.width
+              wrapMode: Text.Wrap
+              elide: Text.ElideNone
+              color: win.dim
+              font.pixelSize: Style.font.caption
+              text: win.chordsReady ? ((win.p.chords.songKey !== "" ? win.t("notes.key").arg(Model.keyLabel(win.p.chords.songKey)) + "  ·  " : "") + win.t("notes.approx")) : ""
+            }
+
+            // Sheet music and tabs from the services.
+            Txt {
+              topPadding: Style.space(14)
+              text: win.t("notes.scores")
+              font.pixelSize: Style.font.display
+              font.bold: true
+            }
+            Txt {
+              visible: text !== ""
+              width: parent.width
+              wrapMode: Text.Wrap
+              elide: Text.ElideNone
+              color: win.dim
+              text: !win.p.currentTrack ? "" : !win.scoresReady ? win.t("notes.searching")
+                : win.p.scores.items.length === 0 ? win.t("notes.noScores") : ""
+            }
+            Repeater {
+              model: win.scoresReady ? win.p.scores.items : []
+              Rectangle {
+                required property var modelData
+                width: notesColumn.width
+                height: scoreText.implicitHeight + Style.space(20)
+                radius: Style.cornerRadius
+                color: scoreMouse.containsMouse ? Qt.rgba(win.fg.r, win.fg.g, win.fg.b, 0.10) : Qt.rgba(win.fg.r, win.fg.g, win.fg.b, 0.05)
+                Txt {
+                  id: scoreGlyph
+                  anchors.left: parent.left
+                  anchors.leftMargin: Style.space(14)
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: Model.GLYPH.guitar
+                  color: win.accent
+                  font.pixelSize: Style.font.display
+                }
+                Column {
+                  id: scoreText
+                  anchors.left: scoreGlyph.right
+                  anchors.leftMargin: Style.space(14)
+                  anchors.right: scoreOpen.left
+                  anchors.rightMargin: Style.space(10)
+                  anchors.verticalCenter: parent.verticalCenter
+                  spacing: Style.space(2)
+                  Txt {
+                    width: parent.width
+                    text: modelData.title + (modelData.artist !== "" ? "  —  " + modelData.artist : "")
+                    font.pixelSize: Style.font.subtitle
+                    font.bold: true
+                  }
+                  Txt {
+                    width: parent.width
+                    text: "Songsterr  ·  " + modelData.instruments.join(", ")
+                    color: win.dim
+                  }
+                }
+                Txt {
+                  id: scoreOpen
+                  anchors.right: parent.right
+                  anchors.rightMargin: Style.space(16)
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: win.t("notes.open") + "  " + Model.GLYPH.forward
+                  color: win.dim
+                }
+                MouseArea {
+                  id: scoreMouse
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: win.p.openScore(modelData.url)
+                }
+              }
+            }
+            Flow {
+              visible: win.scoresReady
+              width: parent.width
+              spacing: Style.space(10)
+              BigButton {
+                visible: win.scoresReady && win.p.scores.musescore !== ""
+                glyph: Model.GLYPH.notes
+                label: win.t("notes.musescore")
+                onClicked: win.p.openScore(win.p.scores.musescore)
+              }
+              BigButton {
+                visible: win.scoresReady && win.p.scores.ultimateGuitar !== ""
+                glyph: Model.GLYPH.guitar
+                label: win.t("notes.ultimateGuitar")
+                onClicked: win.p.openScore(win.p.scores.ultimateGuitar)
               }
             }
           }
@@ -1477,12 +1747,12 @@ FloatingWindow {
           iconText: Model.GLYPH.queue
           fontSize: Style.font.title
           tooltipText: win.t("full.upNext")
-          foreground: win.page === "nowplaying" && !win.lyricsMode ? win.accent : win.fg
+          foreground: win.page === "nowplaying" && win.side === "queue" ? win.accent : win.fg
           fontFamily: win.fontFamily
           enabled: win.p.connected
           onClicked: {
-            if (win.page === "nowplaying" && !win.lyricsMode) win.back()
-            else { win.lyricsMode = false; win.go("nowplaying") }
+            if (win.page === "nowplaying" && win.side === "queue") win.back()
+            else { win.side = "queue"; win.go("nowplaying") }
           }
         }
         Txt {
@@ -1901,6 +2171,126 @@ FloatingWindow {
         fontFamily: win.fontFamily
         enabled: !win.p.radioBusy
         onClicked: { win.p.startRadio(row.track); win.listFrom = win.page === "list" ? win.listFrom : win.page; win.go("list") }
+      }
+    }
+  }
+
+  // A chord on the guitar: six strings (low E on the left), five frets, a
+  // dot where each finger goes, o for an open string, × for one not played.
+  component GuitarChord: Item {
+    id: guitar
+    property string chord: ""
+    readonly property var diagram: Model.guitarDiagram(chord)
+    visible: diagram !== null
+    width: Style.space(150)
+    height: Style.space(180)
+    readonly property real padLeft: Style.space(30)
+    readonly property real padTop: Style.space(26)
+    readonly property real stringGap: (width - padLeft - Style.space(10)) / 5
+    readonly property real fretGap: (height - padTop - Style.space(8)) / 5
+
+    Txt {
+      visible: guitar.diagram !== null && guitar.diagram.base > 1
+      x: 0
+      y: guitar.padTop + guitar.fretGap * 0.5 - height / 2
+      text: guitar.diagram ? guitar.diagram.base + "fr" : ""
+      color: win.dim
+      font.pixelSize: Style.font.caption
+    }
+    Repeater {
+      model: 6
+      Rectangle {
+        required property int index
+        x: guitar.padLeft
+        y: guitar.padTop + index * guitar.fretGap - (index === 0 && guitar.diagram && guitar.diagram.base === 1 ? 2 : 0)
+        width: guitar.stringGap * 5
+        height: index === 0 && guitar.diagram && guitar.diagram.base === 1 ? 5 : 1
+        color: index === 0 ? win.fg : win.dim
+      }
+    }
+    Repeater {
+      model: 6
+      Rectangle {
+        required property int index
+        x: guitar.padLeft + index * guitar.stringGap
+        y: guitar.padTop
+        width: 1.5
+        height: guitar.fretGap * 5
+        color: win.dim
+      }
+    }
+    Repeater {
+      model: guitar.diagram ? guitar.diagram.strings : []
+      Item {
+        required property var modelData
+        required property int index
+        x: guitar.padLeft + index * guitar.stringGap
+        y: modelData > 0 ? guitar.padTop + (modelData - 0.5) * guitar.fretGap : guitar.padTop - Style.space(12)
+        Rectangle {
+          visible: modelData > 0
+          anchors.centerIn: parent
+          width: guitar.stringGap * 0.72
+          height: width
+          radius: width / 2
+          color: win.accent
+        }
+        Rectangle {
+          visible: modelData === 0
+          anchors.centerIn: parent
+          width: Style.space(11)
+          height: width
+          radius: width / 2
+          color: "transparent"
+          border.color: win.fg
+          border.width: 1.5
+        }
+        Text {
+          visible: modelData < 0
+          anchors.centerIn: parent
+          textFormat: Text.PlainText
+          text: "×"
+          color: win.dim
+          font.family: win.fontFamily
+          font.pixelSize: Style.font.subtitle
+        }
+      }
+    }
+  }
+
+  // A chord on the keyboard: two octaves from C, its notes lit, from the root up.
+  component PianoChord: Item {
+    id: piano
+    property string chord: ""
+    readonly property var tones: Model.chordTones(chord)
+    // Absolute keys (0-23) of the chord in root position.
+    readonly property var lit: tones.length === 3
+      ? [tones[0], tones[0] + ((tones[1] - tones[0] + 12) % 12), tones[0] + 7] : []
+    readonly property var whites: [0, 2, 4, 5, 7, 9, 11]
+    readonly property real keyWidth: width / 14
+    height: Style.space(96)
+
+    Repeater {
+      model: 14
+      Rectangle {
+        required property int index
+        readonly property int note: Math.floor(index / 7) * 12 + piano.whites[index % 7]
+        x: index * piano.keyWidth
+        width: piano.keyWidth - 2
+        height: piano.height
+        radius: 3
+        color: piano.lit.indexOf(note) >= 0 ? win.accent : Qt.rgba(1, 1, 1, 0.88)
+      }
+    }
+    Repeater {
+      model: [1, 3, 6, 8, 10, 13, 15, 18, 20, 22]
+      Rectangle {
+        required property var modelData
+        readonly property int white: Math.floor(modelData / 12) * 7 + [0, 0, 1, 1, 2, 3, 3, 4, 4, 5, 5, 6][modelData % 12]
+        x: (white + 1) * piano.keyWidth - width / 2 - 1
+        width: piano.keyWidth * 0.62
+        height: piano.height * 0.6
+        radius: 2
+        color: piano.lit.indexOf(modelData) >= 0 ? Qt.darker(win.accent, 1.15) : "#151515"
       }
     }
   }

@@ -29,6 +29,7 @@ Commands (every result is one JSON object per line on stdout):
   tracks DOWNLOADS   the downloaded songs (they play from their files)
   cloud | cloud-add (form as JSON on stdin) | cloud-remove <source> | cloud-stop
   lyrics <track> [--title T] [--artist A] [--duration S]
+  chords <track> [PLAYER] | scores <track> [--title T] [--artist A] | open-score <url>
   playlists --service cl   your cloud storage's folders (rclone)
   stop
   paths
@@ -3533,6 +3534,249 @@ def cmd_lyrics(args):
     emit({"type": "lyrics", "key": key, **{k: v for k, v in result.items() if k != "at"}})
 
 
+# ---- notes: chords and scores ---------------------------------------------------
+# The player window's Notes, for learning a song: its chords in time with it,
+# heard from the audio itself (so every song has them), and the sheet music
+# and tabs the services have.
+#
+# Chords: the song's audio (the same cached download as peak mix, or the
+# downloaded file) is turned into a chromagram (how much of each of the 12
+# pitch classes sounds, ~11 times a second), each moment compared with the 24
+# major and minor triads, and the best path through them found with a
+# Viterbi pass that makes changing chord cost something, so the result
+# doesn't flicker. Like any chord detection it is approximate; the key comes
+# from the whole song's pitch profile (Krumhansl-Schmuckler). Needs numpy.
+#
+# Scores: Songsterr's public search (tabs and notation per instrument), with
+# links to search MuseScore (sheet music) and Ultimate Guitar.
+
+CHORDS_DIR = os.path.join(CACHE_DIR, "chords")
+CHORDS_VERSION = 2
+CHORD_SR = 11025
+CHORD_FRAME = 4096
+CHORD_HOP = 1024
+NOTE_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+# Krumhansl-Kessler key profiles.
+KEY_MAJOR = (6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88)
+KEY_MINOR = (6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17)
+SONGSTERR_API = "https://www.songsterr.com/api/songs"
+
+
+def chord_audio_path(key, cookie_opts):
+    """A file with the song's audio: the downloaded one, or the cache's."""
+    for t in downloaded_tracks():
+        if t["id"] == key:
+            return t["path"]
+    meta = audio_meta(key)
+    if meta is None:
+        meta, _ = download_audio(key, cookie_opts)
+    return os.path.join(MIX_DIR, meta["audio"])
+
+
+def chroma_of(path):
+    """(chroma frames × 12, seconds per frame) for an audio file."""
+    import numpy as np
+    proc = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-i", path, "-t", str(MIX_MAX_DURATION),
+                           "-ac", "1", "-ar", str(CHORD_SR), "-f", "f32le", "-"],
+                          capture_output=True, timeout=300, stdin=subprocess.DEVNULL)
+    if proc.returncode != 0 or not proc.stdout:
+        raise RuntimeError("ffmpeg couldn't read the song")
+    audio = np.frombuffer(proc.stdout, dtype=np.float32)
+    if len(audio) < CHORD_FRAME * 4:
+        raise RuntimeError("the song is too short")
+    freqs = np.fft.rfftfreq(CHORD_FRAME, 1.0 / CHORD_SR)
+    keep = (freqs >= 55) & (freqs <= 2000)
+    pitch = np.round(12 * np.log2(freqs[keep] / 440.0)).astype(int) % 12   # 0 = A
+    pitch = (pitch + 9) % 12                                                # 0 = C
+    window = np.hanning(CHORD_FRAME).astype(np.float32)
+    count = 1 + (len(audio) - CHORD_FRAME) // CHORD_HOP
+    chroma = np.zeros((count, 12), dtype=np.float32)
+    for start in range(0, count, 512):                   # in batches: bounded memory
+        idx = np.arange(start, min(count, start + 512))
+        frames = np.stack([audio[i * CHORD_HOP:i * CHORD_HOP + CHORD_FRAME] for i in idx]) * window
+        mag = np.sqrt(np.abs(np.fft.rfft(frames, axis=1))[:, keep])
+        for pc in range(12):
+            chroma[idx, pc] = mag[:, pitch == pc].sum(axis=1)
+    return chroma, CHORD_HOP / CHORD_SR
+
+
+def detect_chords(chroma, step):
+    """[[start, end, name], …] and the key, from a chromagram."""
+    import numpy as np
+    # Smooth over ~0.75 s, then normalize each moment.
+    width = max(1, int(round(0.75 / step)))
+    kernel = np.ones(width, dtype=np.float32) / width
+    smooth = np.stack([np.convolve(chroma[:, i], kernel, mode="same") for i in range(12)], axis=1)
+    energy = smooth.sum(axis=1)
+    quiet = energy < 0.08 * np.percentile(energy, 90)
+    norm = smooth / np.maximum(np.linalg.norm(smooth, axis=1, keepdims=True), 1e-9)
+    names, templates = [], []
+    for root in range(12):
+        for kind, third in (("", 4), ("m", 3)):
+            t = np.zeros(12, dtype=np.float32)
+            t[root], t[(root + third) % 12], t[(root + 7) % 12] = 1.0, 0.8, 0.8
+            templates.append(t / np.linalg.norm(t))
+            names.append(NOTE_NAMES[root] + kind)
+    names.append("N")
+    score = norm @ np.stack(templates).T                              # frames × 24
+    score = np.concatenate([score, np.full((len(score), 1), 0.55, dtype=np.float32)], axis=1)
+    score[quiet, :24] = 0.0
+    score[quiet, 24] = 1.0
+    # Viterbi: staying costs nothing, changing costs `penalty`.
+    penalty = 0.45
+    states = score.shape[1]
+    best = score[0].copy()
+    back = np.zeros(score.shape, dtype=np.int16)
+    for i in range(1, len(score)):
+        stay = best
+        switch = best.max() - penalty
+        choose = stay >= switch
+        back[i] = np.where(choose, np.arange(states), best.argmax())
+        best = np.where(choose, stay, switch) + score[i]
+    path = np.zeros(len(score), dtype=np.int16)
+    path[-1] = best.argmax()
+    for i in range(len(score) - 1, 0, -1):
+        path[i - 1] = back[i][path[i]]
+    segments = []
+    for i, s in enumerate(path):
+        t = round(i * step, 2)
+        if segments and segments[-1][2] == names[s]:
+            segments[-1][1] = round((i + 1) * step, 2)
+        else:
+            segments.append([t, round((i + 1) * step, 2), names[s]])
+    # Fold slivers (< 0.6 s) into the chord before them.
+    out = []
+    for seg in segments:
+        if out and (seg[1] - seg[0] < 0.6 or out[-1][2] == seg[2]):
+            out[-1][1] = seg[1]
+        else:
+            out.append(seg)
+    # The key: the whole song's pitch profile against each key's.
+    profile = chroma.sum(axis=0)
+    best_key, best_r = "", -2.0
+    for root in range(12):
+        for name, prof in (("major", KEY_MAJOR), ("minor", KEY_MINOR)):
+            r = float(np.corrcoef(profile, np.roll(np.array(prof), root))[0, 1])
+            if r > best_r:
+                best_key, best_r = f"{NOTE_NAMES[root]} {name}", r
+    # A major key and its relative minor share their notes: the chord the
+    # song spends most time on (its home) tells them apart.
+    held = {}
+    for a, b, c in out:
+        if c != "N":
+            held[c] = held.get(c, 0) + b - a
+    if held and best_key:
+        home = max(held, key=held.get)
+        root = NOTE_NAMES.index(best_key.split()[0])
+        if best_key.endswith("major") and home == NOTE_NAMES[(root + 9) % 12] + "m":
+            best_key = f"{NOTE_NAMES[(root + 9) % 12]} minor"
+        elif best_key.endswith("minor") and home == NOTE_NAMES[(root + 3) % 12]:
+            best_key = f"{NOTE_NAMES[(root + 3) % 12]} major"
+    return out[:2000], best_key
+
+
+def cmd_chords(args):
+    """chords <track> [PLAYER]: the song's chords, in time, and its key."""
+    key = args[0] if args else ""
+    if not TRACK_KEY_RE.match(key):
+        fail("chords needs a track")
+    try:
+        import numpy  # noqa: F401
+    except ImportError:
+        fail("Chords need python-numpy (omarchy pkg add python-numpy)", setup="numpy")
+    try:
+        name = cache_name(key)
+    except RuntimeError as exc:
+        fail(str(exc))
+    os.makedirs(CHORDS_DIR, mode=0o700, exist_ok=True)
+    path = os.path.join(CHORDS_DIR, re.sub(r"[^A-Za-z0-9_-]", "_", name)[:60] + ".json")
+    cached = read_json(path)
+    if isinstance(cached, dict) and cached.get("version") == CHORDS_VERSION and isinstance(cached.get("segments"), list):
+        emit({"type": "chords", "key": key, "segments": cached["segments"], "songKey": cached.get("songKey", "")})
+        return
+    options = player_options(args)
+    cookie_opts = {}
+    if options["playback_cookies"] and options["browser"] != "none":
+        cookie_opts = {"cookiesfrombrowser": browser_spec_tuple(options["browser"])}
+    emit({"type": "chordsProgress", "key": key, "stage": "audio"})
+    try:
+        audio = chord_audio_path(key, cookie_opts)
+        emit({"type": "chordsProgress", "key": key, "stage": "listen"})
+        segments, song_key = detect_chords(*chroma_of(audio))
+    except RuntimeError as exc:
+        fail(str(exc))
+    except subprocess.TimeoutExpired:
+        fail("the song took too long to read")
+    write_json_atomic(path, {"version": CHORDS_VERSION, "segments": segments, "songKey": song_key})
+    emit({"type": "chords", "key": key, "segments": segments, "songKey": song_key})
+
+
+def songsterr_slug(text):
+    return re.sub(r"[^a-z0-9]+", "-", str(text or "").lower()).strip("-")[:80] or "song"
+
+
+def cmd_scores(args):
+    """scores <track> [--title T] [--artist A]: sheet music and tabs."""
+    key = args[0] if args else ""
+    if not TRACK_KEY_RE.match(key):
+        fail("scores needs a track")
+    title = clean_text(opt(args, "--title", ""), 200)
+    artist = clean_text(opt(args, "--artist", ""), 200)
+    names = lyric_names(title, artist) or [(artist, title)]
+    a, t = names[0]
+    query = f"{a} {t}".strip()
+    items, seen = [], set()
+    for qa, qt in names[:2]:
+        url = f"{SONGSTERR_API}?" + urllib.parse.urlencode({"size": 20, "pattern": f"{qa} {qt}".strip()})
+        request = urllib.request.Request(url, headers={"User-Agent": LRCLIB_UA, "Accept": "application/json"})
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                found = json.loads(response.read(4 * 1024 * 1024))
+        except (OSError, ValueError):
+            found = []
+        for s in found if isinstance(found, list) else []:
+            if not isinstance(s, dict) or s.get("isJunk") or not isinstance(s.get("songId"), int) or s["songId"] in seen:
+                continue
+            score = match_score({"title": qt, "artist": qa}, {"title": s.get("title"), "artist": s.get("artist")})
+            if score < 2.5:
+                continue
+            seen.add(s["songId"])
+            instruments = []
+            for tr in s.get("tracks") or []:
+                ins = clean_text((tr or {}).get("instrument"), 40)
+                if ins and ins not in instruments:
+                    instruments.append(ins)
+            items.append({"score": score, "title": clean_text(s.get("title"), 120), "artist": clean_text(s.get("artist"), 120),
+                          "instruments": instruments[:8], "chords": s.get("hasChords") is True,
+                          "url": f"https://www.songsterr.com/a/wsa/{songsterr_slug(s.get('artist'))}-{songsterr_slug(s.get('title'))}-tab-s{s['songId']}"})
+        if items:
+            break
+    # This artist's first, then other artists' versions of the song.
+    items = sorted(items, key=lambda i: -i.pop("score"))[:6]
+    q = urllib.parse.quote(query)
+    emit({"type": "scores", "key": key, "items": items, "query": clean_text(query, 200),
+          "musescore": f"https://musescore.com/sheetmusic?text={q}",
+          "ultimateGuitar": f"https://www.ultimate-guitar.com/search.php?search_type=title&value={q}"})
+
+
+SCORE_URL_RE = re.compile(r"^https://(?:www\.songsterr\.com/a/wsa/[a-z0-9-]{1,200}-tab-s[0-9]{1,12}"
+                          r"|musescore\.com/sheetmusic\?text=[A-Za-z0-9%._~-]{0,600}"
+                          r"|www\.ultimate-guitar\.com/search\.php\?search_type=title&value=[A-Za-z0-9%._~-]{0,600})$")
+
+
+def cmd_open_score(args):
+    """open-score <url>: a score in its own browser window (a web app)."""
+    url = args[0] if args else ""
+    if not SCORE_URL_RE.match(url):
+        fail("Not a score link")
+    launcher = shutil_which("omarchy-launch-webapp") or shutil_which("xdg-open")
+    if not launcher:
+        fail("No way to open a browser")
+    subprocess.Popen([launcher, url], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True, close_fds=True)
+    emit({"type": "scoreOpened"})
+
+
 # ---- problem reports ------------------------------------------------------------
 # One click in the panel: everything about the error is gathered here and
 # opened as a filled-in GitHub issue in the browser, so the user only presses
@@ -3772,6 +4016,9 @@ def main():
         "mixes": cmd_mixes,
         "resolve": cmd_resolve,
         "lyrics": cmd_lyrics,
+        "chords": cmd_chords,
+        "scores": cmd_scores,
+        "open-score": cmd_open_score,
         "cloud": cmd_cloud,
         "cloud-add": cmd_cloud_add,
         "cloud-remove": cmd_cloud_remove,

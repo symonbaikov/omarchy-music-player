@@ -88,7 +88,10 @@ var GLYPH = {
   queue: String.fromCodePoint(0xF0CB8),
   chevronDown: String.fromCodePoint(0xF0140),
   artist: String.fromCodePoint(0xF0803),
-  lyrics: String.fromCodePoint(0xF1021)
+  lyrics: String.fromCodePoint(0xF1021),
+  notes: String.fromCodePoint(0xF0387),
+  guitar: String.fromCodePoint(0xF02A4),
+  piano: String.fromCodePoint(0xF0747)
 }
 
 // A local cover the helper saved (downloads, cloud folders), or one of the
@@ -383,12 +386,19 @@ function parseLine(line) {
     // `auth`: a sign-in problem, so the panel offers a "Sign in" button.
     // `setup`: a service that needs connecting first (sp, sc).
     return { type: "error", message: cleanText(msg.message), auth: msg.auth === true,
-      setup: msg.setup === "sp" || msg.setup === "sc" || msg.setup === "cl" || msg.setup === "rclone" ? msg.setup : "",
+      setup: ["sp", "sc", "cl", "rclone", "numpy"].indexOf(msg.setup) >= 0 ? msg.setup : "",
       service: SERVICES.indexOf(msg.service) >= 0 ? msg.service : "" }
   case "cloud":
     return sanitizeCloud(msg)
   case "lyrics":
     return sanitizeLyrics(msg)
+  case "chords":
+    return sanitizeChords(msg)
+  case "chordsProgress":
+    if (!TRACK_KEY_RE.test(String(msg.key || ""))) return null
+    return { type: "chordsProgress", key: String(msg.key), stage: msg.stage === "listen" ? "listen" : "audio" }
+  case "scores":
+    return sanitizeScores(msg)
   case "targets":
     if (!VIDEO_ID_RE.test(String(msg.videoId || ""))) return null
     return { type: "targets", videoId: String(msg.videoId), items: sanitizeTargets(msg.items) }
@@ -661,4 +671,97 @@ function lyricIndex(lines, seconds) {
     if (lines[mid].t <= seconds) { found = mid; lo = mid + 1 } else hi = mid - 1
   }
   return found
+}
+
+// ---- notes: chords and scores ------------------------------------------------
+
+var CHORD_RE = /^(?:[A-G]#?m?|N)$/
+var NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+
+// The helper's chords for a song: segments { start, end, name } in order,
+// and its key ("A minor").
+function sanitizeChords(msg) {
+  if (!TRACK_KEY_RE.test(String(msg.key || ""))) return null
+  var out = { type: "chords", key: String(msg.key), songKey: /^[A-G]#? (major|minor)$/.test(String(msg.songKey || "")) ? String(msg.songKey) : "",
+    segments: [] }
+  var segs = Array.isArray(msg.segments) ? msg.segments : []
+  var last = -1
+  for (var i = 0; i < segs.length && out.segments.length < 2000; i++) {
+    var s = segs[i]
+    if (!Array.isArray(s) || typeof s[0] !== "number" || typeof s[1] !== "number" || !CHORD_RE.test(String(s[2]))) continue
+    if (s[0] < last || s[1] < s[0] || s[1] > 86400) continue
+    last = s[0]
+    out.segments.push({ t: s[0], end: s[1], name: String(s[2]) })
+  }
+  return out
+}
+
+var SCORE_URL_RE = /^https:\/\/(?:www\.songsterr\.com\/a\/wsa\/[a-z0-9-]{1,200}-tab-s[0-9]{1,12}|musescore\.com\/sheetmusic\?text=[A-Za-z0-9%._~-]{0,600}|www\.ultimate-guitar\.com\/search\.php\?search_type=title&value=[A-Za-z0-9%._~-]{0,600})$/
+
+function sanitizeScores(msg) {
+  if (!TRACK_KEY_RE.test(String(msg.key || ""))) return null
+  var out = { type: "scores", key: String(msg.key), items: [], query: cleanText(msg.query, 200),
+    musescore: SCORE_URL_RE.test(String(msg.musescore || "")) ? String(msg.musescore) : "",
+    ultimateGuitar: SCORE_URL_RE.test(String(msg.ultimateGuitar || "")) ? String(msg.ultimateGuitar) : "" }
+  var items = Array.isArray(msg.items) ? msg.items : []
+  for (var i = 0; i < items.length && out.items.length < 6; i++) {
+    var it = items[i]
+    if (!it || !SCORE_URL_RE.test(String(it.url || ""))) continue
+    out.items.push({ title: cleanText(it.title, 120), artist: cleanText(it.artist, 120), url: String(it.url),
+      instruments: Array.isArray(it.instruments) ? it.instruments.slice(0, 8).map(function(x) { return cleanText(x, 40) }) : [] })
+  }
+  return out
+}
+
+// A chord's notes as pitch classes (0 = C): root, third, fifth.
+function chordTones(name) {
+  var m = /^([A-G]#?)(m?)$/.exec(String(name || ""))
+  if (!m) return []
+  var root = NOTE_NAMES.indexOf(m[1])
+  return [root, (root + (m[2] ? 3 : 4)) % 12, (root + 7) % 12]
+}
+
+// Flats where musicians write them: B♭ rather than A#, and the notes of a
+// flat-side chord (F, B♭, E♭, A♭, Dm, Gm, Cm, Fm …) spelled with flats.
+var FLAT_NAMES = ["C", "D♭", "D", "E♭", "E", "F", "G♭", "G", "A♭", "A", "B♭", "B"]
+var FLAT_ROOTS = { "A#": "B♭", "D#": "E♭", "G#": "A♭" }
+var FLAT_SIDE = ["F", "A#", "D#", "G#", "C#", "Dm", "Gm", "Cm", "Fm", "A#m", "D#m"]
+
+function chordLabel(name) {
+  var m = /^([A-G]#?)(m?)$/.exec(String(name || ""))
+  if (!m) return String(name || "")
+  return (FLAT_ROOTS[m[1]] || m[1]) + m[2]
+}
+
+function keyLabel(key) {
+  var m = /^([A-G]#?) (major|minor)$/.exec(String(key || ""))
+  return m ? (FLAT_ROOTS[m[1]] || m[1]) + " " + m[2] : ""
+}
+
+function chordNoteNames(name) {
+  var names = FLAT_SIDE.indexOf(String(name)) >= 0 ? FLAT_NAMES : NOTE_NAMES
+  return chordTones(name).map(function(pc) { return names[pc] })
+}
+
+// Guitar shapes for the 24 triads, low E string first: fret numbers, -1 =
+// not played, 0 = open. The usual open chords, barre chords elsewhere.
+var GUITAR_SHAPES = {
+  "C": [-1, 3, 2, 0, 1, 0], "C#": [-1, 4, 6, 6, 6, 4], "D": [-1, -1, 0, 2, 3, 2], "D#": [-1, 6, 8, 8, 8, 6],
+  "E": [0, 2, 2, 1, 0, 0], "F": [1, 3, 3, 2, 1, 1], "F#": [2, 4, 4, 3, 2, 2], "G": [3, 2, 0, 0, 0, 3],
+  "G#": [4, 6, 6, 5, 4, 4], "A": [-1, 0, 2, 2, 2, 0], "A#": [-1, 1, 3, 3, 3, 1], "B": [-1, 2, 4, 4, 4, 2],
+  "Cm": [-1, 3, 5, 5, 4, 3], "C#m": [-1, 4, 6, 6, 5, 4], "Dm": [-1, -1, 0, 2, 3, 1], "D#m": [-1, 6, 8, 8, 7, 6],
+  "Em": [0, 2, 2, 0, 0, 0], "Fm": [1, 3, 3, 1, 1, 1], "F#m": [2, 4, 4, 2, 2, 2], "Gm": [3, 5, 5, 3, 3, 3],
+  "G#m": [4, 6, 6, 4, 4, 4], "Am": [-1, 0, 2, 2, 1, 0], "A#m": [-1, 1, 3, 3, 2, 1], "Bm": [-1, 2, 4, 4, 3, 2]
+}
+
+// What a guitar diagram draws: the first fret shown (1 for open shapes),
+// and each string's dot relative to it (0 = open, -1 = muted).
+function guitarDiagram(name) {
+  var shape = GUITAR_SHAPES[name]
+  if (!shape) return null
+  var fretted = shape.filter(function(f) { return f > 0 })
+  var low = Math.min.apply(null, fretted)
+  var high = Math.max.apply(null, fretted)
+  var base = high <= 4 ? 1 : low
+  return { base: base, strings: shape.map(function(f) { return f <= 0 ? f : f - base + 1 }) }
 }

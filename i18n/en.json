@@ -229,5 +229,20 @@
   "full.instrumental": "Instrumental",
   "full.lyricsSource": "Lyrics: %1",
   "full.fullscreen": "Full screen (F11)",
-  "full.leaveFullscreen": "Leave full screen (F11)"
+  "full.leaveFullscreen": "Leave full screen (F11)",
+  "notes.tab": "Notes",
+  "notes.now": "Now",
+  "notes.chords": "Chords",
+  "notes.key": "Key: %1",
+  "notes.approx": "Chords heard from the audio: a good start for learning, not always exact.",
+  "notes.fetching": "Getting the song's audio to hear its chords…",
+  "notes.listening": "Listening for the chords…",
+  "notes.needNumpy": "Hearing the chords needs python-numpy.",
+  "notes.installNumpy": "Install python-numpy",
+  "notes.scores": "Sheet music and tabs",
+  "notes.searching": "Looking for sheet music and tabs…",
+  "notes.noScores": "Songsterr has no tabs for this song. Try MuseScore or Ultimate Guitar:",
+  "notes.open": "Open",
+  "notes.musescore": "Sheet music on MuseScore",
+  "notes.ultimateGuitar": "Chords on Ultimate Guitar"
 }

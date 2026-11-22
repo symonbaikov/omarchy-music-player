@@ -1,9 +1,8 @@
 # Services
 
 Each service is a logo in the rail down the panel's left side (hover it for
-its name; and in the player window's
-sidebar). The `+` tab picks which ones you see; YouTube Music and My Music
-are always there.
+its name) and an entry in the player window's sidebar. The `+` under them
+picks which ones you see; YouTube Music and My Music are always there.
 
 | Tab | What you get | Setup |
 |---|---|---|

@@ -62,8 +62,10 @@ the browser the plugin reads cookies from.
 
 **Radio**: about 50,000 internet radio stations from
 [Radio Browser](https://www.radio-browser.info), an open directory: the top
-stations, the most liked, your country's (from your language setting),
-genres, search, and your favorites (the heart on a station). The song on
+stations, the most liked, a country's (**Choose a country** lists them
+all with how many stations each has; type to narrow; it starts with the
+one your language setting names), genres, search, and your favorites (the
+heart on a station). The song on
 air shows when the station announces it.
 
 **Files** starts with your **Music folder**: one click adds `~/Music` (or

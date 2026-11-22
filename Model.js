@@ -415,6 +415,17 @@ function parseLine(line) {
     return sanitizeCloud(msg)
   case "lyrics":
     return sanitizeLyrics(msg)
+  case "radioCountries": {
+    var cs = Array.isArray(msg.items) ? msg.items : []
+    var out = []
+    for (var ci = 0; ci < cs.length && out.length < 300; ci++) {
+      var c = cs[ci]
+      if (!c || !/^[A-Z]{2}$/.test(String(c.code || ""))) continue
+      out.push({ kind: "country", id: String(c.code), title: cleanText(c.name, 80) || String(c.code),
+        count: validCount(c.count), section: "" })
+    }
+    return { type: "radioCountries", items: out, current: /^[A-Z]{2}$/.test(String(msg.current || "")) ? String(msg.current) : "" }
+  }
   case "radioFavs":
     return { type: "radioFavs", ids: Array.isArray(msg.ids) ? msg.ids.filter(isRadio).slice(0, 500) : [] }
   case "chords":

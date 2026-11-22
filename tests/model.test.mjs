@@ -463,3 +463,12 @@ test("radio keys and lists; the tabs setting", () => {
   assert.deepEqual(Array.from(M.visibleTabs("")), ["yt", "sp", "sc", "cl", "rd", "my"])
   assert.deepEqual(Array.from(M.visibleTabs("rd,sc,bogus")), ["yt", "sc", "rd", "my"])
 })
+
+test("radio countries are sanitized into rows", () => {
+  const m = M.parseLine(JSON.stringify({ type: "radioCountries", current: "RU",
+    items: [{ code: "US", name: "United States", count: 7088 }, { code: "ru", name: "bad" }, { code: "RU", name: "Russia", count: 2474 }] }))
+  assert.equal(m.current, "RU")
+  assert.deepEqual(Array.from(m.items, c => c.id), ["US", "RU"])
+  assert.equal(m.items[1].kind, "country")
+  assert.equal(m.items[1].count, 2474)
+})

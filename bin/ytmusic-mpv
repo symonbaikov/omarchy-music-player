@@ -3951,8 +3951,49 @@ def radio_api(path, params=None):
     raise RuntimeError(f"Radio Browser didn't answer: {last}")
 
 
+RADIO_COUNTRIES_PATH = os.path.join(CACHE_DIR, "radio-countries.json")
+COUNTRY_NAMES = {"US": "United States", "GB": "United Kingdom", "RU": "Russia", "KR": "South Korea", "KP": "North Korea",
+                 "IR": "Iran", "SY": "Syria", "VE": "Venezuela", "BO": "Bolivia", "TZ": "Tanzania", "MD": "Moldova",
+                 "VN": "Vietnam", "LA": "Laos", "TW": "Taiwan", "CZ": "Czechia", "NL": "Netherlands", "AE": "United Arab Emirates",
+                 "PH": "Philippines", "DO": "Dominican Republic", "CD": "DR Congo"}
+
+
+def radio_countries(max_age=7 * 86400):
+    """[{code, name, count}] of countries with stations, most first."""
+    cached = read_json(RADIO_COUNTRIES_PATH)
+    if isinstance(cached, dict) and time.time() - float(cached.get("fetchedAt") or 0) < max_age and cached.get("items"):
+        return cached["items"]
+    items = []
+    for c in radio_api("countries", {"order": "stationcount", "reverse": "true", "hidebroken": "true"}) or []:
+        code = str(c.get("iso_3166_1") or "") if isinstance(c, dict) else ""
+        if re.match(r"^[A-Z]{2}$", code) and isinstance(c.get("stationcount"), int) and c["stationcount"] > 0:
+            name = COUNTRY_NAMES.get(code) or re.sub(r"^The ", "", clean_text(c.get("name"), 80))
+            items.append({"code": code, "name": name, "count": c["stationcount"]})
+    write_json_atomic(RADIO_COUNTRIES_PATH, {"items": items, "fetchedAt": int(time.time())})
+    return items
+
+
+def country_name(code):
+    for c in (read_json(RADIO_COUNTRIES_PATH) or {}).get("items") or []:
+        if isinstance(c, dict) and c.get("code") == code:
+            return c.get("name") or code
+    return COUNTRY_NAMES.get(code, code)
+
+
+def cmd_radio_countries(_args):
+    try:
+        items = radio_countries()
+    except RuntimeError as exc:
+        fail(str(exc))
+    emit({"type": "radioCountries", "items": items, "current": radio_country()})
+
+
 def radio_country():
-    """The country the system's language setting names (de_DE → DE)."""
+    """The country chosen in the Radio tab, else the one the system's
+    language setting names (de_DE → DE)."""
+    chosen = str(widget_settings().get("radioCountry") or "")
+    if re.match(r"^[A-Z]{2}$", chosen):
+        return chosen
     for var in ("LC_ALL", "LC_MESSAGES", "LANG"):
         m = re.match(r"^[a-z]{2,3}_([A-Z]{2})", os.environ.get(var, ""))
         if m:
@@ -4074,8 +4115,8 @@ def radio_lists():
              {"id": "rd:vote", "title": "Most liked", "count": None, "subtitle": "Listeners' favorites"}]
     country = radio_country()
     if country:
-        items.append({"id": f"rd:country:{country}", "title": f"Stations in {country}", "count": None,
-                      "subtitle": "From your language settings"})
+        items.append({"id": f"rd:country:{country}", "title": f"Stations in {country_name(country)}", "count": None,
+                      "subtitle": "Your country" if widget_settings().get("radioCountry") else "From your language settings"})
     items += [{"id": f"rd:tag:{g}", "title": g.replace("-", " ").title() if g not in ("80s", "90s", "lofi") else g,
                "count": None, "subtitle": "Genre"} for g in RADIO_GENRES]
     return items
@@ -4852,6 +4893,7 @@ def main():
         "resolve": cmd_resolve,
         "lyrics": cmd_lyrics,
         "radio-fav": cmd_radio_fav,
+        "radio-countries": cmd_radio_countries,
         "radio-favs": cmd_radio_favs,
         "chords": cmd_chords,
         "scores": cmd_scores,

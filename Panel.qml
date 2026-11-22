@@ -69,8 +69,10 @@ Panel {
   readonly property var libraryRows: service === "yt" ? [exploreEntry].concat(playlists)
     : service === "sc" ? (svc.sc.setup ? [] : [scSearchEntry].concat(svc.sc.items))
     : service === "cl" ? (svc.cl.setup || cloudFormOpen ? [] : svc.cl.items.concat([cloudAddEntry]))
+    : service === "rd" ? [radioCountryEntry].concat(svc.rd.items)
     : svc[service].setup ? [] : svc[service].items
   readonly property var rows: view === "settings" || view === "download" || view === "services" ? []
+    : view === "countries" ? countryRows
     : view === "explore" ? exploreRowsData
     : view === "playlists" ? libraryRows
     : view === "tracks" ? tracks
@@ -166,6 +168,7 @@ Panel {
     view = "playlists"
     cursorIndex = -1
     if (name === "cl") loadCloud()
+    if (name === "rd" && radioCountries.length === 0 && !countriesProc.running) countriesProc.running = true
     if (name !== "yt" && svc[name].items.length === 0 && !svc[name].loading) loadPlaylists(false)
   }
 
@@ -187,6 +190,12 @@ Panel {
   property string cloudBusy: ""              // "" | "waiting" (browser sign-in) | "checking"
   property string cloudError: ""
   property bool cloudTyping: false
+  // Fields inside the panel's content (set by it when it's made).
+  property Item searchInput: null
+  property Item cloudPathInput: null
+  property Item cloudTitleInput: null
+  function focusSearch() { if (searchInput) searchInput.forceActiveFocus() }
+  function setSearchText(text) { if (searchInput) searchInput.text = text }
   // Bumped to clear the form's fields (their delegates are made again).
   property int cloudFormEpoch: 0
   readonly property bool cloudFormShown: view === "playlists" && service === "cl" && (svc.cl.setup !== "" || cloudFormOpen)
@@ -222,7 +231,8 @@ Panel {
     if (cloudAddProc.running) return
     if (cloudKind === "remote" && cloudRemote === "") { cloudError = strings.t("cloud.pickRemote"); return }
     var form = Model.cloudForm(cloudKind, cloudValues, cloudRemote,
-      path !== undefined ? path : cloudPathField.text, title !== undefined ? title : cloudTitleField.text)
+      path !== undefined ? path : (cloudPathInput ? cloudPathInput.text : ""),
+      title !== undefined ? title : (cloudTitleInput ? cloudTitleInput.text : ""))
     if (!form) return
     cloudError = ""
     cloudBusy = cloudKindSpec.oauth ? "waiting" : "checking"
@@ -444,6 +454,9 @@ Panel {
       if (msg.key === chordsProc.key) chordsStage = msg.stage
     } else if (msg.type === "scores") {
       if (msg.key === scoresProc.key) scores = msg
+    } else if (msg.type === "radioCountries") {
+      radioCountries = msg.items
+      radioCountry = msg.current
     } else if (msg.type === "radioFavs") {
       var set = {}
       for (var fi = 0; fi < msg.ids.length; fi++) set[msg.ids[fi]] = true
@@ -469,8 +482,8 @@ Panel {
         cloudFormOpen = false
         cloudValues = ({})
         cloudFormEpoch++
-        cloudPathField.text = ""
-        cloudTitleField.text = ""
+        if (cloudPathInput) cloudPathInput.text = ""
+        if (cloudTitleInput) cloudTitleInput.text = ""
         showNotice(strings.t("cloud.added").arg(msg.title))
         setSvc("cl", { setup: "", error: "", items: [] })
         loadCloud()
@@ -567,6 +580,7 @@ Panel {
       else if (source === "signin") showNotice(msg.message)
       else if (source === "service") setSvc(servicePlaylistsProc.target, { loading: false, error: msg.setup ? "" : msg.message, setup: msg.setup })
       else if (source === "spotify") { spotifyWaiting = false; showNotice(msg.message, false, true) }
+      else if (source === "countries") showNotice(strings.t("notice.failed").arg(msg.message))
       else if (source === "chords") { chordsStage = ""; chordsError = msg.message; numpyMissing = msg.setup === "numpy" }
       else if (source === "scores" || source === "openScore") { if (source === "openScore") showNotice(msg.message) }
       else if (source === "lyrics") { lyricsLoading = false; lyrics = { key: lyricsProc.key, lines: [], none: true, synced: false } }
@@ -1130,7 +1144,7 @@ Panel {
     exploreTitle = strings.t("sc.searchTitle")
     exploreRowsData = []
     exploreError = ""
-    searchField.forceActiveFocus()
+    focusSearch()
   }
 
   // The search field under the tabs: results right away, wherever the panel
@@ -1138,6 +1152,12 @@ Panel {
   property string searchReturnView: ""
   function searchFromBar(text) {
     var q = String(text || "").trim()
+    // In the country list the field narrows it; Enter picks the only match.
+    if (view === "countries") {
+      countryFilter = q
+      if (countryRows.length === 1) chooseCountry(countryRows[0])
+      return
+    }
     if (q === "") return
     if (view !== "explore") {
       if (view === "addTo") closeAddTo()
@@ -1694,6 +1714,47 @@ Panel {
 
   // Favorite stations, as a lookup.
   property var radioFavs: ({})
+
+  // The Radio tab's country: chosen from a list (the "countries" view),
+  // typed into the search field to narrow it.
+  property var radioCountries: []
+  property string radioCountry: ""
+  property string countryFilter: ""
+  readonly property var radioCountryEntry: ({ kind: "explore", id: "__rdcountry", title: strings.t("rd.chooseCountry"),
+    artist: radioCountryName !== "" ? strings.t("rd.countryNow").arg(radioCountryName) : strings.t("rd.countryHint") })
+  readonly property string radioCountryName: {
+    for (var i = 0; i < radioCountries.length; i++) if (radioCountries[i].id === radioCountry) return radioCountries[i].title
+    return radioCountry
+  }
+  readonly property var countryRows: {
+    var q = countryFilter.trim().toLowerCase()
+    return q === "" ? radioCountries : radioCountries.filter(function(c) {
+      return c.title.toLowerCase().indexOf(q) >= 0 || c.id.toLowerCase() === q
+    })
+  }
+  Process {
+    id: countriesProc
+    command: root.helper(["radio-countries"])
+    stdout: SplitParser { onRead: function(line) { root.handleHelperLine(line, "countries") } }
+  }
+  function openCountries() {
+    countryFilter = ""
+    setSearchText("")
+    view = "countries"
+    cursorIndex = -1
+    if (!countriesProc.running) countriesProc.running = true
+    if (!opened) open()
+  }
+  function chooseCountry(row) {
+    if (!row) return
+    saveSettings({ radioCountry: row.id })
+    radioCountry = row.id
+    countryFilter = ""
+    setSearchText("")
+    view = "playlists"
+    loadService("rd", true)
+    openList({ id: "rd:country:" + row.id, title: strings.t("rd.stationsIn").arg(row.title), count: null })
+  }
   Process {
     id: radioFavProc
     stdout: SplitParser { onRead: function(line) { root.handleHelperLine(line, "radioFav") } }
@@ -1833,6 +1894,7 @@ Panel {
     if (p.kind === "explore") {
       if (p.id === "__scsearch") openSoundCloudSearch()
       else if (p.id === "__cloudadd") openCloudForm()
+      else if (p.id === "__rdcountry") openCountries()
       else openExplore()
       return
     }
@@ -1859,6 +1921,7 @@ Panel {
       return
     }
     if (view === "tracks" && tracksFromExplore) { view = "explore"; cursorIndex = -1; return }
+    if (view === "countries") { view = "playlists"; countryFilter = ""; cursorIndex = -1; return }
     if (view === "settings" || view === "services") {
       view = viewBeforeSettings === "tracks" && openPlaylist ? "tracks" : "playlists"
       cursorIndex = -1
@@ -1875,7 +1938,7 @@ Panel {
   function refreshList() {
     if (view === "settings" || view === "download") return
     if (view === "explore") {
-      if (exploreMode === "search") runSearch(searchField.text)
+      if (exploreMode === "search") runSearch(searchInput ? searchInput.text : "")
       else if (exploreMode === "home") loadExplore(0)
       return
     }
@@ -1885,6 +1948,7 @@ Panel {
   }
 
   function activateRow(index) {
+    if (view === "countries") { chooseCountry(rows[index]); return }
     if (view === "explore") { activateExplore(rows[index]); return }
     if (view === "tracks") play(index, false)
     else if (view === "addTo") addToPlaylist(rows[index])
@@ -1944,7 +2008,7 @@ Panel {
     case "d": openDownload(cursorOrCurrentTrack()); break
     case "e": openExplore(); break
     case "F": openFull(); break
-    case "/": searchField.forceActiveFocus(); break
+    case "/": focusSearch(); break
     }
   }
 
@@ -1991,7 +2055,7 @@ Panel {
     cursorIndex = -1
     // The keys go to the panel's shortcuts, not the search field, until
     // the field is clicked or "/" is pressed.
-    Qt.callLater(function() { if (searchField.activeFocus) searchField.focus = false; if (panel.loadedContent) panel.loadedContent.forceActiveFocus() })
+    Qt.callLater(function() { if (searchInput && searchInput.activeFocus) searchInput.focus = false; if (panel.loadedContent) panel.loadedContent.forceActiveFocus() })
     if (playlists.length === 0 || !playlistsLoading) loadYouTube(false)
     if (service !== "yt") loadService(service, false)
     if (svc.my.items.length === 0) loadService("my", false)
@@ -2056,6 +2120,13 @@ Panel {
 
     content: PanelKeyCatcher {
       anchors.fill: parent
+      // The panel's functions live outside this content and can't see its
+      // ids: hand them the fields they work with.
+      Component.onCompleted: {
+        root.searchInput = searchField
+        root.cloudPathInput = cloudPathField
+        root.cloudTitleInput = cloudTitleField
+      }
       // Typing in the search field goes to the field, not to shortcuts.
       blocked: searchField.activeFocus || setupField.activeFocus || root.cloudTyping
       implicitHeight: column.implicitHeight
@@ -2158,6 +2229,7 @@ Panel {
           }
           TextInput {
             id: searchField
+            onTextEdited: if (root.view === "countries") root.countryFilter = text
             anchors.left: searchIcon.right
             anchors.leftMargin: Style.space(10)
             anchors.right: parent.right
@@ -2188,7 +2260,8 @@ Panel {
             verticalAlignment: Text.AlignVCenter
             visible: searchField.text === "" && !searchField.preeditText
             readonly property string where: root.view === "explore" ? root.exploreService : root.service
-            text: where === "sc" ? strings.t("sc.searchField") : where === "rd" ? strings.t("rd.searchField") : strings.t("explore.search")
+            text: root.view === "countries" ? strings.t("rd.countryField")
+              : where === "sc" ? strings.t("sc.searchField") : where === "rd" ? strings.t("rd.searchField") : strings.t("explore.search")
             color: root.dim
             font.pixelSize: Style.font.subtitle
           }
@@ -2736,6 +2809,7 @@ Panel {
               elide: Text.ElideRight
               text: root.view === "settings" ? strings.t("settings.title")
                 : root.view === "services" ? strings.t("services.title")
+                : root.view === "countries" ? strings.t("rd.countries")
                 : root.view === "explore" ? root.exploreTitle
                 : root.view === "download" && root.downloadTrack ? strings.t("download.title").arg(root.downloadTrack.title)
                 : root.view === "tracks" ? root.playlistTitle(root.openPlaylist)
@@ -3501,7 +3575,9 @@ Panel {
                 font.pixelSize: rowItem.isTrack && !rowItem.isNow && root.view === "tracks" ? Style.font.body : Style.font.title
                 text: {
                   if (rowItem.isNow) return root.paused ? Model.GLYPH.pause : Model.GLYPH.play
+                  if (rowItem.kind === "country") return rowItem.modelData.id === root.radioCountry ? Model.GLYPH.check : Model.GLYPH.explore
                   if (rowItem.kind === "explore") return rowItem.modelData.id === "__scsearch" ? Model.GLYPH.search
+                    : rowItem.modelData.id === "__rdcountry" ? Model.GLYPH.explore
                     : rowItem.modelData.id === "__cloudadd" ? Model.GLYPH.plus : Model.GLYPH.explore
                   if (rowItem.kind === "mood") return Model.GLYPH.mood
                   if (!rowItem.isTrack) {
@@ -3569,6 +3645,8 @@ Panel {
                 var d = rowItem.modelData
                 if (rowItem.kind === "explore" || rowItem.kind === "mood") return rowItem.kind === "explore" ? Model.GLYPH.forward : ""
                 if (rowItem.isTrack) return d.duration !== null && d.duration !== undefined ? Model.formatTime(d.duration, Commons.I18n.formatNumber) : ""
+                if (rowItem.kind === "country") return strings.t("rd.stationCount").arg(Commons.I18n.formatNumber(d.count || 0))
+                if (/^rd:/.test(String(d.id)) && typeof d.count === "number") return strings.t("rd.stationCount").arg(Commons.I18n.formatNumber(d.count))
                 // Add-to view: a check where the song already is.
                 if (root.view === "addTo" && d.contains === true) return Model.GLYPH.check
                 return typeof d.count === "number" ? strings.tn("list.tracks", d.count).arg(Commons.I18n.formatNumber(d.count)) : ""

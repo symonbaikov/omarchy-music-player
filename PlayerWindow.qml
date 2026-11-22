@@ -153,6 +153,7 @@ FloatingWindow {
     }
     if (item.kind === "explore") {
       if (item.id === "__cloudadd") addStorage()
+      else if (item.id === "__rdcountry") p.openCountries()
       else showBrowse()
       return
     }
@@ -210,7 +211,7 @@ FloatingWindow {
 
   readonly property var mixes: p.svc.my.items
   readonly property var libraryCards: p.libraryRows.filter(function(r) {
-    return !(r.kind === "explore" && r.id !== "__cloudadd")
+    return !(r.kind === "explore" && r.id !== "__cloudadd" && r.id !== "__rdcountry")
   })
   readonly property var queue: p.session && p.session.tracks ? p.session.tracks : []
   readonly property string bigCover: p.connected && p.currentTrack

@@ -264,5 +264,12 @@
   "cloud.addMusic": "Add your Music folder (%1)",
   "cloud.hint.subsonic": "Navidrome, or any server with the Subsonic API (Airsonic, Gonic …): its address, your user name and password. Only a token is kept, never the password.",
   "cloud.hint.jellyfin": "Your Jellyfin server: its address, your user name and password. Only the token Jellyfin gives is kept.",
-  "cloud.hint.plex": "Your browser opens Plex's sign-in; allow it, and your server with music is found by itself."
+  "cloud.hint.plex": "Your browser opens Plex's sign-in; allow it, and your server with music is found by itself.",
+  "rd.chooseCountry": "Choose a country",
+  "rd.countryNow": "Now: %1",
+  "rd.countryHint": "Stations from any country",
+  "rd.countries": "Countries",
+  "rd.countryField": "Type a country…",
+  "rd.stationsIn": "Stations in %1",
+  "rd.stationCount": "%1 stations"
 }

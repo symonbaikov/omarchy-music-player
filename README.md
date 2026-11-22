@@ -22,8 +22,8 @@ SoundCloud and your own cloud storage** (S3, Google Drive, Dropbox,
 OneDrive, SFTP, SMB, WebDAV, FTP), switched like tabs at the top of the
 panel, played through a headless `mpv`. You don't need a browser window,
 browser extension or web app open while it plays. Mix songs from all of
-them in one queue, and open the whole player **full screen**, like Apple
-Music's window.
+them in one queue, and open the whole player in **its own window**, like
+Apple Music's app.
 
 (The plugin ID stays `io.github.symonbaikov.ytmusic-mpv`: marketplace IDs are
 permanent. It started as a YouTube Music player.)
@@ -119,14 +119,17 @@ that song. Fades, Peak mix and Downloads work across services.
   in your playlists, lists every song you saved (newest first, with its
   cover if you kept the cover) and plays them from your disk, offline.
   A file you delete or move drops out of the list.
-- **Full screen** (the icon beside the gear, `Shift+F`): the whole player
-  on the whole screen, like Apple Music's window. A sidebar with Listen
-  Now, Explore, every service and your mixes; big covers and shelves; each
-  playlist with its artwork, Play and Shuffle; the player along the
-  bottom; and **Now Playing**, with the song's cover big, blurred behind
-  everything, and what's up next. `Esc` goes back, then leaves; `Space`
-  plays and pauses, `/` searches.
-- **Lyrics** (the speech-bubble button in full screen, or `l`): like Apple
+- **The player window** (the icon beside the gear, `Shift+F`): the whole
+  player in a real window, like Apple Music's app. Hyprland treats it like
+  any other: it tiles, moves (drag its title, or `Super`+drag; `Super+T`
+  floats it), goes to another workspace, closes with `Super+W`; its button
+  or `F11` makes it full screen. A sidebar with Listen Now, Explore, every
+  service and your mixes; big covers and shelves; each playlist with its
+  artwork, Play and Shuffle; the player along the bottom; and **Now
+  Playing**, with the song's cover big, blurred behind everything, and
+  what's up next. `Esc` goes back; `Space` plays and pauses, `/` searches.
+  Opening it again while it's open brings it to you.
+- **Lyrics** (the speech-bubble button in the player window, or `l`): like Apple
   Music's, big lines that light up in time with the song and scroll by
   themselves, the others dimmed and soft; click a line to jump there.
   Timed lyrics come from [LRCLIB](https://lrclib.net); when it has none,
@@ -240,7 +243,7 @@ Removal doesn't touch the cached lists. Delete them yourself if you like:
 In the panel: `j`/`k` move, `Enter` opens a playlist or plays a track,
 `h`/`Backspace` goes back, `p` play/pause, `n` next, `b` previous,
 `s` shuffle the open playlist, `Shift+R` cycle repeat, `m` start radio,
-`,` settings, `e` Explore, `/` search, `d` download, `Shift+F` full screen,
+`,` settings, `e` Explore, `/` search, `d` download, `Shift+F` player window,
 `f` like / remove like, `a` add to a playlist (all three act on the
 highlighted track, or the playing one), `r` refresh, `+`/`-` volume, `Esc`
 closes. Hovering a track shows like, add-to-playlist and radio buttons;
@@ -263,7 +266,7 @@ omarchy-shell io.github.symonbaikov.ytmusic-mpv openSettings  # the settings scr
 omarchy-shell io.github.symonbaikov.ytmusic-mpv explore       # Explore
 omarchy-shell io.github.symonbaikov.ytmusic-mpv tab sp        # a tab: yt, sp, sc, cl or my
 omarchy-shell io.github.symonbaikov.ytmusic-mpv download      # download the playing song
-omarchy-shell io.github.symonbaikov.ytmusic-mpv fullscreen    # full screen on / off
+omarchy-shell io.github.symonbaikov.ytmusic-mpv fullscreen    # the player window, open / close
 omarchy-shell io.github.symonbaikov.ytmusic-mpv full lyrics  # full screen on a page: home, browse, nowplaying, lyrics, yt, sp, sc, cl, my
 omarchy-shell io.github.symonbaikov.ytmusic-mpv cloud         # connect a cloud storage
 ```

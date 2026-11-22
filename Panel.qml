@@ -172,7 +172,6 @@ Panel {
   }
 
   function openCloudForm() {
-    if (leaveFull(function() { root.openCloudForm() })) return
     cloudError = ""
     cloudFormOpen = true
     if (service !== "cl") switchService("cl")
@@ -974,6 +973,8 @@ Panel {
 
   function openFull() {
     close()
+    // Already open (maybe on another workspace): bring it here.
+    if (fullOpen) { focusFullProc.running = true; return }
     fullOpen = true
     if (playlists.length === 0 && !playlistsLoading) loadYouTube(false)
     var names = ["my", "sp", "sc", "cl"]
@@ -988,22 +989,21 @@ Panel {
 
   function closeFull() { fullOpen = false }
 
+  Process {
+    id: focusFullProc
+    command: ["sh", "-c", "a=$(hyprctl clients -j | jq -r '.[] | select(.class == \"org.quickshell\" and .title == \"Omarchy Music Player\") | .address' | head -n1); [ -n \"$a\" ] && hyprctl dispatch \"hl.dsp.focus({ window = \\\"address:$a\\\" })\" >/dev/null"]
+  }
+
   // Spotify's and SoundCloud's setup lives in the panel: leave full screen,
   // then open the panel on that tab once the full-screen window is gone
   // (opened in the same moment, the panel would lose the keyboard to it).
+  // Spotify's and SoundCloud's setup lives in the panel, which opens over
+  // the player window.
   function connectInPanel(name) {
-    leaveFull(function() { root.switchService(name); if (!root.opened) root.open() })
+    switchService(name)
+    if (!opened) open()
   }
 
-  // Panel screens asked for from full screen: leave it and do `then` in the
-  // same moment (the panel takes the keyboard as the full-screen window
-  // goes). Returns false when not in full screen.
-  function leaveFull(then) {
-    if (!fullOpen) return false
-    fullOpen = false
-    then()
-    return true
-  }
 
   // ---- explore ---------------------------------------------------------------
   function openSoundCloudSearch() {
@@ -1091,7 +1091,6 @@ Panel {
 
   // ---- download --------------------------------------------------------------
   function openDownload(track) {
-    if (leaveFull(function() { root.openDownload(track) })) return
     if (!track || !Model.TRACK_KEY_RE.test(String(track.id))) return
     downloadTrack = { id: track.id, title: track.title, artist: track.artist || "" }
     if (view !== "download") viewBeforeDownload = view === "addTo" || view === "settings" ? "playlists" : view
@@ -1483,7 +1482,6 @@ Panel {
   }
 
   function openSettings() {
-    if (leaveFull(function() { root.openSettings() })) return
     if (view !== "settings") viewBeforeSettings = view === "addTo" ? "playlists" : view
     if (view === "addTo") closeAddTo()
     view = "settings"
@@ -1570,7 +1568,6 @@ Panel {
   // "Add to playlist": the list switches to your playlists; picking one adds
   // the song and returns to where you were.
   function openAddTo(track) {
-    if (leaveFull(function() { root.openAddTo(track) })) return
     if (!track || !Model.TRACK_KEY_RE.test(String(track.id))) return
     if (svc.my.items.length === 0) loadService("my", false)
     if (!Model.isYouTube(track.id)) {
@@ -1811,7 +1808,7 @@ Panel {
       if (!root.fullOpen) root.openFull()
       if (Model.SERVICES.indexOf(page) >= 0) fullView.showService(page)
       else if (page === "browse") fullView.showBrowse()
-      else if (page === "lyrics") { fullView.lyricsMode = true; fullView.go("nowplaying") }
+      else if (page === "lyrics") fullView.showLyrics()
       else if (page === "home" || page === "nowplaying") fullView.go(page)
     }
     function cloud(): void { root.fullOpen ? fullView.addStorage() : root.openCloudForm() }

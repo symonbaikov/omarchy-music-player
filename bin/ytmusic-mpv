@@ -4708,9 +4708,11 @@ def cmd_history_add(args):
     except ValueError:
         return
     reason = opt(args, "--reason", "")
-    track = session_track(key) or {}
+    track = session_track(key) or next((t for t in downloaded_tracks() if t["id"] == key), {})
     finished = reason == "eof" and (duration == 0 or played >= duration * 0.8)
-    skipped = reason != "eof" and played < min(30, max(10, duration * 0.4))
+    # Skipped: moved on to another song early ("stop"). Starting another
+    # playlist ("quit") says nothing about the song.
+    skipped = reason == "stop" and played < min(30, max(10, duration * 0.4))
     entry = {"t": int(time.time()), "id": key, "title": clean_text(track.get("title"), 200),
              "artist": clean_text(track.get("artist"), 200), "played": played, "duration": duration,
              "finished": finished, "skipped": skipped}

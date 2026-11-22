@@ -393,14 +393,17 @@ local function note_play(entry_id, played, reason)
         if item.id == entry_id then name = item.filename end
     end
     if not name or name:sub(1, #RADIO) == RADIO then return end
-    mp.command_native_async({
+    -- Detached: it outlives this player, which quits when another playlist
+    -- starts (the song playing then is noted too).
+    mp.command_native({
         name = "subprocess",
+        detach = true,
         playback_only = false,
         args = { opts.python, "-I", opts.helper, "history-add", name,
                  "--played", string.format("%.0f", played),
                  "--duration", string.format("%.0f", last_duration or 0),
                  "--reason", tostring(reason) },
-    }, function() end)
+    })
 end
 
 mp.register_event("end-file", function(e)

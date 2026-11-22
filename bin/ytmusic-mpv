@@ -2456,13 +2456,28 @@ def browser_command(browser):
     return [shutil.which("xdg-open") or "xdg-open"]
 
 
+# Pages to sign in to a service, or to find your profile there (fixed URLs).
+SERVICE_PAGES = {
+    "yt": SIGNIN_URL,
+    "sc": "https://soundcloud.com/signin",
+    "sc-profile": "https://soundcloud.com/you/library",
+    "dz": "https://www.deezer.com/login",
+    "dz-profile": "https://www.deezer.com/",
+}
+
+
 def cmd_signin(args):
-    """Open YouTube's sign-in page (fixed URL) in the cookies' browser."""
+    """Open a sign-in page (fixed URL) in the cookies' browser: YouTube's,
+    or with --service sc / dz SoundCloud's or Deezer's (sc-profile and
+    dz-profile open your own pages there, to copy your profile link)."""
     browser = check_browser(opt(args, "--browser", "none"))
+    page = SERVICE_PAGES.get(opt(args, "--service", "yt"))
+    if not page:
+        fail("unknown service")
     command = browser_command(browser) if browser != "none" else [shutil_which("xdg-open")]
     try:
         with open(os.devnull, "rb") as devnull_in, open(os.devnull, "wb") as devnull_out:
-            subprocess.Popen(command + [SIGNIN_URL], stdin=devnull_in, stdout=devnull_out,
+            subprocess.Popen(command + [page], stdin=devnull_in, stdout=devnull_out,
                              stderr=devnull_out, start_new_session=True, close_fds=True)
     except OSError as exc:
         fail(f"Couldn't open the browser: {exc}")

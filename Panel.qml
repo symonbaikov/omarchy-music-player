@@ -909,7 +909,6 @@ Panel {
 
   Process {
     id: signinProc
-    command: root.helper(["signin", "--browser", root.browser])
     stdout: SplitParser { onRead: function(line) { root.handleHelperLine(line, "signin") } }
   }
 
@@ -1852,7 +1851,34 @@ Panel {
 
   // Opens YouTube's sign-in page in the browser the cookies come from.
   function signIn() {
-    if (!signinProc.running) signinProc.running = true
+    openServicePage("yt")
+  }
+  // A service's sign-in page, or your own page there ("sc-profile" …), in
+  // that same browser.
+  function openServicePage(page) {
+    if (signinProc.running) return
+    signinProc.command = helper(["signin", "--browser", browser, "--service", page])
+    signinProc.running = true
+  }
+  // "Paste link": the profile link you copied, from the clipboard, so
+  // nothing has to be typed.
+  function pasteSetup(target) {
+    if (pasteProc.running) return
+    pasteProc.target = target
+    pasteProc.running = true
+  }
+  Process {
+    id: pasteProc
+    property string target: ""
+    command: ["wl-paste", "--no-newline", "--type", "text/plain"]
+    stdout: StdioCollector { onStreamFinished: root.usePasted(pasteProc.target, text) }
+  }
+  function usePasted(target, text) {
+    var link = String(text || "").trim().split("\n")[0].slice(0, 300)
+    var ok = target === "sc" ? /soundcloud\.com\/[A-Za-z0-9_-]+/.test(link)
+      : target === "dz" ? /deezer\.(com|page\.link)\/|^[0-9]{3,15}$/.test(link) : false
+    if (ok) saveSetup(target, link)
+    else showNotice(strings.t("setup.pasteNothing").arg(strings.t("tab." + target)))
   }
 
   function playlistTitleById(id) {
@@ -3243,6 +3269,40 @@ Panel {
                 fontFamily: root.fontFamily
                 bordered: true
                 onClicked: { root.saveSetup(setupCard.target, setupField.text); setupField.text = "" }
+              }
+            }
+            // The lazy way: sign in, open your profile, copy its link, paste.
+            // (Spotify's buttons follow in the same row.)
+            Flow {
+              readonly property bool profileLink: setupCard.target === "sc" || setupCard.target === "dz"
+              width: parent.width
+              spacing: Style.space(8)
+              Button {
+                visible: parent.profileLink
+                iconText: Model.GLYPH.forward
+                text: strings.t("setup.signin").arg(strings.t("tab." + setupCard.target))
+                foreground: root.fg
+                fontFamily: root.fontFamily
+                bordered: true
+                onClicked: root.openServicePage(setupCard.target)
+              }
+              Button {
+                visible: parent.profileLink
+                iconText: Model.GLYPH.artist
+                text: strings.t("setup.myProfile")
+                foreground: root.fg
+                fontFamily: root.fontFamily
+                bordered: true
+                onClicked: root.openServicePage(setupCard.target + "-profile")
+              }
+              Button {
+                visible: parent.profileLink
+                iconText: Model.GLYPH.check
+                text: strings.t("setup.paste")
+                foreground: root.fg
+                fontFamily: root.fontFamily
+                bordered: true
+                onClicked: root.pasteSetup(setupCard.target)
               }
               Button {
                 visible: setupCard.target === "sp" && setupCard.needsField

@@ -59,16 +59,20 @@ apps the songs of other people's playlists.
 
 Read from Deezer's public API, no account or app needed. Like Spotify,
 Deezer keeps its audio to its own apps, so songs play from their **YouTube
-Music match** (title, artist and length). Paste your profile link into the
-Deezer tab (in Deezer: your profile → Share → Copy link); the profile has to
-be public. You get your **Favorite tracks**, your playlists, Deezer's **Top
+Music match** (title, artist and length). Connect it like SoundCloud:
+**Sign in to Deezer**, **Open my profile** (then your picture, top right),
+copy the link from the address bar, **Paste link**. The profile has to be
+public. You get your **Favorite tracks**, your playlists, Deezer's **Top
 tracks** and chart playlists, and search across Deezer. The tab is off until
 you switch it on in the `+` tab.
 
 ## SoundCloud
 
-Read with `yt-dlp`, like YouTube. Enter your profile name or link in the
-SoundCloud tab. Private likes need you signed in to SoundCloud in the
+Read with `yt-dlp`, like YouTube. The SoundCloud tab connects in three
+clicks, nothing to type: **Sign in to SoundCloud** opens its sign-in in the
+browser the plugin reads, **Open my profile** opens your page there, and
+after you copy its link from the address bar, **Paste link** takes it from
+the clipboard. (Typing your name works too.) Private likes need you signed in to SoundCloud in the
 browser the plugin reads.
 
 ## Mixcloud and Audius

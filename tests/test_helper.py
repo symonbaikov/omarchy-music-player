@@ -1021,6 +1021,14 @@ def capture(fn, args):
     return [json.loads(line) for line in out.getvalue().splitlines()]
 
 
+class ServicePages(unittest.TestCase):
+    def test_fixed_https_pages(self):
+        for name, url in h.SERVICE_PAGES.items():
+            self.assertTrue(url.startswith("https://"), name)
+        for name in ("sc", "sc-profile", "dz", "dz-profile"):
+            self.assertIn(name, h.SERVICE_PAGES)
+
+
 class Deezer(unittest.TestCase):
     def test_profile_links(self):
         self.assertEqual(h.deezer_user("123456"), "123456")

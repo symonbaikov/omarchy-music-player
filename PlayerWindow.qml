@@ -1624,7 +1624,8 @@ FloatingWindow {
             Timer { id: resumeFollow; interval: 3000; onTriggered: { lyricView.userScrolled = false; lyricView.follow(true) } }
 
             function follow(animate) {
-              if (!win.lyricsSynced || userScrolled || !visible || count === 0) return
+              if (!win.lyricsSynced) { roughFollow(animate); return }
+              if (userScrolled || !visible || count === 0) return
               var i = Math.max(0, win.lyricLine)
               var from = contentY
               positionViewAtIndex(i, ListView.Beginning)
@@ -1635,6 +1636,29 @@ FloatingWindow {
               else contentY = to
             }
             NumberAnimation { id: scrollAnim; target: lyricView; property: "contentY"; duration: 650; easing.type: Easing.OutCubic }
+
+            // Untimed lyrics: glide down with the song's progress, a second
+            // at a time, so they're roughly where the song is.
+            function roughFollow(animate) {
+              if (win.lyricsSynced || userScrolled || !visible || count === 0) return
+              var room = contentHeight - height
+              if (room <= 0) return
+              var to = originY + room * Model.roughLyricsFraction(win.p.position, win.p.duration)
+              if (animate && !Style.reduceMotion && Math.abs(to - contentY) < height) {
+                roughAnim.to = to
+                roughAnim.restart()
+              } else {
+                roughAnim.stop()
+                contentY = to
+              }
+            }
+            NumberAnimation { id: roughAnim; target: lyricView; property: "contentY"; duration: 1000; easing.type: Easing.Linear }
+            Timer {
+              interval: 1000
+              repeat: true
+              running: lyricView.visible && win.lyricsReady && !win.lyricsSynced && win.p.playing && !lyricView.userScrolled
+              onTriggered: lyricView.roughFollow(true)
+            }
             Connections {
               target: win
               function onLyricLineChanged() { lyricView.follow(true) }

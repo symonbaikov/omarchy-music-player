@@ -720,6 +720,16 @@ function sanitizeLyrics(msg) {
   return out
 }
 
+// Lyrics without timings scroll along roughly with the song: how far into
+// their scrollable height (0…1) at `position` of `duration`. The words
+// usually start after an intro and end before an outro, so the first and
+// last few percent of the song stay at the top and the bottom.
+function roughLyricsFraction(position, duration) {
+  if (!(duration > 0) || !(position >= 0)) return 0
+  var f = (position / duration - 0.08) / 0.84
+  return Math.max(0, Math.min(1, f))
+}
+
 // The line playing at `seconds`: the last one that has started (-1 before
 // the first).
 function lyricIndex(lines, seconds) {

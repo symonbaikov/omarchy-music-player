@@ -8,7 +8,7 @@ const source = readFileSync(new URL("../Model.js", import.meta.url), "utf8").rep
 const M = {}
 // QML's V4 engine lacks some newer built-ins; remove them so tests catch their use.
 const V4_MISSING = "delete String.prototype.trimEnd; delete String.prototype.trimStart; delete Array.prototype.at; delete Object.hasOwn;\n"
-vm.runInNewContext(V4_MISSING + source + "\n;Object.assign(__out, { cleanText, plain, truncate, formatTime, parseLine, parseSession, clampIndex, mpvCommand, GLYPH, normalizeRepeat, nextRepeat, repeatFromMpv, repeatCommands, coverUrl, OBSERVED, SUPERMIX_ID, isMix, radioListId, autoplaySeed, isLoading, addTargets, likedSet, withLiked, playbackFailure, seconds, stepChoice, recentReport, mirrorOffer, parseUpdate, exploreRows, DOWNLOAD_FORMATS, trackCover, serviceOf, isYouTube, TRACK_KEY_RE, cloudForm, tileHue, CLOUD_KINDS, SERVICES, lyricIndex, chordTones, chordNoteNames, guitarDiagram, GUITAR_SHAPES, chordLabel, keyLabel, visibleTabs, isRadio, canDownload, isPodcast, isPodcastShow, validCover })", { __out: M })
+vm.runInNewContext(V4_MISSING + source + "\n;Object.assign(__out, { cleanText, plain, truncate, formatTime, parseLine, parseSession, clampIndex, mpvCommand, GLYPH, normalizeRepeat, nextRepeat, repeatFromMpv, repeatCommands, coverUrl, OBSERVED, SUPERMIX_ID, isMix, radioListId, autoplaySeed, isLoading, addTargets, likedSet, withLiked, playbackFailure, seconds, stepChoice, recentReport, mirrorOffer, parseUpdate, exploreRows, DOWNLOAD_FORMATS, trackCover, serviceOf, isYouTube, TRACK_KEY_RE, cloudForm, tileHue, CLOUD_KINDS, SERVICES, lyricIndex, chordTones, chordNoteNames, guitarDiagram, GUITAR_SHAPES, chordLabel, keyLabel, visibleTabs, isRadio, canDownload, isPodcast, isPodcastShow, validCover, roughLyricsFraction })", { __out: M })
 
 const MARKUP = '<img src="https://example.invalid/tracker">Song'
 
@@ -544,4 +544,13 @@ test("Apple Music songs, lists and the added link", () => {
   const added = M.parseLine(JSON.stringify({ type: "amAdded", id: "am:al:1460471435", title: "Once", count: 11 }))
   assert.equal(added.title, "Once")
   assert.equal(M.parseLine(JSON.stringify({ type: "amAdded", id: "x y" })), null)
+})
+
+test("untimed lyrics follow the song roughly", () => {
+  assert.equal(M.roughLyricsFraction(0, 300), 0)
+  assert.equal(M.roughLyricsFraction(20, 300), 0)          // the intro
+  assert.ok(Math.abs(M.roughLyricsFraction(150, 300) - 0.5) < 0.01)
+  assert.equal(M.roughLyricsFraction(290, 300), 1)         // the outro
+  assert.equal(M.roughLyricsFraction(50, 0), 0)
+  assert.equal(M.roughLyricsFraction(NaN, 300), 0)
 })

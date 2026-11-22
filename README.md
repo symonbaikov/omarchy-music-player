@@ -101,7 +101,7 @@ Edit them in Omarchy's bar settings, or on the widget's entry in
 | Key | Default | Meaning |
 |---|---|---|
 | `browser` | `chromium` | yt-dlp `--cookies-from-browser` value: `chromium`, `brave`, `chrome`, `firefox`, `vivaldi`, `edge`, `opera`, a profile such as `brave:Profile 1`, or a Firefox-fork profile folder such as `firefox:~/.config/zen/<profile>`. `none` means public playlists only. |
-| `playbackCookies` | `Off` | Also send cookies when playing. Turn it on only if private uploads fail to play. |
+| `playbackCookies` | `Off` | Also send cookies when playing. Turn it on only if private uploads fail to play. Turning it off, or setting `browser` to `none`, applies to a song that's already playing from the next track on. |
 | `showTitle` | `On` | Show the current track title next to the icon. |
 | `defaultVolume` | `60` | Starting volume (0–100). |
 | `showCovers` | `On` | Show cover art. |
@@ -127,6 +127,11 @@ Edit them in Omarchy's bar settings, or on the widget's entry in
   as music.youtube.com signs them (yt-dlp is read-only, so the helper makes
   these two requests itself). Nothing else is sent, and the cookies are never
   written to disk or logged.
+- With `playbackCookies` on, the player passes the cookies to yt-dlp for
+  each track it opens. Turning the setting off, or setting `browser` to
+  `none`, takes the cookies away from the running player too: tracks it
+  opens after that don't use them. If the plugin can't confirm the change,
+  it stops the player.
 - Radio, autoplay and My Supermix are read from YouTube Music with the same
   cookies as your library, so they're personalized like in the app. Autoplay
   makes one request when the last song in the queue starts, and only then.

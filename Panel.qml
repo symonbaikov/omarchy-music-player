@@ -27,6 +27,11 @@ Panel {
   readonly property bool showCovers: setting("showCovers", "On") !== "Off"
   readonly property bool autoplayEnabled: setting("autoplay", "On") !== "Off"
 
+  // A running player follows the cookie settings from its next track on:
+  // turning playback cookies off, or choosing browser "none", revokes them.
+  onBrowserChanged: syncPlayerCookies()
+  onPlaybackCookiesChanged: syncPlayerCookies()
+
   // ---- look ----------------------------------------------------------------
   readonly property color fg: bar ? bar.foreground : Commons.Color.foreground
   readonly property color dim: Qt.darker(fg, 1.4)
@@ -154,6 +159,19 @@ Panel {
     return ["python3", "-I", root.helperPath].concat(args)
   }
 
+  property bool cookieSyncPending: false
+  function syncPlayerCookies() {
+    cookieSyncPending = true
+    runCookieSync()
+  }
+  // A play or radio started with the old settings runs first; this follows.
+  function runCookieSync() {
+    if (!cookieSyncPending || cookiesProc.running || playProc.running || radioProc.running) return
+    cookieSyncPending = false
+    cookiesProc.command = helper(["cookies", "--browser", browser, "--playback-cookies", playbackCookies ? "1" : "0"])
+    cookiesProc.running = true
+  }
+
   function loadPlaylists(force) {
     if (playlistsProc.running) return
     playlistsError = ""
@@ -271,7 +289,16 @@ Panel {
   Process {
     id: playProc
     stdout: SplitParser { onRead: function(line) { root.handleHelperLine(line, "play") } }
-    onExited: root.starting = false
+    onExited: {
+      root.starting = false
+      root.runCookieSync()
+    }
+  }
+
+  Process {
+    id: cookiesProc
+    stdout: SplitParser { onRead: function(line) { root.handleHelperLine(line, "cookies") } }
+    onExited: root.runCookieSync()
   }
 
   Process {
@@ -330,6 +357,7 @@ Panel {
       if (exitCode === 0 && root.openPlaylist && root.openPlaylist.id === listId) root.loadTracks(false)
       // Autoplay may have come due while this was busy.
       if (root.autoplayDueSeed !== "") root.runAutoplay(root.autoplayDueSeed)
+      root.runCookieSync()
     }
   }
 
@@ -753,6 +781,8 @@ Panel {
   Component.onCompleted: {
     pathsProc.running = true
     likedProc.running = true
+    // Settings may have changed while the shell wasn't running.
+    syncPlayerCookies()
   }
 
   // ---- bar button ----------------------------------------------------------

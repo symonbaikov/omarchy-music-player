@@ -160,5 +160,109 @@ class SignIn(unittest.TestCase):
         self.assertTrue(h.SIGNIN_URL.startswith("https://accounts.google.com/"))
 
 
+class FakeMpv:
+    """Answers get/set of ytdl-raw-options on a unix socket, like mpv's IPC."""
+
+    def __init__(self, path, options, honor_set=True):
+        import json, socket, threading
+        self.json, self.options, self.honor_set = json, dict(options), honor_set
+        self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.server.bind(path)
+        self.server.listen(8)
+        self.server.settimeout(0.2)
+        self.running = True
+        self.thread = threading.Thread(target=self.serve, daemon=True)
+        self.thread.start()
+
+    def serve(self):
+        while self.running:
+            try:
+                conn, _ = self.server.accept()
+            except OSError:
+                continue
+            with conn:
+                buf = b""
+                conn.settimeout(1)
+                try:
+                    while True:
+                        chunk = conn.recv(65536)
+                        if not chunk:
+                            break
+                        buf += chunk
+                        while b"\n" in buf:
+                            line, buf = buf.split(b"\n", 1)
+                            conn.sendall((self.json.dumps(self.reply(self.json.loads(line))) + "\n").encode())
+                except OSError:
+                    pass
+
+    def reply(self, msg):
+        cmd, rid = msg["command"], msg.get("request_id")
+        if cmd[:2] == ["get_property", "ytdl-raw-options"]:
+            return {"request_id": rid, "error": "success", "data": dict(self.options)}
+        if cmd[:2] == ["set_property", "ytdl-raw-options"]:
+            if self.honor_set:
+                self.options = dict(cmd[2])
+            return {"request_id": rid, "error": "success"}
+        return {"request_id": rid, "error": "success"}
+
+    def close(self):
+        self.running = False
+        self.thread.join()
+        self.server.close()
+
+
+class PlayerCookies(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        d = self.dir.name
+        self.saved = (h.SOCKET_PATH, h.SESSION_PATH, h.PID_PATH, h.our_mpv_pid)
+        h.SOCKET_PATH, h.SESSION_PATH, h.PID_PATH = (os.path.join(d, n) for n in ("s", "session.json", "pid"))
+        pathlib.Path(h.SESSION_PATH).write_text("{}")
+        self.alive = True
+        h.our_mpv_pid = lambda: 4242 if self.alive else None
+        self.mpv = None
+
+    def tearDown(self):
+        if self.mpv:
+            self.mpv.close()
+        h.SOCKET_PATH, h.SESSION_PATH, h.PID_PATH, h.our_mpv_pid = self.saved
+        self.dir.cleanup()
+
+    def options(self, browser, cookies):
+        return {"browser": browser, "playback_cookies": cookies, "volume": 60, "repeat": "off"}
+
+    def test_turning_cookies_off_revokes_them_and_keeps_other_options(self):
+        self.mpv = FakeMpv(h.SOCKET_PATH, {"cookies-from-browser": "firefox", "x": "1"})
+        self.assertEqual(h.apply_player_cookies(self.options("firefox", False)), "applied")
+        self.assertEqual(self.mpv.options, {"x": "1"})
+        self.assertTrue(os.path.exists(h.SESSION_PATH))
+
+    def test_browser_none_revokes_them(self):
+        self.mpv = FakeMpv(h.SOCKET_PATH, {"cookies-from-browser": "firefox"})
+        self.assertEqual(h.apply_player_cookies(self.options("none", True)), "applied")
+        self.assertEqual(self.mpv.options, {})
+
+    def test_turning_cookies_on_uses_the_current_browser(self):
+        self.mpv = FakeMpv(h.SOCKET_PATH, {"cookies-from-browser": "chromium"})
+        self.assertEqual(h.apply_player_cookies(self.options("firefox", True)), "applied")
+        self.assertEqual(self.mpv.options, {"cookies-from-browser": "firefox"})
+
+    def test_unconfirmed_revocation_stops_the_player(self):
+        self.mpv = FakeMpv(h.SOCKET_PATH, {"cookies-from-browser": "firefox"}, honor_set=False)
+        self.assertEqual(h.apply_player_cookies(self.options("firefox", False)), "stopped")
+        self.assertFalse(os.path.exists(h.SESSION_PATH))
+
+    def test_unreachable_player_is_stopped(self):
+        # A pid but no socket answering: nothing can be confirmed.
+        pathlib.Path(h.SOCKET_PATH).write_text("")
+        self.assertEqual(h.apply_player_cookies(self.options("firefox", False)), "stopped")
+        self.assertFalse(os.path.exists(h.SESSION_PATH))
+
+    def test_no_player_is_left_alone(self):
+        self.alive = False
+        self.assertEqual(h.apply_player_cookies(self.options("firefox", False)), "idle")
+        self.assertTrue(os.path.exists(h.SESSION_PATH))
+
+
 if __name__ == "__main__":
     unittest.main()

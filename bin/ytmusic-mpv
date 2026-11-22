@@ -18,6 +18,7 @@ Commands (every result is one JSON object per line on stdout):
   liked
   targets <video-id> [--browser B]
   signin [--browser B]
+  cookies [--browser B] [--playback-cookies 0|1]
   stop
   paths
 
@@ -30,6 +31,11 @@ fresh copy and print that too.
 cookies are used. replace starts it as a new queue; keep lets the playing
 song continue and replaces what comes after it; append (autoplay) adds
 tracks not yet in the queue to its end.
+
+`cookies` makes a running player follow the current cookie settings: mpv
+reads its yt-dlp options again for every track it opens, so turning
+playback cookies off (or choosing browser none) takes effect from the next
+track on. If the change can't be confirmed, the player is stopped.
 
 `like` and `add` write to the account (like a song, add it to one of your
 playlists) through YouTube Music's own web API, signed with the browser's
@@ -472,11 +478,7 @@ def stop_player():
 
 
 def cmd_stop(_args):
-    stop_player()
-    try:
-        os.unlink(SESSION_PATH)
-    except OSError:
-        pass
+    end_session()
     emit({"type": "stopped"})
 
 
@@ -519,6 +521,53 @@ def track_url(track):
     return f"https://music.youtube.com/watch?v={track['id']}"
 
 
+def playback_cookie_spec(options):
+    """The --cookies-from-browser value the player should pass to yt-dlp, or
+    None when playback must not use cookies."""
+    if options["playback_cookies"] and options["browser"] != "none":
+        return cookie_spec(options["browser"])
+    return None
+
+
+def end_session():
+    stop_player()
+    try:
+        os.unlink(SESSION_PATH)
+    except OSError:
+        pass
+
+
+def apply_player_cookies(options):
+    """Bring a running player's cookie use in line with `options`. mpv's
+    ytdl hook reads ytdl-raw-options on every track it opens, so changing the
+    option in place covers every later track. If the change can't be read
+    back, stop the player rather than let it keep the old access.
+    Returns "idle", "applied" or "stopped"."""
+    if not player_running():
+        return "idle"
+    want = playback_cookie_spec(options)
+    replies = mpv_batch([["get_property", "ytdl-raw-options"]]) or [None]
+    current = replies[0].get("data") if isinstance(replies[0], dict) else None
+    if isinstance(current, dict):
+        updated = {k: v for k, v in current.items() if k != "cookies-from-browser"}
+        if want:
+            updated["cookies-from-browser"] = want
+        replies = mpv_batch([["set_property", "ytdl-raw-options", updated],
+                             ["get_property", "ytdl-raw-options"]]) or [None, None]
+        check = replies[1].get("data") if isinstance(replies[1], dict) else None
+        if isinstance(check, dict) and check.get("cookies-from-browser") == want:
+            return "applied"
+    end_session()
+    return "stopped"
+
+
+def cmd_cookies(args):
+    options = player_options(args)
+    with SessionLock():
+        state = apply_player_cookies(options)
+    emit({"type": "stopped"} if state == "stopped" else {"type": "cookies", "state": state})
+
+
 def start_player(playlist_id, title, order, start, options, autoplay=False):
     """Replace any running player with a new one playing `order`."""
     stop_player()
@@ -551,8 +600,9 @@ def start_player(playlist_id, title, order, start, options, autoplay=False):
         f"--loop-playlist={'inf' if repeat == 'all' else 'no'}",
         "--msg-level=all=warn", f"--log-file={MPV_LOG}",
     ]
-    if options["playback_cookies"] and options["browser"] != "none":
-        cmd.append(f"--ytdl-raw-options-append=cookies-from-browser={cookie_spec(options['browser'])}")
+    spec = playback_cookie_spec(options)
+    if spec:
+        cmd.append(f"--ytdl-raw-options-append=cookies-from-browser={spec}")
     cmd.append(f"--playlist={QUEUE_PATH}")
 
     with open(os.devnull, "rb") as devnull_in, open(os.devnull, "wb") as devnull_out:
@@ -595,7 +645,8 @@ def cmd_play(args):
 
     options["shuffle"] = shuffle
     title = clean_text(opt(args, "--title", "")) or cached.get("title") or ""
-    start_player(playlist_id, title, order, start, options)
+    with SessionLock():
+        start_player(playlist_id, title, order, start, options)
 
 
 def player_running():
@@ -631,6 +682,11 @@ def cmd_radio(args):
             fail("YouTube Music has no radio for this song")
         title = clean_text(opt(args, "--title", "")) or "Radio"
 
+        # A player that is kept follows the current cookie settings too.
+        if mode in ("keep", "append") and player_running() and apply_player_cookies(options) == "stopped":
+            if mode == "append":
+                emit({"type": "stopped"})
+                return
         if mode == "keep" and not player_running():
             mode = "replace"
         if mode == "replace":
@@ -1017,6 +1073,7 @@ def main():
         "liked": cmd_liked,
         "targets": cmd_targets,
         "signin": cmd_signin,
+        "cookies": cmd_cookies,
         "stop": cmd_stop,
         "paths": cmd_paths,
     }

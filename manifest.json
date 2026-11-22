@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.symonbaikov.ytmusic-mpv",
   "name": "YouTube Music (mpv)",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "author": "Symon Baikov",
   "license": "MIT",
   "homepage": "https://github.com/symonbaikov/omarchy-ytmusic-mpv",

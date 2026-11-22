@@ -221,5 +221,11 @@
   "full.album": "Album",
   "full.idleHint": "Pick something to play",
   "full.connectBody": "%1 isn't connected yet.",
-  "full.connect": "Connect %1"
+  "full.connect": "Connect %1",
+  "full.lyrics": "Lyrics",
+  "full.lyricsButton": "Lyrics (l)",
+  "full.lyricsLoading": "Looking for the lyrics…",
+  "full.lyricsNone": "No lyrics for this song yet.",
+  "full.instrumental": "Instrumental",
+  "full.lyricsSource": "Lyrics: %1"
 }

@@ -401,6 +401,8 @@ Panel {
     if (!msg) return
     if (msg.type === "playlists" && msg.service !== "yt") {
       setSvc(msg.service, { items: msg.items, loading: msg.stale, error: "", setup: "" })
+    } else if (msg.type === "lyrics") {
+      if (msg.key === lyricsProc.key) { lyrics = msg; lyricsLoading = false }
     } else if (msg.type === "cloud") {
       if (msg.state === "list") {
         cloudSources = msg.sources
@@ -514,6 +516,7 @@ Panel {
       else if (source === "signin") showNotice(msg.message)
       else if (source === "service") setSvc(servicePlaylistsProc.target, { loading: false, error: msg.setup ? "" : msg.message, setup: msg.setup })
       else if (source === "spotify") { spotifyWaiting = false; showNotice(msg.message, false, true) }
+      else if (source === "lyrics") { lyricsLoading = false; lyrics = { key: lyricsProc.key, lines: [], none: true, synced: false } }
       else if (source === "cloudAdd") { cloudBusy = ""; cloudError = msg.message; if (msg.setup === "rclone") rcloneInstalled = false }
       else if (source === "cloud") showNotice(msg.message)
       else if (source === "mix") showNotice(strings.t("notice.failed").arg(msg.message))
@@ -930,6 +933,39 @@ Panel {
     mixEditProc.running = true
   }
 
+  // ---- lyrics ----------------------------------------------------------------------
+  // For the full-screen view's Lyrics: { key, lines, synced, instrumental,
+  // none, source } for the playing song (Model.sanitizeLyrics).
+  property var lyrics: null
+  property bool lyricsLoading: false
+  // Asked for while lyrics are on screen: the position is read 4× a second.
+  property bool fastPosition: false
+
+  function loadLyrics(track) {
+    if (!track || !Model.TRACK_KEY_RE.test(String(track.id))) return
+    if (lyrics && lyrics.key === track.id) return
+    if (lyricsProc.running) { if (lyricsProc.key !== track.id) lyricsProc.queued = track; return }
+    lyrics = null
+    lyricsLoading = true
+    lyricsProc.key = track.id
+    lyricsProc.command = helper(["lyrics", track.id, "--title", track.title || "", "--artist", track.artist || "",
+      "--duration", String(Math.round(duration > 0 ? duration : (track.duration || 0)))])
+    lyricsProc.running = true
+  }
+
+  Process {
+    id: lyricsProc
+    property string key: ""
+    property var queued: null
+    stdout: SplitParser { onRead: function(line) { root.handleHelperLine(line, "lyrics") } }
+    onExited: {
+      root.lyricsLoading = false
+      var next = queued
+      queued = null
+      if (next) Qt.callLater(function() { root.loadLyrics(next) })
+    }
+  }
+
   // ---- full screen ---------------------------------------------------------------
   // The whole player on the whole screen (FullView.qml), like Apple Music's
   // window: a sidebar with every service, big covers, the queue. It shares
@@ -1328,7 +1364,8 @@ Panel {
   }
 
   Timer {
-    interval: 1000
+    // Lyrics follow the song closely; otherwise once a second is plenty.
+    interval: root.fastPosition ? 250 : 1000
     repeat: true
     running: root.connected && (root.opened || root.fullOpen) && !root.paused
     onTriggered: root.requestPosition()
@@ -1768,12 +1805,13 @@ Panel {
     function tab(name: string): void { root.open(); root.switchService(name) }
     function download(): void { root.openDownload(root.currentTrack) }
     function fullscreen(): void { root.fullOpen ? root.closeFull() : root.openFull() }
-    // Full screen on one page: home, browse, nowplaying, or a service
+    // Full screen on one page: home, browse, nowplaying, lyrics, or a service
     // (yt, sp, sc, cl, my) — handy for a keybinding.
     function full(page: string): void {
       if (!root.fullOpen) root.openFull()
       if (Model.SERVICES.indexOf(page) >= 0) fullView.showService(page)
       else if (page === "browse") fullView.showBrowse()
+      else if (page === "lyrics") { fullView.lyricsMode = true; fullView.go("nowplaying") }
       else if (page === "home" || page === "nowplaying") fullView.go(page)
     }
     function cloud(): void { root.fullOpen ? fullView.addStorage() : root.openCloudForm() }

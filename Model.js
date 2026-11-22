@@ -87,7 +87,8 @@ var GLYPH = {
   plus: String.fromCodePoint(0xF0415),
   queue: String.fromCodePoint(0xF0CB8),
   chevronDown: String.fromCodePoint(0xF0140),
-  artist: String.fromCodePoint(0xF0803)
+  artist: String.fromCodePoint(0xF0803),
+  lyrics: String.fromCodePoint(0xF1021)
 }
 
 // A local cover the helper saved (downloads, cloud folders), or one of the
@@ -386,6 +387,8 @@ function parseLine(line) {
       service: SERVICES.indexOf(msg.service) >= 0 ? msg.service : "" }
   case "cloud":
     return sanitizeCloud(msg)
+  case "lyrics":
+    return sanitizeLyrics(msg)
   case "targets":
     if (!VIDEO_ID_RE.test(String(msg.videoId || ""))) return null
     return { type: "targets", videoId: String(msg.videoId), items: sanitizeTargets(msg.items) }
@@ -623,4 +626,39 @@ function tileHue(id) {
   var hash = 0
   for (var i = 0; i < text.length; i++) hash = (hash * 31 + text.charCodeAt(i)) >>> 0
   return (hash % 360) / 360
+}
+
+// ---- lyrics ----------------------------------------------------------------
+
+// The helper's lyrics for a song: timed lines ({ t, text }, in order) when
+// `synced`, else the plain text's lines.
+function sanitizeLyrics(msg) {
+  if (!TRACK_KEY_RE.test(String(msg.key || ""))) return null
+  var out = { type: "lyrics", key: String(msg.key), lines: [], synced: false,
+    instrumental: msg.instrumental === true, none: msg.none === true, source: cleanText(msg.source, 80) }
+  if (Array.isArray(msg.synced) && msg.synced.length > 0) {
+    var last = -1
+    for (var i = 0; i < msg.synced.length && out.lines.length < 600; i++) {
+      var l = msg.synced[i]
+      if (!Array.isArray(l) || typeof l[0] !== "number" || !isFinite(l[0]) || l[0] < 0 || l[0] > 86400 || l[0] < last) continue
+      last = l[0]
+      out.lines.push({ t: l[0], text: cleanText(l[1], 300) })
+    }
+    out.synced = out.lines.length > 0
+  } else if (typeof msg.plain === "string") {
+    var plain = msg.plain.split(/\r?\n/)
+    for (var j = 0; j < plain.length && out.lines.length < 600; j++) out.lines.push({ t: -1, text: cleanText(plain[j], 300) })
+  }
+  return out
+}
+
+// The line playing at `seconds`: the last one that has started (-1 before
+// the first).
+function lyricIndex(lines, seconds) {
+  var lo = 0, hi = (lines ? lines.length : 0) - 1, found = -1
+  while (lo <= hi) {
+    var mid = (lo + hi) >> 1
+    if (lines[mid].t <= seconds) { found = mid; lo = mid + 1 } else hi = mid - 1
+  }
+  return found
 }

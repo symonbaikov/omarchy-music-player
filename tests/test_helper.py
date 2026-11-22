@@ -929,6 +929,26 @@ class Cloud(unittest.TestCase):
             self.assertNotIn(leak, out)
 
 
+class Lyrics(unittest.TestCase):
+    def test_lrc_lines_in_time_order(self):
+        text = "[ar:Someone]\n[00:20.21] First\n[00:05.5][01:02.00]Twice\n[1:03.250]Last\x07one\nno stamp"
+        self.assertEqual(h.parse_lrc(text), [[5.5, "Twice"], [20.21, "First"], [62.0, "Twice"], [63.25, "Last one"]])
+
+    def test_names_from_youtube_titles(self):
+        self.assertEqual(h.lyric_names("Luis Fonsi - Despacito (Official Music Video) ft. Daddy Yankee", "LuisFonsiVEVO")[0],
+                         ("Luis Fonsi", "Despacito ft. Daddy Yankee"))
+        self.assertEqual(h.lyric_names("Herr Mannelig", "SKÁLD - Topic"), [("SKÁLD", "Herr Mannelig")])
+        self.assertEqual(h.lyric_names("Sinklars Vise in Middle Scots | Norwegian folk song", "The Skaldic Bard"),
+                         [("The Skaldic Bard", "Sinklars Vise in Middle Scots")])
+
+    def test_picks_the_same_song(self):
+        results = [{"trackName": "Despacito", "artistName": "Someone Else", "duration": 100, "syncedLyrics": "[00:01.00]x"},
+                   {"trackName": "Despacito", "artistName": "Luis Fonsi", "duration": 229, "syncedLyrics": "[00:01.00]y"},
+                   {"trackName": "Other", "artistName": "Luis Fonsi", "duration": 229}]
+        self.assertEqual(h.best_lyrics(results, "Luis Fonsi", "Despacito", 228)["artistName"], "Luis Fonsi")
+        self.assertIsNone(h.best_lyrics([{"trackName": "Nope", "artistName": "Nobody", "duration": 10}], "Luis Fonsi", "Despacito", 228))
+
+
 class Reports(unittest.TestCase):
     def test_redact_removes_everything_personal(self):
         home = os.path.expanduser("~")

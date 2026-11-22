@@ -39,6 +39,38 @@ OverlayWindow {
 
   function t(key) { return p.i18n.t(key) }
 
+  // ---- lyrics ----------------------------------------------------------------
+  property bool lyricsMode: false
+  readonly property bool lyricsShown: shown && page === "nowplaying" && lyricsMode
+  readonly property bool lyricsReady: !!p.lyrics && !!p.currentTrack && p.lyrics.key === p.currentTrack.id
+  readonly property bool lyricsSynced: lyricsReady && p.lyrics.synced === true
+  readonly property int lyricSize: Math.round(Style.font.displayLarge * 1.25)
+  // mpv's position arrives 4× a second; in between, it moves with the clock,
+  // so the lines change right on the beat.
+  property real lyricTime: 0
+  property real positionAt: 0
+  readonly property int lyricLine: lyricsSynced ? Model.lyricIndex(p.lyrics.lines, lyricTime + 0.2) : -1
+
+  Binding { target: win.p; property: "fastPosition"; value: win.lyricsShown }
+  Connections {
+    target: win.p
+    function onPositionChanged() { win.positionAt = Date.now(); win.lyricTime = win.p.position }
+    function onCurrentTrackChanged() { if (win.lyricsShown) win.p.loadLyrics(win.p.currentTrack) }
+  }
+  onLyricsShownChanged: if (lyricsShown) p.loadLyrics(p.currentTrack)
+  Timer {
+    interval: 50
+    repeat: true
+    running: win.lyricsShown && win.lyricsSynced && win.p.playing
+    onTriggered: win.lyricTime = win.p.position + Math.min(1.5, (Date.now() - win.positionAt) / 1000)
+  }
+
+  function showLyrics() {
+    if (lyricsShown) { back(); return }
+    lyricsMode = true
+    go("nowplaying")
+  }
+
   function serviceLabel(id) { return t("tab." + id) }
 
   onShownChanged: {
@@ -214,6 +246,7 @@ OverlayWindow {
       else if (event.text === "+" || event.text === "=") { win.p.setVolume(win.p.volume + 5); event.accepted = true }
       else if (event.text === "-") { win.p.setVolume(win.p.volume - 5); event.accepted = true }
       else if (event.text === "F") { win.p.closeFull(); event.accepted = true }
+      else if (event.text === "l") { win.showLyrics(); event.accepted = true }
     }
 
     // ---- sidebar ----------------------------------------------------------------
@@ -1082,8 +1115,9 @@ OverlayWindow {
         }
       }
 
-      // Up next: the queue from the playing song on.
-      Column {
+      // The right side: the song's lyrics, or what's up next.
+      Item {
+        id: nowRight
         anchors.left: parent.left
         anchors.leftMargin: parent.width * 0.58
         anchors.right: parent.right
@@ -1092,44 +1126,176 @@ OverlayWindow {
         anchors.topMargin: win.gutter * 2
         anchors.bottom: parent.bottom
         anchors.bottomMargin: win.gutter
-        spacing: Style.space(12)
 
-        Txt {
-          id: upNextTitle
-          text: win.t("full.upNext")
-          font.pixelSize: Style.font.display
-          font.bold: true
+        Row {
+          id: nowTabs
+          spacing: Style.space(10)
+          Chip {
+            label: Model.GLYPH.lyrics + "  " + win.t("full.lyrics")
+            selected: win.lyricsMode
+            onClicked: win.lyricsMode = true
+          }
+          Chip {
+            label: Model.GLYPH.queue + "  " + win.t("full.upNext")
+            selected: !win.lyricsMode
+            onClicked: win.lyricsMode = false
+          }
         }
-        Txt {
-          visible: win.p.session !== null && win.p.session.playlistTitle !== ""
-          width: parent.width
-          text: win.p.session ? win.t("full.playingFrom").arg(win.p.session.playlistTitle) : ""
-          color: win.dim
+
+        // Up next: the queue from the playing song on.
+        Column {
+          visible: !win.lyricsMode
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.top: nowTabs.bottom
+          anchors.topMargin: Style.space(22)
+          anchors.bottom: parent.bottom
+          spacing: Style.space(12)
+
+          Txt {
+            id: playingFrom
+            visible: win.p.session !== null && win.p.session.playlistTitle !== ""
+            width: parent.width
+            text: win.p.session ? win.t("full.playingFrom").arg(win.p.session.playlistTitle) : ""
+            color: win.dim
+          }
+          ListView {
+            id: queueView
+            width: parent.width
+            height: parent.height - (playingFrom.visible ? playingFrom.height + Style.space(12) : 0)
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+            spacing: Style.space(2)
+            // The playing song first, then what comes after it.
+            readonly property int from: Math.max(0, win.p.playlistPos)
+            onFromChanged: positionViewAtBeginning()
+            onVisibleChanged: if (visible) positionViewAtBeginning()
+            model: win.page === "nowplaying" && !win.lyricsMode ? win.queue.slice(from) : []
+            delegate: TrackRow {
+              required property var modelData
+              required property int index
+              width: queueView.width
+              track: modelData
+              number: queueView.from + index + 1
+              now: index === 0 && win.p.playlistPos >= 0
+              compact: true
+              onClicked: {
+                win.p.send(["playlist-play-index", queueView.from + index])
+                win.p.send(["set_property", "pause", false])
+              }
+            }
+          }
         }
-        ListView {
-          id: queueView
-          width: parent.width
-          height: parent.height - upNextTitle.height - Style.space(40)
-          clip: true
-          boundsBehavior: Flickable.StopAtBounds
-          ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
-          spacing: Style.space(2)
-          // The playing song first, then what comes after it.
-          readonly property int from: Math.max(0, win.p.playlistPos)
-          onFromChanged: positionViewAtBeginning()
-          onVisibleChanged: if (visible) positionViewAtBeginning()
-          model: win.page === "nowplaying" ? win.queue.slice(from) : []
-          delegate: TrackRow {
-            required property var modelData
-            required property int index
-            width: queueView.width
-            track: modelData
-            number: queueView.from + index + 1
-            now: index === 0 && win.p.playlistPos >= 0
-            compact: true
-            onClicked: {
-              win.p.send(["playlist-play-index", queueView.from + index])
-              win.p.send(["set_property", "pause", false])
+
+        // Lyrics, like Apple Music's: big lines that light up with the song
+        // and scroll by themselves; the others dim and soft. Click a line
+        // to go there.
+        Item {
+          id: lyricsPane
+          visible: win.lyricsMode
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.top: nowTabs.bottom
+          anchors.topMargin: Style.space(22)
+          anchors.bottom: parent.bottom
+
+          Txt {
+            visible: text !== ""
+            width: parent.width
+            y: parent.height * 0.3
+            wrapMode: Text.Wrap
+            elide: Text.ElideNone
+            color: win.dim
+            font.pixelSize: win.lyricSize
+            font.bold: true
+            text: !win.p.currentTrack ? win.t("now.idle")
+              : !win.lyricsReady ? (win.p.lyricsLoading ? win.t("full.lyricsLoading") : "")
+              : win.p.lyrics.instrumental ? Model.GLYPH.music + "  " + win.t("full.instrumental")
+              : win.p.lyrics.lines.length === 0 ? win.t("full.lyricsNone") : ""
+          }
+
+          ListView {
+            id: lyricView
+            anchors.fill: parent
+            visible: win.lyricsReady && win.p.lyrics.lines.length > 0
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            spacing: Style.space(win.lyricsSynced ? 26 : 10)
+            model: visible ? win.p.lyrics.lines : []
+            // Room above the first line and below the last, so either can
+            // sit where the playing line does.
+            header: Item { width: lyricView.width; height: win.lyricsSynced ? lyricView.height * 0.3 : 0 }
+            footer: Item {
+              width: lyricView.width
+              height: Math.max(lyricSource.implicitHeight + Style.space(30), win.lyricsSynced ? lyricView.height * 0.6 : 0)
+              Txt {
+                id: lyricSource
+                y: Style.space(30)
+                width: parent.width
+                visible: win.lyricsReady && win.p.lyrics.source !== ""
+                text: win.lyricsReady ? win.t("full.lyricsSource").arg(win.p.lyrics.source) : ""
+                color: win.dim
+                font.pixelSize: Style.font.caption
+              }
+            }
+
+            // Follow the song, unless the user is scrolling through.
+            property bool userScrolled: false
+            onMovementStarted: { userScrolled = true; resumeFollow.stop() }
+            onMovementEnded: resumeFollow.restart()
+            Timer { id: resumeFollow; interval: 3000; onTriggered: { lyricView.userScrolled = false; lyricView.follow(true) } }
+
+            function follow(animate) {
+              if (!win.lyricsSynced || userScrolled || !visible || count === 0) return
+              var i = Math.max(0, win.lyricLine)
+              var from = contentY
+              positionViewAtIndex(i, ListView.Beginning)
+              var to = Math.max(originY, contentY - height * 0.3 + (win.lyricLine < 0 ? 0 : 0))
+              if (win.lyricLine < 0) to = originY
+              contentY = from
+              if (animate && !Style.reduceMotion) { scrollAnim.to = to; scrollAnim.restart() }
+              else contentY = to
+            }
+            NumberAnimation { id: scrollAnim; target: lyricView; property: "contentY"; duration: 650; easing.type: Easing.OutCubic }
+            Connections {
+              target: win
+              function onLyricLineChanged() { lyricView.follow(true) }
+            }
+            onVisibleChanged: if (visible) Qt.callLater(function() { lyricView.follow(false) })
+            onCountChanged: Qt.callLater(function() { lyricView.follow(false) })
+
+            delegate: Text {
+              id: lyricLine
+              required property var modelData
+              required property int index
+              readonly property bool current: win.lyricsSynced && index === win.lyricLine
+              readonly property int distance: win.lyricsSynced && win.lyricLine >= 0 ? Math.abs(index - win.lyricLine) : 0
+              width: lyricView.width
+              textFormat: Text.PlainText
+              wrapMode: Text.Wrap
+              text: modelData.text !== "" ? modelData.text : Model.GLYPH.music
+              color: win.fg
+              font.family: win.fontFamily
+              font.bold: true
+              font.pixelSize: win.lyricsSynced ? win.lyricSize : Math.round(Style.font.heading * 1.35)
+              opacity: !win.lyricsSynced ? 0.9 : current ? 1 : (index < win.lyricLine ? 0.3 : 0.42)
+              transformOrigin: Item.Left
+              scale: !win.lyricsSynced || current ? 1 : 0.95
+              Behavior on opacity { NumberAnimation { duration: Style.duration(350) } }
+              Behavior on scale { NumberAnimation { duration: Style.duration(350); easing.type: Easing.OutCubic } }
+              layer.enabled: win.lyricsSynced && distance > 0 && !Style.reduceMotion
+              layer.effect: MultiEffect {
+                blurEnabled: true
+                blurMax: 24
+                blur: Math.min(0.6, lyricLine.distance * 0.12)
+              }
+              MouseArea {
+                anchors.fill: parent
+                enabled: win.lyricsSynced
+                cursorShape: Qt.PointingHandCursor
+                onClicked: { win.p.seek(lyricLine.modelData.t); lyricView.userScrolled = false }
+              }
             }
           }
         }
@@ -1268,13 +1434,26 @@ OverlayWindow {
         }
         PanelActionButton {
           anchors.verticalCenter: parent.verticalCenter
+          iconText: Model.GLYPH.lyrics
+          fontSize: Style.font.title
+          tooltipText: win.t("full.lyricsButton")
+          foreground: win.lyricsShown ? win.accent : win.fg
+          fontFamily: win.fontFamily
+          enabled: win.p.connected
+          onClicked: win.showLyrics()
+        }
+        PanelActionButton {
+          anchors.verticalCenter: parent.verticalCenter
           iconText: Model.GLYPH.queue
           fontSize: Style.font.title
           tooltipText: win.t("full.upNext")
-          foreground: win.page === "nowplaying" ? win.accent : win.fg
+          foreground: win.page === "nowplaying" && !win.lyricsMode ? win.accent : win.fg
           fontFamily: win.fontFamily
           enabled: win.p.connected
-          onClicked: win.go(win.page === "nowplaying" ? win.pageBeforeNow : "nowplaying")
+          onClicked: {
+            if (win.page === "nowplaying" && !win.lyricsMode) win.back()
+            else { win.lyricsMode = false; win.go("nowplaying") }
+          }
         }
         Txt {
           anchors.verticalCenter: parent.verticalCenter
@@ -1708,6 +1887,7 @@ OverlayWindow {
     height: size * 1.5
     opacity: enabled ? (trMouse.containsMouse ? 1 : 0.88) : 0.35
     Text {
+      id: trGlyph
       anchors.centerIn: parent
       textFormat: Text.PlainText
       text: tr.glyph
@@ -1716,14 +1896,16 @@ OverlayWindow {
       font.pixelSize: tr.size
       scale: trMouse.pressed ? 0.9 : 1
       RotationAnimation on rotation {
+        id: trSpin
         from: 0
         to: 360
         duration: Style.duration(900)
         loops: Animation.Infinite
         running: tr.spinning && !Style.reduceMotion
-        onRunningChanged: if (!running) parent.rotation = 0
       }
     }
+    // A stopped spin leaves the glyph wherever it was: stand it up again.
+    onSpinningChanged: if (!spinning) { trSpin.stop(); trGlyph.rotation = 0 }
     MouseArea {
       id: trMouse
       anchors.fill: parent

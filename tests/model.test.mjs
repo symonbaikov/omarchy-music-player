@@ -8,7 +8,7 @@ const source = readFileSync(new URL("../Model.js", import.meta.url), "utf8").rep
 const M = {}
 // QML's V4 engine lacks some newer built-ins; remove them so tests catch their use.
 const V4_MISSING = "delete String.prototype.trimEnd; delete String.prototype.trimStart; delete Array.prototype.at; delete Object.hasOwn;\n"
-vm.runInNewContext(V4_MISSING + source + "\n;Object.assign(__out, { cleanText, plain, truncate, formatTime, parseLine, parseSession, clampIndex, mpvCommand, GLYPH, normalizeRepeat, nextRepeat, repeatFromMpv, repeatCommands, coverUrl, OBSERVED, SUPERMIX_ID, isMix, radioListId, autoplaySeed, isLoading, addTargets, likedSet, withLiked, playbackFailure, seconds, stepChoice, recentReport, mirrorOffer, parseUpdate, exploreRows, DOWNLOAD_FORMATS, trackCover, serviceOf, isYouTube, TRACK_KEY_RE, cloudForm, tileHue, CLOUD_KINDS, SERVICES })", { __out: M })
+vm.runInNewContext(V4_MISSING + source + "\n;Object.assign(__out, { cleanText, plain, truncate, formatTime, parseLine, parseSession, clampIndex, mpvCommand, GLYPH, normalizeRepeat, nextRepeat, repeatFromMpv, repeatCommands, coverUrl, OBSERVED, SUPERMIX_ID, isMix, radioListId, autoplaySeed, isLoading, addTargets, likedSet, withLiked, playbackFailure, seconds, stepChoice, recentReport, mirrorOffer, parseUpdate, exploreRows, DOWNLOAD_FORMATS, trackCover, serviceOf, isYouTube, TRACK_KEY_RE, cloudForm, tileHue, CLOUD_KINDS, SERVICES, lyricIndex })", { __out: M })
 
 const MARKUP = '<img src="https://example.invalid/tracker">Song'
 
@@ -400,4 +400,20 @@ test("cloud messages and the connect form", () => {
   assert.equal(M.cloudForm("nope", {}, "", "", ""), null)
   assert.equal(M.tileHue("mix:all"), M.tileHue("mix:all"))
   assert.ok(M.tileHue("x") >= 0 && M.tileHue("x") < 1)
+})
+
+test("lyrics: timed lines are kept in order, plain text split, the playing line found", () => {
+  const m = M.parseLine(JSON.stringify({ type: "lyrics", key: "dQw4w9WgXcQ", source: "LRCLIB",
+    synced: [[1.5, "One"], [3, "Two\u0000"], ["x", "bad"], [2, "out of order"], [5, ""]] }))
+  assert.equal(m.synced, true)
+  assert.deepEqual(Array.from(m.lines, l => l.text), ["One", "Two", ""])
+  assert.equal(M.lyricIndex(m.lines, 0), -1)
+  assert.equal(M.lyricIndex(m.lines, 1.5), 0)
+  assert.equal(M.lyricIndex(m.lines, 4.9), 1)
+  assert.equal(M.lyricIndex(m.lines, 99), 2)
+  const p = M.parseLine(JSON.stringify({ type: "lyrics", key: "dQw4w9WgXcQ", plain: "a\nb\r\nc" }))
+  assert.equal(p.synced, false)
+  assert.equal(p.lines.length, 3)
+  assert.equal(M.parseLine(JSON.stringify({ type: "lyrics", key: "../x" })), null)
+  assert.equal(M.parseLine(JSON.stringify({ type: "lyrics", key: "dQw4w9WgXcQ", none: true })).none, true)
 })

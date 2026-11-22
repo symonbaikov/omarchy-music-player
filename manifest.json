@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.symonbaikov.ytmusic-mpv",
   "name": "YouTube Music (mpv)",
-  "version": "0.4.3",
+  "version": "0.5.0",
   "author": "Symon Baikov",
   "license": "MIT",
   "homepage": "https://github.com/symonbaikov/omarchy-ytmusic-mpv",
@@ -36,7 +36,17 @@
       "defaultVolume": 60,
       "showCovers": "On",
       "repeat": "off",
-      "autoplay": "On"
+      "autoplay": "On",
+      "fadeIn": 0,
+      "fadeOut": 0,
+      "transition": "Off",
+      "crossfade": 6,
+      "backupMirrors": "Off",
+      "mirrors": "",
+      "updateCheck": "On",
+      "downloadDir": "~/Music",
+      "downloadFormat": "mp3",
+      "downloadCover": "On"
     },
     "schema": [
       {
@@ -109,6 +119,106 @@
         ],
         "defaultValue": "On",
         "description": "When the queue runs out (repeat off), keep playing songs YouTube Music recommends for the last one."
+      },
+      {
+        "key": "fadeIn",
+        "type": "integer",
+        "label": "Fade in (seconds)",
+        "min": 0,
+        "max": 30,
+        "step": 1,
+        "defaultValue": 0,
+        "description": "Each song starts quietly and rises over this many seconds. 0 is off."
+      },
+      {
+        "key": "fadeOut",
+        "type": "integer",
+        "label": "Fade out (seconds)",
+        "min": 0,
+        "max": 30,
+        "step": 1,
+        "defaultValue": 0,
+        "description": "Each song fades away over its last seconds. 0 is off."
+      },
+      {
+        "key": "transition",
+        "type": "enum",
+        "label": "Transitions",
+        "options": [
+          "Off",
+          "Peak mix"
+        ],
+        "defaultValue": "Off",
+        "description": "Peak mix: at a song's climax, crossfade into the next song's climax, like a DJ. Downloads the songs' audio to the cache to mix them."
+      },
+      {
+        "key": "crossfade",
+        "type": "integer",
+        "label": "Peak mix transition length (seconds)",
+        "min": 2,
+        "max": 16,
+        "step": 1,
+        "defaultValue": 6
+      },
+      {
+        "key": "backupMirrors",
+        "type": "enum",
+        "label": "Backup mirrors",
+        "options": [
+          "Off",
+          "On"
+        ],
+        "defaultValue": "Off",
+        "description": "When a song won't play from YouTube by any of its clients, get it from independent YouTube mirrors (Invidious, Piped). They see the song's ID, never cookies or the login."
+      },
+      {
+        "key": "mirrors",
+        "type": "string",
+        "label": "Your own mirrors",
+        "defaultValue": "",
+        "description": "Optional, e.g. \"invidious:https://inv.example.org piped:https://pipedapi.example.org\". Empty: the healthiest instances from the projects' public directories."
+      },
+      {
+        "key": "updateCheck",
+        "type": "enum",
+        "label": "Check for updates",
+        "options": [
+          "On",
+          "Off"
+        ],
+        "defaultValue": "On",
+        "description": "Once a day, and right away when songs stop playing, git-fetch this plugin's repository to see whether a newer version is out. The panel then offers to update."
+      },
+      {
+        "key": "downloadDir",
+        "type": "string",
+        "label": "Download folder",
+        "defaultValue": "~/Music",
+        "description": "Where downloaded songs go. The download screen's folder picker sets it."
+      },
+      {
+        "key": "downloadFormat",
+        "type": "enum",
+        "label": "Download format",
+        "options": [
+          "mp3",
+          "m4a",
+          "opus",
+          "flac",
+          "wav"
+        ],
+        "defaultValue": "mp3"
+      },
+      {
+        "key": "downloadCover",
+        "type": "enum",
+        "label": "Download with cover",
+        "options": [
+          "On",
+          "Off"
+        ],
+        "defaultValue": "On",
+        "description": "Embed the cover in downloaded files (MP3, M4A, FLAC) and show it in Downloads."
       }
     ]
   }

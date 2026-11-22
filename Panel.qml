@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Dialogs
 import Quickshell
 import Quickshell.Io
 import qs.Commons
@@ -26,6 +27,16 @@ Panel {
   readonly property int defaultVolume: Math.max(0, Math.min(100, Number(setting("defaultVolume", 60)) || 0))
   readonly property bool showCovers: setting("showCovers", "On") !== "Off"
   readonly property bool autoplayEnabled: setting("autoplay", "On") !== "Off"
+  // Fades and the peak mix run inside mpv (mpv/ytmusic.lua); a running
+  // player follows changes from the next moment on.
+  readonly property real fadeIn: Model.seconds(setting("fadeIn", 0), 0, 30, 0)
+  readonly property real fadeOut: Model.seconds(setting("fadeOut", 0), 0, 30, 0)
+  readonly property string transitionMode: setting("transition", "Off") === "Peak mix" ? "peak" : "off"
+  readonly property real crossfade: Model.seconds(setting("crossfade", 6), 2, 16, 6)
+  onFadeInChanged: sendPlayerSetting("fade_in", fadeIn)
+  onFadeOutChanged: sendPlayerSetting("fade_out", fadeOut)
+  onTransitionModeChanged: sendPlayerSetting("transition", transitionMode)
+  onCrossfadeChanged: sendPlayerSetting("xfade", crossfade)
 
   // A running player follows the cookie settings from its next track on:
   // turning playback cookies off, or choosing browser "none", revokes them.
@@ -39,7 +50,8 @@ Panel {
   readonly property bool barVertical: bar ? bar.vertical === true : false
 
   // ---- library state -------------------------------------------------------
-  property string view: "playlists"          // "playlists" | "tracks" | "addTo"
+  property string view: "playlists"          // "playlists" | "tracks" | "addTo" | "settings"
+  property string viewBeforeSettings: "playlists"
   property var playlists: []
   property bool playlistsLoading: false
   property string playlistsError: ""
@@ -48,7 +60,10 @@ Panel {
   property bool tracksLoading: false
   property string tracksError: ""
   property int cursorIndex: -1
-  readonly property var rows: view === "tracks" ? tracks
+  readonly property var rows: view === "settings" || view === "download" ? []
+    : view === "explore" ? exploreRowsData
+    : view === "playlists" ? [exploreEntry, downloadsEntry].concat(playlists)
+    : view === "tracks" ? tracks
     : (view === "addTo" ? (addTargetsLive !== null ? addTargetsLive : (addTargetsLoading ? [] : Model.addTargets(playlists)))
     : playlists)
   // YouTube Music's own add-to-playlist list for `addTrack`: only playlists
@@ -62,6 +77,43 @@ Panel {
   // A skipped song that the account may be able to play (members-only …):
   // the notice offers to turn playback cookies on and play it again.
   property string noticeRetryId: ""
+  // A song nothing on YouTube could play while backup mirrors are off:
+  // { id, title, reason }, shown as a card offering them until answered.
+  property var mirrorOffer: null
+  property bool mirrorOfferDeclined: false
+  readonly property bool mirrorsOn: setting("backupMirrors", "Off") === "On"
+  readonly property bool updateCheckOn: setting("updateCheck", "On") !== "Off"
+  readonly property string downloadDir: String(setting("downloadDir", "~/Music") || "~/Music")
+  readonly property string downloadFormat: Model.DOWNLOAD_FORMATS.indexOf(setting("downloadFormat", "mp3")) >= 0
+    ? setting("downloadFormat", "mp3") : "mp3"
+  readonly property bool downloadCover: setting("downloadCover", "On") !== "Off"
+  readonly property string homeDir: Quickshell.env("HOME") || ""
+  readonly property string downloadPath: downloadDir.indexOf("~") === 0 ? homeDir + downloadDir.slice(1) : downloadDir
+
+  // ---- explore -------------------------------------------------------------
+  property var exploreSections: []
+  property var exploreRowsData: []
+  property bool exploreLoading: false
+  property string exploreError: ""
+  property string exploreMode: "home"        // "home" | "mood" | "search"
+  property string exploreTitle: ""
+  property bool tracksFromExplore: false
+  readonly property var exploreEntry: ({ kind: "explore", id: "__explore", title: strings.t("explore.title"),
+    artist: strings.t("explore.subtitle") })
+  readonly property var downloadsEntry: ({ kind: "list", id: "DOWNLOADS", title: strings.t("list.downloads"),
+    artist: strings.t("list.downloadsHint") })
+
+  // ---- download ------------------------------------------------------------
+  property var downloadTrack: null           // the song the download screen is for
+  property string viewBeforeDownload: "playlists"
+  property var downloading: null             // { id, title, stage } while one runs
+  property string noticeFolder: ""           // "Open folder" after a download
+  // A newer version of this plugin: { version, current, notes } (see
+  // checkForUpdate); offered as a card until updated or put off.
+  property var updateInfo: null
+  property string updateDeclined: ""
+  property bool youtubeFailing: false
+  onMirrorsOnChanged: if (mirrorsOn) mirrorOffer = null
   property string retryVideoId: ""
 
   // ---- library edits (like, add to playlist) --------------------------------
@@ -148,13 +200,14 @@ Panel {
   })
   onAutoplayDueSeedChanged: if (autoplayDueSeed !== "") runAutoplay(autoplayDueSeed)
   readonly property string nowCoverUrl: showCovers && currentTrack
-    ? Model.coverUrl(currentTrack.id, largeCoverFailedFor === currentTrack.id ? "small" : "large") : ""
+    ? Model.trackCover(currentTrack, largeCoverFailedFor === currentTrack.id ? "small" : "large") : ""
 
   Commons.Translations { id: strings; directory: Qt.resolvedUrl("i18n") }
 
   function playlistTitle(p) {
     if (!p) return ""
     if (p.id === "LM") return strings.t("list.likedMusic")
+    if (p.id === "DOWNLOADS") return strings.t("list.downloads")
     if (p.id === Model.SUPERMIX_ID) return strings.t("list.supermix")
     return p.title
   }
@@ -227,6 +280,30 @@ Panel {
       else retryVideoId = ""
     } else if (msg.type === "stopped" && source === "cookies") {
       retryVideoId = ""
+    } else if (msg.type === "explore") {
+      if (source === "explore") {
+        if (msg.mood !== "" && exploreMode !== "mood") return
+        if (msg.mood === "") exploreSections = msg.sections
+        exploreRowsData = Model.exploreRows(msg.sections)
+        if (!msg.stale) exploreLoading = false
+      }
+    } else if (msg.type === "search") {
+      if (exploreMode === "search") {
+        exploreRowsData = msg.items.map(function(it) {
+          return { kind: it.kind, id: it.id, title: it.title, artist: it.artist, duration: it.duration, section: "" }
+        })
+        exploreLoading = false
+      }
+    } else if (msg.type === "downloading") {
+      if (downloading && downloading.id === msg.id) {
+        downloading = { id: downloading.id, title: downloading.title, stage: msg.stage }
+      }
+    } else if (msg.type === "downloaded") {
+      var saved = downloading ? downloading.title : ""
+      downloading = null
+      showNotice(strings.t("download.done").arg(Model.truncate(saved, 50)) + "\n" + msg.path, false, true)
+      noticeFolder = msg.folder
+      if (view === "tracks" && openPlaylist && openPlaylist.id === "DOWNLOADS") loadTracks(true)
     } else if (msg.type === "signin") {
       showNotice(strings.t("notice.signinOpened").arg(msg.browser))
     } else if (msg.type === "playing") {
@@ -251,6 +328,11 @@ Panel {
         if (msg.auth) showNotice(msg.message, true)
       }
       else if (source === "signin") showNotice(msg.message)
+      else if (source === "explore" || source === "search") { exploreError = msg.message; exploreLoading = false }
+      else if (source === "download") {
+        downloading = null
+        showNotice(strings.t("notice.failed").arg(msg.message), msg.auth, true)
+      }
       else {
         playError = msg.message
         starting = false
@@ -342,6 +424,83 @@ Panel {
   }
 
   Process {
+    id: exploreProc
+    stdout: SplitParser { onRead: function(line) { root.handleHelperLine(line, "explore") } }
+    onExited: root.exploreLoading = false
+  }
+
+  Process {
+    id: searchProc
+    stdout: SplitParser { onRead: function(line) { root.handleHelperLine(line, "search") } }
+    onExited: root.exploreLoading = false
+  }
+
+  Process {
+    id: downloadProc
+    stdout: SplitParser { onRead: function(line) { root.handleHelperLine(line, "download") } }
+    onExited: if (root.downloading) root.downloading = null
+  }
+
+  Process { id: openFolderProc }
+
+  FolderDialog {
+    id: folderDialog
+    title: strings.t("download.pick")
+    onAccepted: {
+      var path = decodeURIComponent(String(selectedFolder).replace(/^file:\/\//, ""))
+      if (path.charAt(0) === "/") root.saveSettings({ downloadDir: path })
+      root.open()
+    }
+    onRejected: root.open()
+  }
+
+  Process {
+    id: updateCheckProc
+    stdout: SplitParser { onRead: function(line) { root.handleUpdateLine(line) } }
+  }
+
+  Process {
+    id: updateApplyProc
+    property string output: ""
+    command: ["omarchy", "plugin", "update", root.moduleName, "--yes"]
+    stdout: SplitParser { onRead: function(line) { updateApplyProc.output = String(line).slice(-200) } }
+    stderr: SplitParser { onRead: function(line) { updateApplyProc.output = String(line).slice(-200) } }
+    onExited: function(exitCode) {
+      if (exitCode === 0) {
+        restartProc.running = true
+      } else {
+        root.showNotice(strings.t("update.failed").arg(Model.cleanText(output || ("exit " + exitCode), 160)), false, true)
+      }
+    }
+  }
+
+  // Detached, so it outlives the shell it restarts.
+  Process {
+    id: restartProc
+    command: ["setsid", "-f", "omarchy", "restart", "shell"]
+  }
+
+  Timer {
+    id: updateTimer
+    // A while after start, then daily (the helper skips it when checked
+    // in the last day).
+    interval: 45000
+    repeat: true
+    running: root.updateCheckOn
+    onTriggered: {
+      interval = 6 * 3600 * 1000
+      root.checkForUpdate(86400)
+    }
+  }
+
+  // The desktop notification for a song that won't play; its button opens
+  // the panel, where the offer waits.
+  Process {
+    id: notifyProc
+    stdout: SplitParser { onRead: function(line) { if (String(line).trim() === "open") root.open() } }
+  }
+
+  Process {
     id: signinProc
     command: root.helper(["signin", "--browser", root.browser])
     stdout: SplitParser { onRead: function(line) { root.handleHelperLine(line, "signin") } }
@@ -356,6 +515,7 @@ Panel {
       root.noticeAuth = false
       root.noticeLong = false
       root.noticeRetryId = ""
+      root.noticeFolder = ""
     }
   }
 
@@ -400,6 +560,8 @@ Panel {
           root.send(["observe_property", i + 1, Model.OBSERVED[i]])
         // Errors only: why a track couldn't be opened (see showSkipped).
         root.send(["request_log_messages", "error"])
+        // Settings may have changed while no panel was connected.
+        root.sendPlayerSettings()
         root.requestPosition()
       } else {
         root.resetPlayer()
@@ -456,6 +618,200 @@ Panel {
   // something else. For each track mpv sends "start-file", then (on failure)
   // the ytdl hook's "ERROR: …" log line, then "end-file" with reason "error".
   property string ytdlError: ""
+
+  // ---- explore ---------------------------------------------------------------
+  function openExplore() {
+    view = "explore"
+    cursorIndex = -1
+    showExploreHome()
+    if (exploreSections.length === 0 || exploreError !== "") loadExplore(21600)
+  }
+
+  function showExploreHome() {
+    exploreMode = "home"
+    exploreTitle = strings.t("explore.title")
+    exploreRowsData = Model.exploreRows(exploreSections)
+    cursorIndex = -1
+  }
+
+  function loadExplore(maxAge) {
+    if (exploreProc.running) return
+    exploreError = ""
+    exploreLoading = true
+    exploreProc.command = helper(["explore", "--max-age", String(maxAge)])
+    exploreProc.running = true
+  }
+
+  function openMood(item) {
+    if (exploreProc.running) return
+    exploreMode = "mood"
+    exploreTitle = item.title
+    exploreRowsData = []
+    exploreError = ""
+    exploreLoading = true
+    cursorIndex = -1
+    exploreProc.command = helper(["mood", item.id])
+    exploreProc.running = true
+  }
+
+  function runSearch(text) {
+    var q = String(text || "").trim()
+    if (q === "" || searchProc.running) return
+    exploreMode = "search"
+    exploreTitle = strings.t("explore.results").arg(Model.truncate(q, 40))
+    exploreRowsData = []
+    exploreError = ""
+    exploreLoading = true
+    cursorIndex = -1
+    searchProc.command = helper(["search", q])
+    searchProc.running = true
+  }
+
+  // A song plays with its radio after it, like YouTube Music; a list opens.
+  function activateExplore(item) {
+    if (!item) return
+    if (item.kind === "song") { startRadio(item); tracksFromExplore = true }
+    else if (item.kind === "mood") openMood(item)
+    else if (item.kind === "list") {
+      openPlaylist = { id: item.id, title: item.title, count: null }
+      tracks = []
+      cursorIndex = -1
+      tracksFromExplore = true
+      view = "tracks"
+      loadTracks(false)
+    }
+  }
+
+  // ---- download --------------------------------------------------------------
+  function openDownload(track) {
+    if (!track || !Model.radioListId(track.id)) return
+    downloadTrack = { id: track.id, title: track.title, artist: track.artist || "" }
+    if (view !== "download") viewBeforeDownload = view === "addTo" || view === "settings" ? "playlists" : view
+    view = "download"
+    cursorIndex = -1
+    if (!opened) open()
+  }
+
+  // The folder picker is the desktop's own (GTK) dialog. The panel steps
+  // aside while it is open, since it holds the keyboard.
+  function chooseFolder() {
+    close()
+    folderDialog.currentFolder = "file://" + downloadPath
+    folderDialog.open()
+  }
+
+  function startDownload() {
+    var t = downloadTrack
+    if (!t) return
+    if (downloadProc.running) { showNotice(strings.t("download.busy")); return }
+    downloading = { id: t.id, title: t.title, stage: "fetch" }
+    downloadProc.command = helper([
+      "download", t.id, "--dir", downloadPath, "--format", downloadFormat,
+      "--title", t.title, "--artist", t.artist, "--cover", downloadCover ? "1" : "0",
+      "--browser", browser, "--playback-cookies", playbackCookies ? "1" : "0"
+    ])
+    downloadProc.running = true
+    view = viewBeforeDownload
+    cursorIndex = -1
+  }
+
+  // ---- plugin updates ------------------------------------------------------
+  function checkForUpdate(maxAge) {
+    if (!updateCheckOn || updateCheckProc.running || updateApplyProc.running) return
+    updateCheckProc.command = helper(["update-check", "--max-age", String(maxAge)])
+    updateCheckProc.running = true
+  }
+
+  function handleUpdateLine(line) {
+    var u = Model.parseUpdate(line)
+    if (!u) return
+    if (u.state !== "available" || u.version === updateDeclined) { updateInfo = null; return }
+    var fresh = updateInfo === null || updateInfo.version !== u.version
+    updateInfo = u
+    if (fresh && youtubeFailing && !opened) notifyUpdate(u.version)
+  }
+
+  function notifyUpdate(version) {
+    if (notifyProc.running) return
+    var peers = bar && typeof bar.moduleWidgets === "function" ? bar.moduleWidgets(moduleName) : []
+    if (peers.length > 0 && peers[0] !== root) return
+    notifyProc.command = ["notify-send", "--app-name=YouTube Music", "--icon=software-update-available",
+      "--action=open=" + strings.t("offer.notifyOpen"),
+      strings.t("update.notifyTitle"), strings.t("update.notifyBody").arg(version)]
+    notifyProc.running = true
+  }
+
+  // `omarchy plugin update` pulls the new version; the shell then restarts
+  // to load it (the player keeps playing).
+  function applyUpdate() {
+    if (updateApplyProc.running) return
+    updateApplyProc.output = ""
+    updateApplyProc.running = true
+  }
+
+  function declineUpdate() {
+    if (updateInfo) updateDeclined = updateInfo.version
+    updateInfo = null
+  }
+
+  // ---- backup mirrors offer -------------------------------------------------
+  function notifyUnplayable(title) {
+    if (notifyProc.running) return
+    // Every monitor's bar has this widget: one notification, from the first,
+    // and none while a panel is open (it shows the offer itself).
+    var peers = bar && typeof bar.moduleWidgets === "function" ? bar.moduleWidgets(moduleName) : []
+    for (var i = 0; i < peers.length; i++) if (peers[i] && peers[i].opened) return
+    if (peers.length > 0 && peers[0] !== root) return
+    notifyProc.command = ["notify-send", "--app-name=YouTube Music", "--icon=audio-x-generic",
+      "--action=open=" + strings.t("offer.notifyOpen"),
+      strings.t("offer.notifyTitle"), strings.t("offer.notifyBody").arg(title)]
+    notifyProc.running = true
+  }
+
+  // Yes: turn the mirrors on (saved like any setting) and play the song again.
+  function acceptMirrorOffer() {
+    var offer = mirrorOffer
+    mirrorOffer = null
+    if (!offer) return
+    saveSettings({ backupMirrors: "On" })
+    playAgain(offer.id)
+  }
+
+  function declineMirrorOffer() {
+    mirrorOffer = null
+    mirrorOfferDeclined = true      // until the shell restarts
+  }
+
+  // The song from the current queue again: in the running player, or by
+  // starting the queue's list at it if the player has stopped.
+  function playAgain(id) {
+    var queue = session && session.tracks ? session.tracks : []
+    var index = -1
+    for (var i = 0; i < queue.length; i++) if (queue[i].id === id) { index = i; break }
+    if (index < 0) return
+    if (connected) {
+      send(["playlist-play-index", index])
+      send(["set_property", "pause", false])
+      return
+    }
+    if (playProc.running) return
+    playError = ""
+    starting = true
+    playProc.command = helper([
+      "play", session.playlistId, "--index", String(index), "--video-id", id,
+      "--shuffle", "0", "--browser", browser,
+      "--playback-cookies", playbackCookies ? "1" : "0",
+      "--volume", String(Math.round(volume || defaultVolume)),
+      "--repeat", repeatMode, "--title", session.playlistTitle
+    ].concat(playerArgs()))
+    playProc.running = true
+  }
+
+  function trackTitleById(id) {
+    var queue = session && session.tracks ? session.tracks : []
+    for (var i = 0; i < queue.length; i++) if (queue[i].id === id) return queue[i].title
+    return id
+  }
 
   function showSkipped(errorLine) {
     var f = Model.playbackFailure(errorLine)
@@ -523,6 +879,32 @@ Panel {
       sessionFile.reload()
       break
     case "volume": if (typeof data === "number") volume = data; break
+    case "user-data/ytmusic/fallback": {
+      var used = Model.recentReport(data, Date.now() / 1000)
+      if (used) showNotice(strings.t("notice.backupSource").arg(Model.truncate(trackTitleById(String(used.id)), 60))
+        .arg(Model.cleanText(used.via, 60)))
+      break
+    }
+    case "user-data/ytmusic/unplayable": {
+      var offer = mirrorOfferDeclined ? null : Model.mirrorOffer(Model.recentReport(data, Date.now() / 1000), mirrorsOn)
+      if (offer) {
+        offer.title = Model.truncate(trackTitleById(offer.id), 60)
+        mirrorOffer = offer
+        if (!opened) notifyUnplayable(offer.title)
+      }
+      break
+    }
+    case "user-data/ytmusic/health": {
+      var health = Model.recentReport(data, Date.now() / 1000)
+      if (health && health.state === "failing") {
+        showNotice(strings.t("notice.youtubeFailing").arg(Model.truncate(Model.cleanText(health.reason), 120)), false, true)
+        youtubeFailing = true
+        checkForUpdate(600)        // a fix may be out already
+      } else if (health && health.state === "ok") {
+        youtubeFailing = false
+      }
+      break
+    }
     case "seeking": seekingRaw = data; break
     case "paused-for-cache": pausedForCache = data === true; break
     case "loop-file":
@@ -574,7 +956,7 @@ Panel {
       "--volume", String(startVolume),
       "--repeat", repeatMode,
       "--title", playlistTitle(openPlaylist)
-    ])
+    ].concat(playerArgs()))
     playProc.running = true
   }
 
@@ -586,7 +968,91 @@ Panel {
       "--volume", String(Math.round(volume)),
       "--repeat", repeatMode,
       "--title", title
-    ])
+    ].concat(playerArgs()))
+  }
+
+  function playerArgs() {
+    return ["--fade-in", String(fadeIn), "--fade-out", String(fadeOut),
+      "--transition", transitionMode, "--xfade", String(crossfade)]
+  }
+
+  function sendPlayerSetting(key, value) {
+    send(["script-message", "ytmusic-set", key, String(value)])
+  }
+
+  function sendPlayerSettings() {
+    sendPlayerSetting("fade_in", fadeIn)
+    sendPlayerSetting("fade_out", fadeOut)
+    sendPlayerSetting("xfade", crossfade)
+    sendPlayerSetting("transition", transitionMode)
+  }
+
+  // Saved in this widget's own shell.json entry; every bar picks it up.
+  function saveSettings(changes) {
+    var shell = bar ? bar.shell : null
+    if (!shell || typeof shell.updateEntryInline !== "function") return
+    settings = Object.assign({}, settings, changes)
+    shell.updateEntryInline(moduleName, settings)
+  }
+
+  // ---- settings screen -----------------------------------------------------
+  readonly property var fadeChoices: [0, 1, 2, 3, 5, 8]
+  readonly property var crossfadeChoices: [4, 6, 8, 12]
+  readonly property var settingsItems: [
+    { key: "fadeIn", kind: "choice", section: strings.t("settings.playback"), label: strings.t("settings.fadeIn"),
+      hint: strings.t("settings.fadeInHint"), choices: fadeChoices, value: fadeIn, enabled: true },
+    { key: "fadeOut", kind: "choice", section: "", label: strings.t("settings.fadeOut"),
+      hint: strings.t("settings.fadeOutHint"), choices: fadeChoices, value: fadeOut, enabled: true },
+    { key: "transition", kind: "toggle", section: "", label: strings.t("settings.peakMix"),
+      hint: strings.t("settings.peakMixHint"), checked: transitionMode === "peak", enabled: true },
+    { key: "crossfade", kind: "choice", section: "", label: strings.t("settings.crossfade"),
+      hint: strings.t("settings.crossfadeHint"), choices: crossfadeChoices, value: crossfade, enabled: transitionMode === "peak" },
+    { key: "autoplay", kind: "toggle", section: "", label: strings.t("settings.autoplay"),
+      hint: strings.t("settings.autoplayHint"), checked: autoplayEnabled, enabled: true },
+    { key: "playbackCookies", kind: "toggle", section: strings.t("settings.account"), label: strings.t("settings.playbackCookies"),
+      hint: strings.t("settings.playbackCookiesHint"), checked: playbackCookies, enabled: browser !== "none" },
+    { key: "backupMirrors", kind: "toggle", section: strings.t("settings.backup"), label: strings.t("settings.mirrors"),
+      hint: strings.t("settings.mirrorsHint"), checked: setting("backupMirrors", "Off") === "On", enabled: true },
+    { key: "updateCheck", kind: "toggle", section: "", label: strings.t("settings.updates"),
+      hint: strings.t("settings.updatesHint"), checked: updateCheckOn, enabled: true },
+    { key: "showCovers", kind: "toggle", section: strings.t("settings.display"), label: strings.t("settings.covers"),
+      hint: strings.t("settings.coversHint"), checked: showCovers, enabled: true },
+    { key: "showTitle", kind: "toggle", section: "", label: strings.t("settings.barTitle"),
+      hint: strings.t("settings.barTitleHint"), checked: showTitle, enabled: true }
+  ]
+
+  function choiceLabel(seconds) {
+    return seconds > 0 ? strings.t("settings.seconds").arg(Commons.I18n.formatNumber(seconds)) : strings.t("settings.off")
+  }
+
+  function setToggle(key, on) {
+    var changes = {}
+    changes[key] = key === "transition" ? (on ? "Peak mix" : "Off") : (on ? "On" : "Off")
+    saveSettings(changes)
+  }
+
+  function setChoice(key, seconds) {
+    var changes = {}
+    changes[key] = Number(seconds)
+    saveSettings(changes)
+  }
+
+  // Enter on a row: flip a toggle, or step a choice forward (wrapping).
+  function activateSetting(index, delta) {
+    var item = settingsItems[index]
+    if (!item || !item.enabled) return
+    if (item.kind === "toggle") { if (delta === 0) setToggle(item.key, !item.checked); return }
+    var next = Model.stepChoice(item.choices, item.value, delta === 0 ? 1 : delta)
+    if (delta === 0 && next === item.value) next = item.choices[0]
+    setChoice(item.key, next)
+  }
+
+  function openSettings() {
+    if (view !== "settings") viewBeforeSettings = view === "addTo" ? "playlists" : view
+    if (view === "addTo") closeAddTo()
+    view = "settings"
+    cursorIndex = -1
+    if (!opened) open()
   }
 
   // "Start radio", like YouTube Music: a queue of songs YouTube recommends
@@ -603,6 +1069,7 @@ Panel {
       mpvSocket.connected = false
     }
     // Show the radio's list as the open view, like YouTube Music's "Up next".
+    tracksFromExplore = false
     openPlaylist = { id: listId, title: title, count: null }
     tracks = []
     cursorIndex = -1
@@ -623,6 +1090,7 @@ Panel {
 
   function cursorOrCurrentTrack() {
     if (view === "tracks" && cursorIndex >= 0 && cursorIndex < tracks.length) return tracks[cursorIndex]
+    if (view === "explore" && cursorIndex >= 0 && cursorIndex < rows.length && rows[cursorIndex].kind === "song") return rows[cursorIndex]
     return currentTrack
   }
 
@@ -631,6 +1099,7 @@ Panel {
     noticeAuth = auth === true
     noticeLong = long === true
     noticeRetryId = ""
+    noticeFolder = ""
     noticeTimer.restart()
   }
 
@@ -742,8 +1211,10 @@ Panel {
   }
 
   function openPlaylistAt(index) {
-    var p = playlists[index]
+    var p = rows[index]
     if (!p) return
+    if (p.kind === "explore") { openExplore(); return }
+    tracksFromExplore = false
     openPlaylist = p
     tracks = []
     cursorIndex = -1
@@ -752,20 +1223,39 @@ Panel {
   }
 
   function backToPlaylists() {
+    if (view === "download") { view = viewBeforeDownload; cursorIndex = -1; return }
+    if (view === "explore") {
+      if (exploreMode !== "home") showExploreHome()
+      else { view = "playlists"; cursorIndex = 0 }
+      return
+    }
+    if (view === "tracks" && tracksFromExplore) { view = "explore"; cursorIndex = -1; return }
+    if (view === "settings") {
+      view = viewBeforeSettings === "tracks" && openPlaylist ? "tracks" : "playlists"
+      cursorIndex = -1
+      return
+    }
     if (view === "addTo") { closeAddTo(); return }
     if (view !== "tracks") return
     view = "playlists"
     var id = openPlaylist ? openPlaylist.id : ""
     cursorIndex = -1
-    for (var i = 0; i < playlists.length; i++) if (playlists[i].id === id) { cursorIndex = i; break }
+    for (var i = 0; i < rows.length; i++) if (rows[i].id === id) { cursorIndex = i; break }
   }
 
   function refreshList() {
+    if (view === "settings" || view === "download") return
+    if (view === "explore") {
+      if (exploreMode === "search") runSearch(searchField.text)
+      else if (exploreMode === "home") loadExplore(0)
+      return
+    }
     if (view === "tracks") loadTracks(true)
     else loadPlaylists(true)
   }
 
   function activateRow(index) {
+    if (view === "explore") { activateExplore(rows[index]); return }
     if (view === "tracks") play(index, false)
     else if (view === "addTo") addToPlaylist(rows[index])
     else openPlaylistAt(index)
@@ -789,12 +1279,19 @@ Panel {
 
   // ---- keyboard ------------------------------------------------------------
   function moveCursor(dx, dy) {
+    if (view === "settings") {
+      if (dy !== 0) cursorIndex = Model.clampIndex(cursorIndex, dy, settingsItems.length)
+      else if (cursorIndex >= 0 && settingsItems[cursorIndex].kind === "choice") activateSetting(cursorIndex, dx)
+      else if (dx < 0) backToPlaylists()
+      return
+    }
     if (dy !== 0) cursorIndex = Model.clampIndex(cursorIndex, dy, rows.length)
     else if (dx < 0) backToPlaylists()
     else if (dx > 0 && view === "playlists" && cursorIndex >= 0) openPlaylistAt(cursorIndex)
   }
 
   function activateCursor() {
+    if (view === "settings") { if (cursorIndex >= 0) activateSetting(cursorIndex, 0); return }
     if (cursorIndex >= 0 && cursorIndex < rows.length) activateRow(cursorIndex)
     else togglePause()
   }
@@ -813,6 +1310,10 @@ Panel {
     case "+": case "=": setVolume(volume + 5); break
     case "-": setVolume(volume - 5); break
     case "\b": backToPlaylists(); break
+    case ",": openSettings(); break
+    case "d": openDownload(cursorOrCurrentTrack()); break
+    case "e": openExplore(); break
+    case "/": if (view === "explore") searchField.forceActiveFocus(); else { openExplore(); searchField.forceActiveFocus() } break
     }
   }
 
@@ -836,6 +1337,9 @@ Panel {
       root.openAddTo(root.currentTrack)
     }
     function signIn(): void { root.signIn() }
+    function openSettings(): void { root.openSettings() }
+    function explore(): void { root.open(); root.openExplore() }
+    function download(): void { root.openDownload(root.currentTrack) }
   }
 
   onOpenedChanged: {
@@ -869,7 +1373,8 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: root.loading ? Model.GLYPH.loading : (root.connected && root.paused ? Model.GLYPH.pause : Model.GLYPH.music)
+    text: root.mirrorOffer !== null && !root.opened ? Model.GLYPH.alert
+      : root.loading ? Model.GLYPH.loading : (root.connected && root.paused ? Model.GLYPH.pause : Model.GLYPH.music)
     textRotation: root.loading ? root.spinAngle : 0
     active: root.playing
     labelText: root.barLabel
@@ -895,11 +1400,13 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: panel.loadedContent
-    contentWidth: panel.fittedContentWidth(Style.space(420))
+    contentWidth: panel.fittedContentWidth(Style.space(470))
     contentHeight: panel.fittedContentHeight(panel.loadedContentHeight)
 
     content: PanelKeyCatcher {
       anchors.fill: parent
+      // Typing in the search field goes to the field, not to shortcuts.
+      blocked: searchField.activeFocus
       implicitHeight: column.implicitHeight
       onMoveRequested: function(dx, dy) { root.moveCursor(dx, dy) }
       onActivateRequested: root.activateCursor()
@@ -967,10 +1474,23 @@ Panel {
             }
           }
 
+          // Settings, in the panel's top right corner.
+          PanelActionButton {
+            id: settingsButton
+            anchors.right: parent.right
+            anchors.top: parent.top
+            iconText: Model.GLYPH.settings
+            tooltipText: strings.t("settings.open")
+            foreground: root.view === "settings" ? Style.selectedStateColor(root.fg, Commons.Color.accent) : root.fg
+            fontFamily: root.fontFamily
+            onClicked: root.view === "settings" ? root.backToPlaylists() : root.openSettings()
+          }
+
           // Like and add-to-playlist for the playing song, beside its title.
           Row {
             id: nowActions
-            anchors.right: parent.right
+            anchors.right: settingsButton.left
+            anchors.rightMargin: Style.space(4)
             anchors.verticalCenter: parent.verticalCenter
             spacing: Style.space(4)
             visible: root.connected && root.currentTrack !== null
@@ -991,14 +1511,21 @@ Panel {
               fontFamily: root.fontFamily
               onClicked: root.openAddTo(root.currentTrack)
             }
+            PanelActionButton {
+              iconText: Model.GLYPH.download
+              tooltipText: strings.t("controls.download")
+              foreground: root.fg
+              fontFamily: root.fontFamily
+              onClicked: root.openDownload(root.currentTrack)
+            }
           }
 
           Column {
             id: nowLabels
             anchors.left: nowIcon.right
             anchors.leftMargin: Style.space(14)
-            anchors.right: nowActions.visible ? nowActions.left : parent.right
-            anchors.rightMargin: nowActions.visible ? Style.space(6) : 0
+            anchors.right: nowActions.visible ? nowActions.left : settingsButton.left
+            anchors.rightMargin: Style.space(6)
             anchors.verticalCenter: parent.verticalCenter
             spacing: Style.space(2)
 
@@ -1193,6 +1720,143 @@ Panel {
           font.pixelSize: Style.font.bodySmall
         }
 
+        // ---------- a newer version of the plugin ----------
+        BorderSurface {
+          visible: root.updateInfo !== null
+          width: parent.width
+          implicitHeight: updateColumn.implicitHeight + Style.space(24)
+          radius: Style.cornerRadius
+          color: Qt.rgba(Commons.Color.accent.r, Commons.Color.accent.g, Commons.Color.accent.b, 0.08)
+          borderSpec: Border.flat(Commons.Color.accent, 1)
+
+          Column {
+            id: updateColumn
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.margins: Style.space(12)
+            spacing: Style.space(6)
+
+            PlainText {
+              width: parent.width
+              text: root.updateInfo ? strings.t(root.youtubeFailing ? "update.titleFix" : "update.title").arg(root.updateInfo.version) : ""
+              font.bold: true
+              wrapMode: Text.Wrap
+              elide: Text.ElideNone
+            }
+            Repeater {
+              model: root.updateInfo ? root.updateInfo.notes : []
+              PlainText {
+                required property var modelData
+                width: updateColumn.width
+                text: "• " + modelData
+                color: root.dim
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.Wrap
+                elide: Text.ElideNone
+              }
+            }
+            Row {
+              spacing: Style.space(8)
+              Button {
+                iconText: updateApplyProc.running ? Model.GLYPH.loading : Model.GLYPH.refresh
+                iconSpinning: updateApplyProc.running
+                text: updateApplyProc.running ? strings.t("update.running") : strings.t("update.now")
+                enabled: !updateApplyProc.running
+                fontSize: Style.font.bodySmall
+                foreground: root.fg
+                fontFamily: root.fontFamily
+                bordered: true
+                onClicked: root.applyUpdate()
+              }
+              Button {
+                visible: !updateApplyProc.running
+                text: strings.t("update.later")
+                fontSize: Style.font.bodySmall
+                foreground: root.fg
+                fontFamily: root.fontFamily
+                bordered: true
+                onClicked: root.declineUpdate()
+              }
+            }
+          }
+        }
+
+        // ---------- a song won't play: offer backup mirrors ----------
+        BorderSurface {
+          visible: root.mirrorOffer !== null
+          width: parent.width
+          implicitHeight: offerColumn.implicitHeight + Style.space(24)
+          radius: Style.cornerRadius
+          color: Qt.rgba(Commons.Color.accent.r, Commons.Color.accent.g, Commons.Color.accent.b, 0.10)
+          borderSpec: Border.flat(Commons.Color.accent, 1)
+
+          Column {
+            id: offerColumn
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.margins: Style.space(12)
+            spacing: Style.space(8)
+
+            Row {
+              width: parent.width
+              spacing: Style.space(8)
+              PlainText {
+                id: offerIcon
+                text: Model.GLYPH.alert
+                color: Commons.Color.accent
+                font.pixelSize: Style.font.title
+                elide: Text.ElideNone
+              }
+              PlainText {
+                width: parent.width - offerIcon.width - parent.spacing
+                anchors.verticalCenter: offerIcon.verticalCenter
+                text: root.mirrorOffer ? strings.t("offer.title").arg(root.mirrorOffer.title) : ""
+                font.bold: true
+                wrapMode: Text.Wrap
+                elide: Text.ElideNone
+              }
+            }
+            PlainText {
+              width: parent.width
+              visible: text !== ""
+              text: root.mirrorOffer ? root.mirrorOffer.reason : ""
+              color: root.dim
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.Wrap
+              elide: Text.ElideNone
+            }
+            PlainText {
+              width: parent.width
+              text: strings.t("offer.body")
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.Wrap
+              elide: Text.ElideNone
+            }
+            Row {
+              spacing: Style.space(8)
+              Button {
+                iconText: Model.GLYPH.refresh
+                text: strings.t("offer.enable")
+                fontSize: Style.font.bodySmall
+                foreground: root.fg
+                fontFamily: root.fontFamily
+                bordered: true
+                onClicked: root.acceptMirrorOffer()
+              }
+              Button {
+                text: strings.t("offer.dismiss")
+                fontSize: Style.font.bodySmall
+                foreground: root.fg
+                fontFamily: root.fontFamily
+                bordered: true
+                onClicked: root.declineMirrorOffer()
+              }
+            }
+          }
+        }
+
         // Notices ("Added to …", errors). A sign-in problem gets a button that
         // opens YouTube's sign-in page in the browser the cookies come from.
         Item {
@@ -1217,16 +1881,21 @@ Panel {
           Button {
             id: noticeButton
             readonly property bool retry: root.noticeRetryId !== ""
-            visible: root.browser !== "none" && (root.noticeAuth || retry)
+            readonly property bool folder: root.noticeFolder !== ""
+            visible: folder || (root.browser !== "none" && (root.noticeAuth || retry))
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
-            iconText: retry ? Model.GLYPH.play : Model.GLYPH.login
-            text: retry ? strings.t("controls.useAccount") : strings.t("controls.signIn")
+            iconText: folder ? Model.GLYPH.folder : retry ? Model.GLYPH.play : Model.GLYPH.login
+            text: folder ? strings.t("download.openFolder") : retry ? strings.t("controls.useAccount") : strings.t("controls.signIn")
             fontSize: Style.font.bodySmall
             foreground: root.fg
             fontFamily: root.fontFamily
             bordered: true
-            onClicked: retry ? root.playWithAccount(root.noticeRetryId) : root.signIn()
+            onClicked: {
+              if (folder) { openFolderProc.command = ["xdg-open", root.noticeFolder]; openFolderProc.running = true }
+              else if (retry) root.playWithAccount(root.noticeRetryId)
+              else root.signIn()
+            }
           }
         }
 
@@ -1246,9 +1915,10 @@ Panel {
             spacing: Style.space(6)
 
             PanelActionButton {
-              visible: root.view === "tracks" || root.view === "addTo"
+              visible: root.view !== "playlists"
               anchors.verticalCenter: parent.verticalCenter
               iconText: LayoutMirroring.enabled ? Model.GLYPH.forward : Model.GLYPH.back
+              fontSize: Style.font.title
               tooltipText: strings.t("list.back")
               foreground: root.fg
               fontFamily: root.fontFamily
@@ -1256,9 +1926,14 @@ Panel {
             }
             PanelSectionHeader {
               anchors.verticalCenter: parent.verticalCenter
-              width: Math.min(implicitWidth, headerLeft.width - (root.view !== "playlists" ? Style.space(40) : 0))
+              fontSize: Style.font.title
+              font.bold: true
+              width: Math.min(implicitWidth, headerLeft.width - (root.view !== "playlists" ? Style.space(48) : 0))
               elide: Text.ElideRight
-              text: root.view === "tracks" ? root.playlistTitle(root.openPlaylist)
+              text: root.view === "settings" ? strings.t("settings.title")
+                : root.view === "explore" ? root.exploreTitle
+                : root.view === "download" && root.downloadTrack ? strings.t("download.title").arg(root.downloadTrack.title)
+                : root.view === "tracks" ? root.playlistTitle(root.openPlaylist)
                 : (root.view === "addTo" && root.addTrack ? strings.t("list.addTo").arg(root.addTrack.title) : strings.t("list.playlists"))
               foreground: root.fg
               fontFamily: root.fontFamily
@@ -1275,7 +1950,7 @@ Panel {
               visible: root.view === "tracks" && root.tracks.length > 0
               iconText: Model.GLYPH.play
               text: strings.t("list.playAll")
-              fontSize: Style.font.bodySmall
+              fontSize: Style.font.body
               foreground: root.fg
               fontFamily: root.fontFamily
               bordered: true
@@ -1285,15 +1960,17 @@ Panel {
               visible: root.view === "tracks" && root.tracks.length > 1
               iconText: Model.GLYPH.shuffle
               text: strings.t("list.shuffle")
-              fontSize: Style.font.bodySmall
+              fontSize: Style.font.body
               foreground: root.fg
               fontFamily: root.fontFamily
               bordered: true
               onClicked: root.handleKey("s")
             }
             Button {
+              visible: root.view !== "settings" && root.view !== "download" && !(root.view === "explore" && root.exploreMode === "mood")
               iconText: Model.GLYPH.refresh
-              iconSpinning: root.view === "tracks" ? root.tracksLoading : root.playlistsLoading
+              iconSpinning: root.view === "tracks" ? root.tracksLoading : root.view === "explore" ? root.exploreLoading : root.playlistsLoading
+              fontSize: Style.font.title
               tooltipText: strings.t("list.refresh")
               foreground: root.fg
               fontFamily: root.fontFamily
@@ -1302,11 +1979,308 @@ Panel {
           }
         }
 
+        // ---------- explore: search ----------
+        BorderSurface {
+          visible: root.view === "explore"
+          width: parent.width
+          implicitHeight: Style.space(40)
+          radius: Style.cornerRadius
+          color: Style.controlFill(searchField.activeFocus, searchMouse.containsMouse, root.fg, Commons.Color.accent)
+          borderSpec: Border.controlSpec(searchField.activeFocus ? "focus" : "normal", root.fg, Commons.Color.accent)
+
+          PlainText {
+            id: searchIcon
+            anchors.left: parent.left
+            anchors.leftMargin: Style.space(12)
+            anchors.verticalCenter: parent.verticalCenter
+            text: Model.GLYPH.search
+            color: root.dim
+            font.pixelSize: Style.font.subtitle
+            elide: Text.ElideNone
+          }
+          TextInput {
+            id: searchField
+            anchors.left: searchIcon.right
+            anchors.leftMargin: Style.space(10)
+            anchors.right: parent.right
+            anchors.rightMargin: Style.space(12)
+            anchors.verticalCenter: parent.verticalCenter
+            clip: true
+            color: root.fg
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.subtitle
+            selectByMouse: true
+            onAccepted: { root.runSearch(text); focus = false }
+            Keys.onEscapePressed: function(event) {
+              if (text !== "") text = ""
+              else focus = false
+              event.accepted = true
+            }
+            Keys.onDownPressed: function(event) {
+              focus = false
+              root.cursorIndex = 0
+              event.accepted = true
+            }
+          }
+          PlainText {
+            anchors.fill: searchField
+            verticalAlignment: Text.AlignVCenter
+            visible: searchField.text === "" && !searchField.preeditText
+            text: strings.t("explore.search")
+            color: root.dim
+            font.pixelSize: Style.font.subtitle
+          }
+          MouseArea {
+            id: searchMouse
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.IBeamCursor
+            onClicked: searchField.forceActiveFocus()
+          }
+        }
+
+        // ---------- download a song ----------
+        Column {
+          visible: root.view === "download" && root.downloadTrack !== null
+          width: parent.width
+          spacing: Style.space(10)
+
+          PlainText {
+            text: strings.t("download.format").toUpperCase()
+            color: root.dim
+            font.pixelSize: Style.font.bodySmall
+            font.bold: true
+            font.letterSpacing: 1.1
+          }
+          ButtonGroup {
+            focusable: false
+            foreground: root.fg
+            accent: Commons.Color.accent
+            fontFamily: root.fontFamily
+            fontSize: Style.font.body
+            options: Model.DOWNLOAD_FORMATS.map(function(f) { return { value: f, label: f.toUpperCase() } })
+            value: root.downloadFormat
+            onChanged: function(v) { root.saveSettings({ downloadFormat: v }) }
+          }
+          PlainText {
+            text: strings.t("download.folder").toUpperCase()
+            color: root.dim
+            font.pixelSize: Style.font.bodySmall
+            font.bold: true
+            font.letterSpacing: 1.1
+          }
+          BorderSurface {
+            width: parent.width
+            implicitHeight: Math.max(folderText.implicitHeight, chooseButton.implicitHeight) + Style.space(16)
+            radius: Style.cornerRadius
+            color: Style.controlFill(false, false, root.fg, Commons.Color.accent)
+            borderSpec: Border.controlSpec("normal", root.fg, Commons.Color.accent)
+            PlainText {
+              id: folderText
+              anchors.left: parent.left
+              anchors.leftMargin: Style.space(12)
+              anchors.right: chooseButton.left
+              anchors.rightMargin: Style.space(8)
+              anchors.verticalCenter: parent.verticalCenter
+              text: Model.GLYPH.folder + "  " + root.downloadPath
+              elide: Text.ElideMiddle
+            }
+            Button {
+              id: chooseButton
+              anchors.right: parent.right
+              anchors.rightMargin: Style.space(8)
+              anchors.verticalCenter: parent.verticalCenter
+              text: strings.t("download.choose")
+              fontSize: Style.font.bodySmall
+              foreground: root.fg
+              fontFamily: root.fontFamily
+              bordered: true
+              onClicked: root.chooseFolder()
+            }
+          }
+          Toggle {
+            width: parent.width
+            label: strings.t("download.cover")
+            description: strings.t("download.coverHint")
+            checked: root.downloadCover
+            foreground: root.fg
+            accent: Commons.Color.accent
+            fontFamily: root.fontFamily
+            onClicked: root.saveSettings({ downloadCover: root.downloadCover ? "Off" : "On" })
+          }
+          Row {
+            spacing: Style.space(8)
+            Button {
+              iconText: Model.GLYPH.download
+              text: strings.t("download.start")
+              enabled: !downloadProc.running
+              foreground: root.fg
+              fontFamily: root.fontFamily
+              bordered: true
+              onClicked: root.startDownload()
+            }
+            Button {
+              text: strings.t("download.cancel")
+              foreground: root.fg
+              fontFamily: root.fontFamily
+              bordered: true
+              onClicked: root.backToPlaylists()
+            }
+          }
+        }
+
+        // A download in progress, wherever the panel is.
+        Row {
+          visible: root.downloading !== null
+          spacing: Style.space(8)
+          Spinner { anchors.verticalCenter: parent.verticalCenter }
+          PlainText {
+            anchors.verticalCenter: parent.verticalCenter
+            color: root.dim
+            font.pixelSize: Style.font.bodySmall
+            text: !root.downloading ? ""
+              : root.downloading.stage === "convert"
+                ? strings.t("download.converting").arg(Model.truncate(root.downloading.title, 40)).arg(root.downloadFormat.toUpperCase())
+                : strings.t("download.fetching").arg(Model.truncate(root.downloading.title, 40))
+          }
+        }
+
+        // ---------- settings ----------
+        Flickable {
+          id: settingsView
+          visible: root.view === "settings"
+          width: parent.width
+          height: Math.min(settingsColumn.implicitHeight, Style.space(420))
+          contentHeight: settingsColumn.implicitHeight
+          clip: true
+          boundsBehavior: Flickable.StopAtBounds
+          interactive: contentHeight > height
+          ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+          Column {
+            id: settingsColumn
+            width: settingsView.width
+            spacing: Style.space(6)
+
+            Repeater {
+              model: root.settingsItems
+
+              Column {
+                id: settingRow
+                required property var modelData
+                required property int index
+                width: settingsColumn.width
+                spacing: Style.space(6)
+                opacity: modelData.enabled ? 1 : 0.45
+
+                function keepVisible() {
+                  if (root.cursorIndex !== index) return
+                  var top = settingRow.y, bottom = settingRow.y + settingRow.height
+                  if (top < settingsView.contentY) settingsView.contentY = top
+                  else if (bottom > settingsView.contentY + settingsView.height) settingsView.contentY = bottom - settingsView.height
+                }
+                Connections {
+                  target: root
+                  function onCursorIndexChanged() { if (root.view === "settings") Qt.callLater(settingRow.keepVisible) }
+                }
+
+                PlainText {
+                  visible: settingRow.modelData.section !== ""
+                  topPadding: settingRow.index > 0 ? Style.space(8) : 0
+                  text: settingRow.modelData.section.toUpperCase()
+                  color: root.dim
+                  font.pixelSize: Style.font.bodySmall
+                  font.bold: true
+                  font.letterSpacing: 1.1
+                }
+
+                Toggle {
+                  visible: settingRow.modelData.kind === "toggle"
+                  width: parent.width
+                  label: settingRow.modelData.label
+                  description: settingRow.modelData.hint
+                  checked: settingRow.modelData.checked === true
+                  foreground: root.fg
+                  accent: Commons.Color.accent
+                  fontFamily: root.fontFamily
+                  hasCursor: root.cursorIndex === settingRow.index
+                  enabled: settingRow.modelData.enabled
+                  onHovered: function(h) { if (h) root.cursorIndex = settingRow.index }
+                  onClicked: root.activateSetting(settingRow.index, 0)
+                }
+
+                // A label with its choices as a row of chips.
+                BorderSurface {
+                  visible: settingRow.modelData.kind === "choice"
+                  width: parent.width
+                  implicitHeight: choiceColumn.implicitHeight + Style.spacing.rowPaddingX * 2
+                  radius: Style.cornerRadius
+                  readonly property bool hot: root.cursorIndex === settingRow.index || choiceHover.hovered
+                  color: Style.controlFill(false, hot, root.fg, Commons.Color.accent)
+                  borderSpec: Border.controlSpec(hot ? "hover-cursor" : "normal", root.fg, Commons.Color.accent)
+
+                  HoverHandler {
+                    id: choiceHover
+                    onHoveredChanged: if (hovered) root.cursorIndex = settingRow.index
+                  }
+
+                  Column {
+                    id: choiceColumn
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.margins: Style.spacing.rowPaddingX
+                    spacing: Style.space(6)
+
+                    PlainText {
+                      width: parent.width
+                      text: settingRow.modelData.label
+                      font.pixelSize: Style.font.subtitle
+                    }
+                    PlainText {
+                      width: parent.width
+                      text: settingRow.modelData.hint
+                      color: root.dim
+                      font.pixelSize: Style.font.caption
+                      wrapMode: Text.Wrap
+                      elide: Text.ElideNone
+                    }
+                    ButtonGroup {
+                      enabled: settingRow.modelData.enabled
+                      focusable: false
+                      foreground: root.fg
+                      accent: Commons.Color.accent
+                      fontFamily: root.fontFamily
+                      fontSize: Style.font.bodySmall
+                      options: (settingRow.modelData.choices || []).map(function(s) {
+                        return { value: String(s), label: root.choiceLabel(s) }
+                      })
+                      value: String(settingRow.modelData.value)
+                      onChanged: function(v) { root.setChoice(settingRow.modelData.key, Number(v)) }
+                    }
+                  }
+                }
+              }
+            }
+
+            // The browser can't be picked here: a profile path is free text.
+            PlainText {
+              width: parent.width
+              topPadding: Style.space(4)
+              text: strings.t("settings.browser").arg(root.browser) + "\n" + strings.t("settings.browserHint")
+              color: root.dim
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.Wrap
+              elide: Text.ElideNone
+            }
+          }
+        }
+
         // ---------- playlists / tracks ----------
         ListView {
           id: listView
           width: parent.width
-          height: Math.min(contentHeight, Style.space(360))
+          height: Math.min(contentHeight, Style.space(460))
           visible: count > 0
           spacing: Style.space(2)
           clip: true
@@ -1316,6 +2290,22 @@ Panel {
 
           model: root.rows
           currentIndex: root.cursorIndex
+          // Explore's rows carry their section (New releases, Trending …).
+          section.property: "section"
+          section.delegate: PlainText {
+            required property string section
+            width: ListView.view.width
+            height: section === "" ? 0 : implicitHeight
+            visible: section !== ""
+            topPadding: Style.space(10)
+            bottomPadding: Style.space(4)
+            leftPadding: Style.spacing.rowPaddingX
+            text: section.toUpperCase()
+            color: root.dim
+            font.pixelSize: Style.font.bodySmall
+            font.bold: true
+            font.letterSpacing: 1.1
+          }
           onCurrentIndexChanged: if (currentIndex >= 0) Qt.callLater(keepCurrentVisible)
           function keepCurrentVisible() {
             if (currentIndex >= 0 && currentIndex < count) positionViewAtIndex(currentIndex, ListView.Contain)
@@ -1325,13 +2315,16 @@ Panel {
             id: rowItem
             required property var modelData
             required property int index
-            readonly property bool isTrack: root.view === "tracks"
-            readonly property bool isNow: isTrack ? root.isPlayingTrack(index) : root.isPlayingPlaylist(modelData.id)
+            readonly property string kind: modelData.kind || (root.view === "tracks" ? "song" : "list")
+            readonly property bool isTrack: kind === "song"
+            readonly property bool isNow: root.view === "tracks" ? root.isPlayingTrack(index)
+              : isTrack ? (root.currentTrack !== null && root.currentTrack.id === modelData.id)
+              : kind === "list" && root.isPlayingPlaylist(modelData.id)
 
-            readonly property bool hasCover: isTrack && root.showCovers
+            readonly property bool hasCover: isTrack && root.showCovers && Model.trackCover(modelData, "small") !== ""
 
             width: ListView.view.width
-            height: Math.max(rowLabels.implicitHeight, leading.height) + Style.spacing.controlPaddingY * 2
+            height: Math.max(rowLabels.implicitHeight, leading.height) + Style.spacing.controlPaddingY * 2 + Style.space(8)
             foreground: root.fg
             hasCursor: root.cursorIndex === index
             current: isNow
@@ -1341,8 +2334,8 @@ Panel {
               anchors.left: parent.left
               anchors.leftMargin: Style.spacing.rowPaddingX
               anchors.verticalCenter: parent.verticalCenter
-              width: rowItem.hasCover ? Style.space(36) : Style.space(28)
-              height: rowItem.hasCover ? Style.space(36) : leadingGlyph.implicitHeight
+              width: rowItem.hasCover ? Style.space(46) : Style.space(36)
+              height: rowItem.hasCover ? Style.space(46) : Style.space(36)
 
               // Small cover: the 320px thumbnail, fetched only for rows the
               // list actually creates (the visible ones).
@@ -1351,7 +2344,7 @@ Panel {
                 anchors.fill: parent
                 visible: rowItem.hasCover && status === Image.Ready
                 crop: true
-                url: rowItem.hasCover ? Model.coverUrl(rowItem.modelData.id, "small") : ""
+                url: rowItem.hasCover ? Model.trackCover(rowItem.modelData, "small") : ""
               }
 
               Rectangle {
@@ -1368,15 +2361,18 @@ Panel {
                 elide: Text.ElideNone
                 visible: (!rowCover.visible || rowItem.isNow) && !(rowItem.isNow && root.loading)
                 color: rowCover.visible ? "white" : (rowItem.isNow ? root.fg : root.dim)
-                font.pixelSize: rowItem.isTrack && !rowItem.isNow ? Style.font.caption : Style.font.body
+                font.pixelSize: rowItem.isTrack && !rowItem.isNow && root.view === "tracks" ? Style.font.body : Style.font.title
                 text: {
                   if (rowItem.isNow) return root.paused ? Model.GLYPH.pause : Model.GLYPH.play
+                  if (rowItem.kind === "explore") return Model.GLYPH.explore
+                  if (rowItem.kind === "mood") return Model.GLYPH.mood
                   if (!rowItem.isTrack) {
                     if (rowItem.modelData.id === "LM") return Model.GLYPH.heart
+                    if (rowItem.modelData.id === "DOWNLOADS") return Model.GLYPH.download
                     if (rowItem.modelData.id === Model.SUPERMIX_ID) return Model.GLYPH.supermix
-                    return Model.GLYPH.playlist
+                    return root.view === "explore" ? Model.GLYPH.album : Model.GLYPH.playlist
                   }
-                  return Commons.I18n.formatNumber(rowItem.index + 1)
+                  return root.view === "tracks" ? Commons.I18n.formatNumber(rowItem.index + 1) : Model.GLYPH.music
                 }
               }
 
@@ -1398,15 +2394,16 @@ Panel {
 
               PlainText {
                 width: parent.width
-                text: rowItem.isTrack ? rowItem.modelData.title : root.playlistTitle(rowItem.modelData)
-                font.bold: rowItem.isNow
+                text: rowItem.kind === "list" && root.view !== "explore" ? root.playlistTitle(rowItem.modelData) : rowItem.modelData.title
+                font.bold: rowItem.isNow || rowItem.kind === "explore"
+                font.pixelSize: Style.font.subtitle
               }
               PlainText {
                 width: parent.width
                 visible: text !== ""
                 color: root.dim
-                font.pixelSize: Style.font.bodySmall
-                text: rowItem.isTrack ? rowItem.modelData.artist : ""
+                font.pixelSize: Style.font.body
+                text: rowItem.modelData.artist || ""
               }
             }
 
@@ -1417,10 +2414,11 @@ Panel {
               anchors.verticalCenter: parent.verticalCenter
               elide: Text.ElideNone
               color: root.dim
-              font.pixelSize: Style.font.bodySmall
+              font.pixelSize: Style.font.body
               text: {
                 var d = rowItem.modelData
-                if (rowItem.isTrack) return d.duration !== null ? Model.formatTime(d.duration, Commons.I18n.formatNumber) : ""
+                if (rowItem.kind === "explore" || rowItem.kind === "mood") return rowItem.kind === "explore" ? Model.GLYPH.forward : ""
+                if (rowItem.isTrack) return d.duration !== null && d.duration !== undefined ? Model.formatTime(d.duration, Commons.I18n.formatNumber) : ""
                 // Add-to view: a check where the song already is.
                 if (root.view === "addTo" && d.contains === true) return Model.GLYPH.check
                 return typeof d.count === "number" ? strings.tn("list.tracks", d.count).arg(Commons.I18n.formatNumber(d.count)) : ""
@@ -1484,6 +2482,13 @@ Panel {
                 enabled: !root.radioBusy
                 onClicked: root.startRadio(rowItem.modelData)
               }
+              PanelActionButton {
+                iconText: Model.GLYPH.download
+                tooltipText: strings.t("controls.download")
+                foreground: root.fg
+                fontFamily: root.fontFamily
+                onClicked: root.openDownload(rowItem.modelData)
+              }
             }
           }
         }
@@ -1496,6 +2501,13 @@ Panel {
           color: root.dim
           font.pixelSize: Style.font.bodySmall
           text: {
+            if (root.view === "settings" || root.view === "download") return ""
+            if (root.view === "explore") {
+              if (root.exploreError !== "") return strings.t("error.prefix").arg(root.exploreError)
+              if (root.rows.length > 0) return ""
+              if (root.exploreLoading) return strings.t(root.exploreMode === "search" ? "explore.searching" : "explore.loading")
+              return root.exploreMode === "search" ? strings.t("explore.noResults") : ""
+            }
             if (root.view === "addTo") {
               if (root.rows.length > 0) return ""
               if (root.addTargetsLoading) return strings.t("list.loadingTargets")
@@ -1511,6 +2523,7 @@ Panel {
             }
             if (root.rows.length > 0) return ""
             if (loading) return strings.t("list.loading")
+            if (root.view === "tracks" && root.openPlaylist && root.openPlaylist.id === "DOWNLOADS") return strings.t("list.emptyDownloads")
             return root.view === "tracks" ? strings.t("list.emptyTracks") : strings.t("list.emptyPlaylists")
           }
         }
@@ -1553,6 +2566,9 @@ Panel {
   // All text in this plugin is plain: titles come from YouTube.
   component PlainText: Text {
     textFormat: Text.PlainText
+    // Explicit, so a right-to-left title (Hebrew, Arabic) lines up with
+    // the others instead of flipping to the right edge.
+    horizontalAlignment: Text.AlignLeft
     color: root.fg
     font.family: root.fontFamily
     font.pixelSize: Style.font.body

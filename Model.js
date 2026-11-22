@@ -9,6 +9,8 @@ var MAX_TEXT = 300
 
 var PLAYLIST_ID_RE = /^[A-Za-z0-9_-]{2,80}$/
 var VIDEO_ID_RE = /^[A-Za-z0-9_-]{11}$/
+var MOOD_ID_RE = /^[A-Za-z0-9_%=-]{1,400}$/
+var DOWNLOAD_FORMATS = ["mp3", "m4a", "opus", "flac", "wav"]
 
 // Nerd Font glyphs (Material Design range).
 var GLYPH = {
@@ -35,7 +37,15 @@ var GLYPH = {
   heartOutline: String.fromCodePoint(0xF02D5),
   playlistAdd: String.fromCodePoint(0xF0412),
   check: String.fromCodePoint(0xF012C),
-  login: String.fromCodePoint(0xF0342)
+  login: String.fromCodePoint(0xF0342),
+  settings: String.fromCodePoint(0xF0493),
+  alert: String.fromCodePoint(0xF0026),
+  explore: String.fromCodePoint(0xF018B),
+  search: String.fromCodePoint(0xF0349),
+  download: String.fromCodePoint(0xF01DA),
+  folder: String.fromCodePoint(0xF024B),
+  mood: String.fromCodePoint(0xF0F72),
+  album: String.fromCodePoint(0xF0025)
 }
 
 // ---- library edits (like, add to playlist) ---------------------------------------
@@ -175,6 +185,15 @@ function repeatCommands(mode) {
 // the cover, and for a music video it shows the middle of the frame.
 // "large" = maxresdefault (1280x720, missing for some uploads: fall back to
 // "small"); "small" = mqdefault (320x180, always present, ~10 KB).
+// The cover to show for a track: a downloaded song's own saved cover, none
+// for a downloaded song saved without one, else YouTube's thumbnail.
+function trackCover(track, size) {
+  if (!track) return ""
+  if (track.cover) return "file://" + track.cover
+  if (track.path) return ""
+  return coverUrl(track.id, size)
+}
+
 function coverUrl(videoId, size) {
   var id = String(videoId || "")
   if (!VIDEO_ID_RE.test(id)) return ""
@@ -247,12 +266,16 @@ function sanitizeTracks(items) {
     var id = String(t.id || "")
     if (!VIDEO_ID_RE.test(id)) continue
     var d = Number(t.duration)
-    out.push({
+    var track = {
       id: id,
       title: cleanText(t.title) || id,
       artist: cleanText(t.artist),
       duration: isFinite(d) && d > 0 && d < 86400 ? Math.floor(d) : null
-    })
+    }
+    // A downloaded song: its file, and the cover saved with it (if any).
+    if (typeof t.path === "string" && t.path.charAt(0) === "/") track.path = t.path
+    if (typeof t.cover === "string" && /^\/[^\0]*\/covers\/[A-Za-z0-9_-]{11}\.jpg$/.test(t.cover)) track.cover = t.cover
+    out.push(track)
   }
   return out
 }
@@ -297,6 +320,17 @@ function parseLine(line) {
     return { type: "targets", videoId: String(msg.videoId), items: sanitizeTargets(msg.items) }
   case "signin":
     return { type: "signin", browser: cleanText(msg.browser, 60) }
+  case "explore":
+    return { type: "explore", stale: msg.stale === true, mood: MOOD_ID_RE.test(String(msg.mood || "")) ? String(msg.mood) : "",
+      sections: sanitizeSections(msg.sections) }
+  case "search":
+    return { type: "search", query: cleanText(msg.query, 150), items: sanitizeExploreItems(msg.items) }
+  case "downloading":
+    if (!VIDEO_ID_RE.test(String(msg.id || ""))) return null
+    return { type: "downloading", id: String(msg.id), stage: msg.stage === "convert" ? "convert" : "fetch" }
+  case "downloaded":
+    if (!VIDEO_ID_RE.test(String(msg.id || "")) || typeof msg.path !== "string" || msg.path.charAt(0) !== "/") return null
+    return { type: "downloaded", id: String(msg.id), path: cleanText(msg.path, 1000), folder: cleanText(msg.folder, 1000) }
   case "cookies":
     if (["idle", "applied"].indexOf(msg.state) < 0) return null
     return { type: "cookies", state: msg.state }
@@ -319,6 +353,105 @@ function parseSession(text) {
     autoplay: data.autoplay === true,
     tracks: sanitizeTracks(data.tracks)
   }
+}
+
+// A seconds setting from shell.json: a number within [lo, hi], or `fallback`.
+function seconds(value, lo, hi, fallback) {
+  var n = Number(value)
+  if (value === null || value === "" || !isFinite(n)) return fallback
+  return Math.max(lo, Math.min(hi, n))
+}
+
+// The option after (delta 1) or before (-1) `value` in `options`, stopping
+// at the ends. An unknown value starts from the first option.
+function stepChoice(options, value, delta) {
+  var i = options.indexOf(value)
+  if (i < 0) return options[0]
+  return options[Math.max(0, Math.min(options.length - 1, i + delta))]
+}
+
+// A report from the player's script, if it is recent: observing a
+// property also delivers its current (old) value on every reconnect.
+function recentReport(data, nowSeconds) {
+  if (!data || typeof data !== "object") return null
+  var at = Number(data.at)
+  if (!isFinite(at) || Math.abs(nowSeconds - at) > 20) return null
+  return data
+}
+
+// A song no YouTube source could play, reported by the player's script:
+// worth offering backup mirrors when they are off and could help (not for
+// members-only, private or removed songs). Returns { id, reason } or null.
+function mirrorOffer(report, mirrorsOn) {
+  if (!report || mirrorsOn || report.hopeless === true || report.mirrors !== "off") return null
+  var id = String(report.id || "")
+  if (!VIDEO_ID_RE.test(id)) return null
+  var reason = cleanText(report.reason, 300).replace(/^\[[^\]]*\] [A-Za-z0-9_-]{11}: /, "")
+  var cut = reason.search(/\.\s/)
+  if (cut > 0) reason = reason.slice(0, cut + 1)
+  return { id: id, reason: truncate(reason, 160) }
+}
+
+// The helper's update-check line: { state, version, current, notes } or null.
+function parseUpdate(line) {
+  var msg
+  try { msg = JSON.parse(String(line || "")) } catch (e) { return null }
+  if (!msg || msg.type !== "update") return null
+  var state = ["available", "current", "unmanaged", "error"].indexOf(msg.state) >= 0 ? msg.state : null
+  if (!state) return null
+  return {
+    state: state,
+    version: cleanText(msg.version, 20),
+    current: cleanText(msg.current, 20),
+    notes: Array.isArray(msg.notes) ? msg.notes.slice(0, 6).map(function(n) { return cleanText(n, 120) }) : []
+  }
+}
+
+// Explore entries from the helper: songs play, lists open as playlists,
+// moods open their playlists. Anything malformed is dropped.
+function sanitizeExploreItems(items) {
+  var out = []
+  if (!Array.isArray(items)) return out
+  for (var i = 0; i < items.length && out.length < 60; i++) {
+    var it = items[i]
+    if (!it || typeof it !== "object") continue
+    var id = String(it.id || "")
+    var ok = it.kind === "song" ? VIDEO_ID_RE.test(id) : it.kind === "list" ? PLAYLIST_ID_RE.test(id)
+      : it.kind === "mood" ? MOOD_ID_RE.test(id) : false
+    if (!ok) continue
+    out.push({
+      kind: it.kind, id: id, title: cleanText(it.title) || id,
+      artist: cleanText(it.artist || it.subtitle, 120),
+      duration: typeof it.duration === "number" && it.duration > 0 && it.duration < 86400 ? it.duration : null
+    })
+  }
+  return out
+}
+
+function sanitizeSections(sections) {
+  var out = []
+  if (!Array.isArray(sections)) return out
+  for (var i = 0; i < sections.length && out.length < 12; i++) {
+    var s = sections[i]
+    if (!s || typeof s !== "object") continue
+    var items = sanitizeExploreItems(s.items)
+    if (items.length > 0) out.push({ title: cleanText(s.title, 80), items: items })
+  }
+  return out
+}
+
+// Sections as one list of rows, each carrying its section's title (the
+// list view draws the headers).
+function exploreRows(sections) {
+  var rows = []
+  for (var i = 0; i < sections.length; i++) {
+    for (var j = 0; j < sections[i].items.length; j++) {
+      var it = sections[i].items[j]
+      rows.push({ kind: it.kind, id: it.id, title: it.title, artist: it.artist, duration: it.duration,
+        section: sections[i].title })
+    }
+  }
+  return rows
 }
 
 function clampIndex(index, delta, count) {
@@ -362,5 +495,8 @@ function mpvCommand(args, requestId) {
 }
 
 // Properties the widget follows; the index is the observe id.
-var OBSERVED = ["pause", "media-title", "duration", "playlist-pos", "playlist-count", "volume", "idle-active",
+// user-data/ytmusic/*: set by the player's own script (mpv/ytmusic.lua)
+// when a song came from a backup source, and when songs keep failing.
+var OBSERVED = ["user-data/ytmusic/fallback", "user-data/ytmusic/health", "user-data/ytmusic/unplayable",
+  "pause", "media-title", "duration", "playlist-pos", "playlist-count", "volume", "idle-active",
   "loop-file", "loop-playlist", "seeking", "paused-for-cache"]

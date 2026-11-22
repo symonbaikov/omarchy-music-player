@@ -8,7 +8,7 @@ const source = readFileSync(new URL("../Model.js", import.meta.url), "utf8").rep
 const M = {}
 // QML's V4 engine lacks some newer built-ins; remove them so tests catch their use.
 const V4_MISSING = "delete String.prototype.trimEnd; delete String.prototype.trimStart; delete Array.prototype.at; delete Object.hasOwn;\n"
-vm.runInNewContext(V4_MISSING + source + "\n;Object.assign(__out, { cleanText, plain, truncate, formatTime, parseLine, parseSession, clampIndex, mpvCommand, GLYPH, normalizeRepeat, nextRepeat, repeatFromMpv, repeatCommands, coverUrl, OBSERVED, SUPERMIX_ID, isMix, radioListId, autoplaySeed, isLoading, addTargets, likedSet, withLiked, playbackFailure })", { __out: M })
+vm.runInNewContext(V4_MISSING + source + "\n;Object.assign(__out, { cleanText, plain, truncate, formatTime, parseLine, parseSession, clampIndex, mpvCommand, GLYPH, normalizeRepeat, nextRepeat, repeatFromMpv, repeatCommands, coverUrl, OBSERVED, SUPERMIX_ID, isMix, radioListId, autoplaySeed, isLoading, addTargets, likedSet, withLiked, playbackFailure, seconds, stepChoice, recentReport, mirrorOffer, parseUpdate, exploreRows, DOWNLOAD_FORMATS, trackCover })", { __out: M })
 
 const MARKUP = '<img src="https://example.invalid/tracker">Song'
 
@@ -261,4 +261,88 @@ test("parseLine accepts the cookies sync reply", () => {
   const m = M.parseLine('{"type":"cookies","state":"applied"}')
   assert.deepEqual([m.type, m.state], ["cookies", "applied"])
   assert.equal(M.parseLine('{"type":"cookies","state":"bogus"}'), null)
+})
+
+test("seconds() reads a setting within bounds", () => {
+  assert.equal(M.seconds(3, 0, 30, 0), 3)
+  assert.equal(M.seconds("5", 0, 30, 0), 5)
+  assert.equal(M.seconds(99, 0, 30, 0), 30)
+  assert.equal(M.seconds("x", 2, 16, 6), 6)
+  assert.equal(M.seconds(null, 2, 16, 6), 6)
+  assert.equal(M.seconds("", 0, 30, 0), 0)
+})
+
+test("stepChoice moves within the options and stops at the ends", () => {
+  const o = [0, 1, 2, 3, 5, 8]
+  assert.equal(M.stepChoice(o, 2, 1), 3)
+  assert.equal(M.stepChoice(o, 2, -1), 1)
+  assert.equal(M.stepChoice(o, 8, 1), 8)
+  assert.equal(M.stepChoice(o, 0, -1), 0)
+  assert.equal(M.stepChoice(o, 4, 1), 0)
+})
+
+test("recentReport ignores old reports replayed on reconnect", () => {
+  assert.equal(M.recentReport({ id: "x", at: 1000 }, 1005).id, "x")
+  assert.equal(M.recentReport({ id: "x", at: 1000 }, 1100), null)
+  assert.equal(M.recentReport({ id: "x" }, 1000), null)
+  assert.equal(M.recentReport(null, 1000), null)
+})
+
+test("mirrorOffer only when mirrors are off and could help", () => {
+  const report = { id: "dQw4w9WgXcQ", reason: "[youtube] dQw4w9WgXcQ: Sign in to confirm you're not a bot. Use --cookies", mirrors: "off", hopeless: false }
+  const o = M.mirrorOffer(report, false)
+  assert.equal(o.id, "dQw4w9WgXcQ")
+  assert.equal(o.reason, "Sign in to confirm you're not a bot.")
+  assert.equal(M.mirrorOffer(report, true), null)                                   // already on
+  assert.equal(M.mirrorOffer({ ...report, mirrors: "tried" }, false), null)         // tried, didn't help
+  assert.equal(M.mirrorOffer({ ...report, hopeless: true, mirrors: "skipped" }, false), null)
+  assert.equal(M.mirrorOffer({ ...report, id: "bad" }, false), null)
+  assert.equal(M.mirrorOffer(null, false), null)
+})
+
+test("parseUpdate reads the helper's update check", () => {
+  const u = M.parseUpdate('{"type":"update","state":"available","version":"0.5.1","current":"0.5.0","notes":["Fix playback\\nafter YouTube change"]}')
+  assert.deepEqual([u.state, u.version, u.current, u.notes.length], ["available", "0.5.1", "0.5.0", 1])
+  assert.ok(!u.notes[0].includes("\n"))
+  assert.equal(M.parseUpdate('{"type":"update","state":"weird"}'), null)
+  assert.equal(M.parseUpdate('{"type":"other"}'), null)
+  assert.equal(M.parseUpdate("nope"), null)
+})
+
+test("explore lines are sanitized and flatten into sectioned rows", () => {
+  const line = JSON.stringify({ type: "explore", stale: false, sections: [
+    { title: "Trending", items: [
+      { kind: "song", id: "dQw4w9WgXcQ", title: "Song", artist: "Artist", duration: 213 },
+      { kind: "song", id: "not-a-video-id", title: "Bad" },
+      { kind: "list", id: "OLAK5uy_abc", title: "<b>Album</b>\u0007" },
+      { kind: "mood", id: "ggMPOg1uX1JOQWZFeDBy", title: "Chill" },
+      { kind: "artist", id: "UCxyz", title: "Unknown kind" } ] },
+    { title: "Empty", items: [] } ] })
+  const msg = M.parseLine(line)
+  assert.equal(msg.sections.length, 1)
+  const rows = M.exploreRows(msg.sections)
+  assert.deepEqual(Array.from(rows, r => r.kind), ["song", "list", "mood"])
+  assert.equal(rows[0].section, "Trending")
+  assert.ok(!/[\u0000-\u001f]/.test(rows[1].title))
+  const search = M.parseLine(JSON.stringify({ type: "search", query: "q", items: [{ kind: "song", id: "dQw4w9WgXcQ", title: "S" }] }))
+  assert.equal(search.items.length, 1)
+})
+
+test("download lines need a valid id and an absolute path", () => {
+  assert.equal(M.parseLine('{"type":"downloaded","id":"dQw4w9WgXcQ","path":"/home/u/Music/a.mp3","folder":"/home/u/Music"}').path, "/home/u/Music/a.mp3")
+  assert.equal(M.parseLine('{"type":"downloaded","id":"dQw4w9WgXcQ","path":"relative.mp3"}'), null)
+  assert.equal(M.parseLine('{"type":"downloading","id":"dQw4w9WgXcQ","stage":"convert"}').stage, "convert")
+  assert.deepEqual(Array.from(M.DOWNLOAD_FORMATS), ["mp3", "m4a", "opus", "flac", "wav"])
+})
+
+test("downloaded songs keep their file and their own cover", () => {
+  const msg = M.parseLine(JSON.stringify({ type: "tracks", playlistId: "DOWNLOADS", items: [
+    { id: "dQw4w9WgXcQ", title: "A", path: "/home/u/Music/A.mp3", cover: "/home/u/.cache/x/covers/dQw4w9WgXcQ.jpg" },
+    { id: "kJQP7kiw5Fk", title: "B", path: "/home/u/Music/B.opus", cover: null },
+    { id: "kJQP7kiw5Fk", title: "C", path: "relative.mp3", cover: "/etc/passwd" } ] }))
+  const [a, b, c] = msg.items
+  assert.equal(M.trackCover(a, "small"), "file:///home/u/.cache/x/covers/dQw4w9WgXcQ.jpg")
+  assert.equal(M.trackCover(b, "small"), "")                       // saved without a cover
+  assert.equal(c.path, undefined)
+  assert.ok(M.trackCover(c, "small").startsWith("https://i.ytimg.com/vi/kJQP7kiw5Fk/"))
 })

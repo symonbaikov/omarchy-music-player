@@ -9,16 +9,24 @@ cookies from disk to see the private library.
 Commands (every result is one JSON object per line on stdout):
   playlists [--browser B] [--max-age S]
   tracks <playlist-id> [--browser B] [--max-age S]
-  play <playlist-id> [--index N] [--video-id ID] [--shuffle 0|1] [--browser B]
-       [--playback-cookies 0|1] [--volume V] [--repeat off|all|one]
-  radio <video-id> [--mode replace|keep|append] [--browser B] [--title T]
-        [--playback-cookies 0|1] [--volume V] [--repeat off|all|one]
+  play <playlist-id> [--index N] [--video-id ID] [--shuffle 0|1] [PLAYER]
+  radio <video-id> [--mode replace|keep|append] [--title T] [PLAYER]
+    PLAYER: [--browser B] [--playback-cookies 0|1] [--volume V]
+            [--repeat off|all|one] [--fade-in S] [--fade-out S]
+            [--transition off|peak] [--xfade S]
   like <video-id> [--remove 1] [--browser B] [--title T] [--artist A] [--duration S]
   add <playlist-id> <video-id> [--browser B]
   liked
   targets <video-id> [--browser B]
   signin [--browser B]
   cookies [--browser B] [--playback-cookies 0|1]
+  mixprep <current-entry> <next-entry> [--xfade S] [--min-exit S] [--cookies-spec SPEC]
+  fallback <video-id> [--cookies-spec SPEC]
+  mirrors [--check] [--refresh]
+  update-check [--max-age S]
+  explore [--max-age S] | mood <id> | search <query>
+  download <video-id> [--dir D] [--format mp3|m4a|opus|flac|wav] [--cover 0|1] [--title T] [--artist A] [PLAYER]
+  tracks DOWNLOADS   the downloaded songs (they play from their files)
   stop
   paths
 
@@ -37,15 +45,33 @@ reads its yt-dlp options again for every track it opens, so turning
 playback cookies off (or choosing browser none) takes effect from the next
 track on. If the change can't be confirmed, the player is stopped.
 
+`mixprep` is called by mpv itself (mpv/ytmusic.lua) in "Peak mix" mode. It
+downloads the audio of the playing and the next song, finds each one's
+climax (YouTube's "most replayed" heatmap where there is one, and the
+audio's loudness), and renders the next song as one local file that starts
+with the end of the playing song's climax crossfading into the build-up of
+the next one, so its climax lands as the crossfade ends. It prints where
+the playing song has to stop for that file to take over seamlessly.
+
+`fallback` is also called by mpv: when a song's usual stream can't be
+opened, it plays the cached audio if there is one, or downloads the song
+through YouTube's other clients (mobile web, TV, Safari, iOS), since a
+change on YouTube's side usually breaks only some of them. With the
+backupMirrors setting on, it then tries independent mirrors (Invidious,
+Piped); `mirrors --check` shows which of them answer.
+
 `like` and `add` write to the account (like a song, add it to one of your
 playlists) through YouTube Music's own web API, signed with the browser's
 cookies exactly as music.youtube.com does. yt-dlp is read-only, so these
 two are the only requests the helper makes itself.
 """
 
+import array
 import fcntl
 import hashlib
 import json
+import math
+import operator
 import os
 import random
 import re
@@ -54,6 +80,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 PLUGIN_ID = "io.github.symonbaikov.ytmusic-mpv"
@@ -67,6 +94,7 @@ QUEUE_PATH = os.path.join(RUNTIME_DIR, "queue.m3u")
 PID_PATH = os.path.join(RUNTIME_DIR, "mpv.pid")
 LOCK_PATH = os.path.join(RUNTIME_DIR, "session.lock")
 MPV_LOG = os.path.join(CACHE_DIR, "mpv.log")
+MPV_SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "mpv", "ytmusic.lua")
 # YouTube Music API errors (endpoint, HTTP code, YouTube's own status and
 # message). Never headers or cookies.
 API_LOG = os.path.join(CACHE_DIR, "api.log")
@@ -384,6 +412,9 @@ def cmd_tracks(args):
     if not args:
         fail("tracks needs a playlist id")
     playlist_id = check_playlist_id(args[0])
+    if playlist_id == DOWNLOADS_ID:
+        emit({"type": "tracks", "stale": False, "playlistId": DOWNLOADS_ID, "title": "Downloads", "items": downloaded_tracks()})
+        return
     browser = check_browser(opt(args, "--browser", "none"))
     max_age = int(opt(args, "--max-age", "3600"))
     cache = tracks_cache_path(playlist_id, browser)
@@ -487,26 +518,41 @@ def player_options(args):
     repeat = opt(args, "--repeat", "off")
     if repeat not in ("off", "all", "one"):
         fail("--repeat must be off, all or one")
+    transition = opt(args, "--transition", "off")
+    if transition not in ("off", "peak"):
+        fail("--transition must be off or peak")
     return {
         "browser": browser,
         "playback_cookies": opt(args, "--playback-cookies", "0") == "1",
         "volume": min(100, max(0, int(opt(args, "--volume", "60")))),
         "repeat": repeat,
+        "fade_in": min(30.0, max(0.0, float(opt(args, "--fade-in", "0")))),
+        "fade_out": min(30.0, max(0.0, float(opt(args, "--fade-out", "0")))),
+        "transition": transition,
+        "xfade": min(16.0, max(2.0, float(opt(args, "--xfade", "6")))),
     }
 
 
-def load_tracks(playlist_id, browser, max_age=None):
+def load_tracks(playlist_id, browser, max_age=None, raise_errors=False):
     """Tracks for a list from the cache (any age when max_age is None),
-    fetching and caching them when missing or too old."""
+    fetching and caching them when missing or too old. If the fetch fails,
+    an old cached copy is better than nothing."""
+    if playlist_id == DOWNLOADS_ID:
+        return {"title": "Downloads", "items": downloaded_tracks()}
     path = tracks_cache_path(playlist_id, browser)
-    cached = read_json(path)
-    if isinstance(cached, dict) and cached.get("items"):
-        age = time.time() - float(cached.get("fetchedAt") or 0)
+    old = read_json(path)
+    has_old = isinstance(old, dict) and bool(old.get("items"))
+    if has_old:
+        age = time.time() - float(old.get("fetchedAt") or 0)
         if max_age is None or age <= max_age:
-            return cached
+            return old
     try:
         cached = fetch_tracks(playlist_id, browser)
     except RuntimeError as exc:
+        if has_old:
+            return old
+        if raise_errors:
+            raise
         fail(str(exc))
     cached["fetchedAt"] = int(time.time())
     write_json_atomic(path, cached)
@@ -518,6 +564,10 @@ def playable(items):
 
 
 def track_url(track):
+    """What mpv opens: a downloaded song's own file, else its YouTube page."""
+    path = track.get("path")
+    if isinstance(path, str) and os.path.isabs(path) and os.path.isfile(path):
+        return path
     return f"https://music.youtube.com/watch?v={track['id']}"
 
 
@@ -598,7 +648,17 @@ def start_player(playlist_id, title, order, start, options, autoplay=False):
         # Repeat one loops the current track; repeat all wraps the queue.
         f"--loop-file={'inf' if repeat == 'one' else 'no'}",
         f"--loop-playlist={'inf' if repeat == 'all' else 'no'}",
-        "--msg-level=all=warn", f"--log-file={MPV_LOG}",
+        "--msg-level=all=warn,ytmusic=info", f"--log-file={MPV_LOG}",
+        # Songs join without a gap: the peak mix relies on it.
+        "--gapless-audio=yes",
+        # Fades and the peak mix (see mpv/ytmusic.lua).
+        f"--script={MPV_SCRIPT}",
+        f"--script-opts-append=ytmusic-helper={os.path.realpath(__file__)}",
+        f"--script-opts-append=ytmusic-python={sys.executable or 'python3'}",
+        f"--script-opts-append=ytmusic-fade_in={options['fade_in']:g}",
+        f"--script-opts-append=ytmusic-fade_out={options['fade_out']:g}",
+        f"--script-opts-append=ytmusic-transition={options['transition']}",
+        f"--script-opts-append=ytmusic-xfade={options['xfade']:g}",
     ]
     spec = playback_cookie_spec(options)
     if spec:
@@ -658,6 +718,20 @@ def player_running():
     return our_mpv_pid() is not None and os.path.exists(SOCKET_PATH)
 
 
+def backup_tracks(browser, exclude):
+    """Songs to keep autoplay going without YouTube's recommendations: the
+    saved Liked Music and My Supermix lists, minus what's queued, shuffled."""
+    seen, out = set(exclude), []
+    for list_id in (LIKED_MUSIC["id"], SUPERMIX["id"]):
+        cached = read_json(tracks_cache_path(list_id, browser))
+        for t in playable(cached.get("items") if isinstance(cached, dict) else []):
+            if t["id"] not in seen:
+                seen.add(t["id"])
+                out.append(t)
+    random.shuffle(out)
+    return out
+
+
 def cmd_radio(args):
     if not args or not VIDEO_ID_RE.match(args[0]):
         fail("radio needs a video id")
@@ -682,7 +756,14 @@ def cmd_radio(args):
                 emit({"type": "radio", "mode": mode, "added": 0})
                 return
 
-        mix = playable(load_tracks(list_id, options["browser"], max_age=3600).get("items"))
+        try:
+            mix = playable(load_tracks(list_id, options["browser"], max_age=3600, raise_errors=True).get("items"))
+        except RuntimeError as exc:
+            # Autoplay keeps the music going even when YouTube's
+            # recommendations can't be read: songs from the saved lists.
+            if mode != "append":
+                fail(str(exc))
+            mix = backup_tracks(options["browser"], {t["id"] for t in queue})
         if not mix:
             fail("YouTube Music has no radio for this song")
         title = clean_text(opt(args, "--title", "")) or "Radio"
@@ -725,6 +806,577 @@ def cmd_radio(args):
             write_json_atomic(SESSION_PATH, session)
             mpv_batch([["loadfile", track_url(t), "append"] for t in new])
         emit({"type": "radio", "mode": mode, "added": len(new)})
+
+
+# ---- peak mix: climax-to-climax transitions -----------------------------------
+
+MIX_DIR = os.path.join(CACHE_DIR, "mix")
+MIX_FPS = 10              # loudness frames per second
+MIX_WINDOW = 20.0         # seconds a climax is scored over
+MIX_MAX_GAIN = 8.0        # dB a song's level may be changed to match the last
+MIX_KEEP_SEGMENTS = 4     # rendered songs kept (each is the rest of a song)
+MIX_KEEP_AUDIO = 12       # downloaded songs kept
+MIX_MAX_DURATION = 15 * 60
+SEGMENT_RE = re.compile(r"^seg-([A-Za-z0-9_-]{11})-([A-Za-z0-9_-]{11})\.flac$")
+WATCH_RE = re.compile(r"^https://music\.youtube\.com/watch\?v=([A-Za-z0-9_-]{11})$")
+
+
+def loudness_envelope(path):
+    """Loudness in dB per 1/MIX_FPS s, from the song decoded to 8 kHz mono."""
+    try:
+        proc = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-i", path, "-ac", "1", "-ar", "8000",
+                               "-f", "s16le", "-"], capture_output=True, timeout=180, stdin=subprocess.DEVNULL)
+    except FileNotFoundError:
+        raise RuntimeError("ffmpeg is not installed")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("ffmpeg timed out")
+    if proc.returncode != 0:
+        raise RuntimeError("ffmpeg couldn't decode the song")
+    samples = array.array("h")
+    samples.frombytes(proc.stdout[: len(proc.stdout) // 2 * 2])
+    if sys.byteorder != "little":
+        samples.byteswap()
+    n = 8000 // MIX_FPS
+    env = []
+    for i in range(0, len(samples) - n + 1, n):
+        chunk = samples[i:i + n]
+        env.append(10 * math.log10(sum(map(operator.mul, chunk, chunk)) / n + 1.0) - 90.3)
+    return env
+
+
+def moving_average(values, width):
+    prefix = [0.0]
+    for v in values:
+        prefix.append(prefix[-1] + v)
+    half = width // 2
+    out = []
+    for i in range(len(values)):
+        a, b = max(0, i - half), min(len(values), i + half + 1)
+        out.append((prefix[b] - prefix[a]) / (b - a))
+    return out
+
+
+def find_climax(env, heatmap, xfade):
+    """The song's climax from its loudness envelope and, when YouTube has
+    one, its "most replayed" heatmap. Returns {entry, exit, level} in
+    seconds and dB, or None for a song too short to mix:
+      entry: where the climax hits (the sharpest rise in loudness near the
+             best-scoring window), so the next song can land on it;
+      exit:  where to start leaving: shortly before the energy falls away
+             after the climax, 30-70 s after the entry;
+      level: the climax's mean loudness, to match songs' levels."""
+    fps, n = MIX_FPS, len(env)
+    duration = n / fps
+    w = int(MIX_WINDOW * fps)
+    lo = int(max(15.0, 0.12 * duration, xfade + 2) * fps)
+    hi = n - int((MIX_WINDOW + xfade + 2) * fps)
+    if hi <= lo:
+        return None
+    prefix = [0.0]
+    for v in env:
+        prefix.append(prefix[-1] + v)
+    starts = list(range(lo, hi, max(1, fps // 2)))
+    loud = [(prefix[s + w] - prefix[s]) / w for s in starts]
+
+    def zscore(xs):
+        mean = sum(xs) / len(xs)
+        sd = math.sqrt(sum((x - mean) ** 2 for x in xs) / len(xs)) or 1.0
+        return [(x - mean) / sd for x in xs]
+
+    score = zscore(loud)
+    bins = heatmap_bins(heatmap, duration)
+    if bins:
+        heat = []
+        for s in starts:
+            t0, t1 = s / fps, (s + w) / fps
+            heat.append(sum(v for a, b, v in bins if a < t1 and b > t0))
+        if max(heat) > min(heat):
+            score = [a + b for a, b in zip(score, zscore(heat))]
+    best = starts[max(range(len(starts)), key=lambda i: score[i])]
+
+    short = moving_average(env, fps)
+    rise_lo, rise_hi = max(lo, best - 6 * fps), min(hi, best + 4 * fps)
+    entry = max(range(rise_lo, rise_hi + 1), key=lambda x: short[x] - short[max(0, x - 2 * fps)])
+    level = (prefix[entry + w] - prefix[entry]) / w
+
+    long = moving_average(env, 8 * fps)
+    cap = n - int((xfade + 1) * fps)
+    exit_ = min(entry + 60 * fps, cap)
+    for x in range(entry + 32 * fps, min(entry + 72 * fps, cap)):
+        if long[x] < level - 3.0:
+            exit_ = x - 2 * fps
+            break
+    if exit_ <= entry + 10 * fps:
+        return None
+    return {"entry": round(entry / fps, 2), "exit": round(exit_ / fps, 2), "level": round(level, 2)}
+
+
+def heatmap_bins(heatmap, duration):
+    """YouTube's "most replayed" bins as (start, end, value), without the
+    start of the song (everyone starts at 0:00) and its very end."""
+    bins = []
+    for b in heatmap if isinstance(heatmap, list) else []:
+        try:
+            a, z, v = float(b["start_time"]), float(b["end_time"]), float(b["value"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if 0.1 * duration <= a and z <= 0.97 * duration and z > a and 0 <= v <= 1:
+            bins.append((a, z, v))
+    return bins[:1000]
+
+
+def mix_entry(name):
+    """(video id, segment sidecar or None) for an mpv playlist entry: a
+    music.youtube.com watch URL, or a segment this helper rendered."""
+    m = WATCH_RE.match(name or "")
+    if m:
+        return m.group(1), None
+    path = os.path.realpath(name or "")
+    if os.path.dirname(path) != os.path.realpath(MIX_DIR):
+        return None, None
+    m = SEGMENT_RE.match(os.path.basename(path))
+    if not m:
+        return None, None
+    side = read_json(path[:-5] + ".json")
+    if not isinstance(side, dict) or side.get("id") != m.group(2):
+        return None, None
+    return m.group(2), side
+
+
+def mix_cookie_opts(spec):
+    """yt-dlp options for the cookies the player itself uses: mpv's
+    ytdl-raw-options, which follow the playback-cookies setting."""
+    if not spec:
+        return {}
+    from yt_dlp import parse_options
+    try:
+        parsed = parse_options(["--cookies-from-browser", spec])
+    except SystemExit:
+        fail("Bad cookie setting")
+    return {"cookiesfrombrowser": parsed.ydl_opts.get("cookiesfrombrowser")}
+
+
+# YouTube serves streams to several "clients" (the web site, TV apps,
+# phones). When it changes something, usually only some of them break, so
+# a song that won't come through one is tried through the others. None means
+# yt-dlp's own default choice.
+AUDIO_CLIENTS = [None, "mweb", "tv", "web_safari", "ios"]
+AUDIO_DEADLINE = 60
+# Reasons no other client gets past: about the song itself, not the stream.
+CONTENT_ERROR_RE = re.compile(
+    r"members|private video|removed|copyright|not available in your country|confirm your age|"
+    r"age[- ]restricted|terminated|account associated", re.I)
+
+
+def audio_meta(video_id):
+    """The cached download's metadata, or None when it isn't cached."""
+    meta = read_json(os.path.join(MIX_DIR, f"{video_id}.json"))
+    audio = meta.get("audio") if isinstance(meta, dict) else None
+    if audio and re.match(r"^audio-[A-Za-z0-9_-]{11}\.[a-z0-9]{2,5}$", audio) and os.path.exists(os.path.join(MIX_DIR, audio)):
+        return meta
+    return None
+
+
+def download_audio(video_id, cookie_opts, clients=None, deadline=AUDIO_DEADLINE):
+    """Download a song's audio into the cache, trying YouTube's clients in
+    turn. Returns (metadata, the client that worked); raises RuntimeError
+    with YouTube's last reason when none did."""
+    from yt_dlp import YoutubeDL
+    os.makedirs(MIX_DIR, mode=0o700, exist_ok=True)
+    started = time.time()
+    last = "no client worked"
+    for client in clients or AUDIO_CLIENTS:
+        opts = {"format": "bestaudio/best", "outtmpl": os.path.join(MIX_DIR, "audio-%(id)s.%(ext)s"),
+                "quiet": True, "no_warnings": True, "noprogress": True, "logger": QuietLogger(),
+                "noplaylist": True, "socket_timeout": 20, "max_filesize": 200 * 1024 * 1024,
+                "match_filter": lambda info, *_, **__: None if (info.get("duration") or 0) <= MIX_MAX_DURATION else "too long",
+                **cookie_opts}
+        if client:
+            opts["extractor_args"] = {"youtube": {"player_client": [client]}}
+        try:
+            with YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(track_url({"id": video_id}), download=True)
+        except Exception as exc:
+            last = str(exc).replace("ERROR: ", "", 1)[:300]
+            if CONTENT_ERROR_RE.search(last) or time.time() - started > deadline:
+                break
+            continue
+        path = None
+        for d in (info or {}).get("requested_downloads") or []:
+            path = d.get("filepath")
+        if path and os.path.dirname(os.path.realpath(path)) == os.path.realpath(MIX_DIR) and os.path.exists(path):
+            meta = {"audio": os.path.basename(path), "heatmap": (info.get("heatmap") or [])[:1000],
+                    "usedAt": int(time.time())}
+            write_json_atomic(os.path.join(MIX_DIR, f"{video_id}.json"), meta)
+            return meta, client or "default"
+        last = "the download didn't arrive"
+    raise RuntimeError(last)
+
+
+def mix_track(video_id, xfade, cookie_opts):
+    """Download a song's audio (cached) and analyze it (cached)."""
+    meta_path = os.path.join(MIX_DIR, f"{video_id}.json")
+    meta = audio_meta(video_id)
+    if meta is None:
+        meta, _ = download_audio(video_id, cookie_opts)
+    if not isinstance(meta.get("climax"), dict) or meta.get("xfade") != xfade:
+        env = loudness_envelope(os.path.join(MIX_DIR, meta["audio"]))
+        meta["climax"] = find_climax(env, meta.get("heatmap"), xfade)
+        meta["duration"] = round(len(env) / MIX_FPS, 2)
+        meta["xfade"] = xfade
+    meta["usedAt"] = int(time.time())
+    write_json_atomic(meta_path, meta)
+    return meta
+
+
+def render_segment(a_meta, a_gain, b_id, b_meta, b_gain, xfade, out_path):
+    """The next song from its build-up to its end, opening with the playing
+    song's climax exit crossfading into it (equal power), each at its gain.
+    48 kHz stereo FLAC, so mpv joins it to the playing song without a gap."""
+    a_exit, b_start = a_meta["climax"]["exit"], b_meta["climax"]["entry"] - xfade
+    fmt = "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo"
+    graph = (f"[0:a]{fmt},atrim=start={a_exit:.3f}:end={a_exit + xfade:.3f},asetpts=PTS-STARTPTS,"
+             f"volume={a_gain:.2f}dB[a];"
+             f"[1:a]{fmt},atrim=start={b_start:.3f},asetpts=PTS-STARTPTS,volume={b_gain:.2f}dB[b];"
+             # acrossfade emits the whole overlap as one frame; FLAC wants small ones.
+             f"[a][b]acrossfade=d={xfade:.3f}:c1=qsin:c2=qsin,asetnsamples=n=4096:p=0,aformat=sample_fmts=s16[out]")
+    tmp = out_path + ".part"
+    cmd = ["ffmpeg", "-nostdin", "-v", "error", "-y",
+           "-i", os.path.join(MIX_DIR, a_meta["audio"]), "-i", os.path.join(MIX_DIR, b_meta["audio"]),
+           "-filter_complex", graph, "-map", "[out]", "-c:a", "flac", "-f", "flac", tmp]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, timeout=180, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("ffmpeg timed out")
+    if proc.returncode != 0:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise RuntimeError("ffmpeg couldn't render the transition")
+    os.replace(tmp, out_path)
+    write_json_atomic(out_path[:-5] + ".json", {"id": b_id, "offset": round(b_start, 3), "gain": round(b_gain, 2)})
+
+
+def prune_mix():
+    """Keep the cache small: the newest few rendered songs and downloads."""
+    try:
+        names = os.listdir(MIX_DIR)
+    except OSError:
+        return
+    def newest_first(paths):
+        return sorted(paths, key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0, reverse=True)
+    segs = newest_first([os.path.join(MIX_DIR, n) for n in names if SEGMENT_RE.match(n)])
+    for path in segs[MIX_KEEP_SEGMENTS:]:
+        for victim in (path, path[:-5] + ".json"):
+            try:
+                os.unlink(victim)
+            except OSError:
+                pass
+    audio = newest_first([os.path.join(MIX_DIR, n) for n in names if n.startswith("audio-")])
+    for path in audio[MIX_KEEP_AUDIO:]:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def cmd_mixprep(args):
+    if len(args) < 2:
+        fail("mixprep needs the current and the next playlist entry")
+    xfade = float(opt(args, "--xfade", "6"))
+    if not 2 <= xfade <= 16:
+        fail("--xfade must be 2-16 seconds")
+    min_exit = float(opt(args, "--min-exit", "0"))
+    a_id, a_side = mix_entry(args[0])
+    b_id, b_side = mix_entry(args[1])
+    if not a_id or not b_id or b_side is not None:
+        fail("Not a song this player can mix")
+    if a_id == b_id:
+        emit({"type": "mix", "ok": False, "reason": "same song"})
+        return
+    cookie_opts = mix_cookie_opts(opt(args, "--cookies-spec", ""))
+    try:
+        a_meta = mix_track(a_id, xfade, cookie_opts)
+        b_meta = mix_track(b_id, xfade, cookie_opts)
+    except RuntimeError as exc:
+        fail(str(exc))
+    if not a_meta.get("climax") or not b_meta.get("climax"):
+        emit({"type": "mix", "ok": False, "reason": "no climax found"})
+        return
+    a_offset = float(a_side["offset"]) if a_side else 0.0
+    a_gain = float(a_side["gain"]) if a_side else 0.0
+    # Where the playing entry stops, in its own time (a segment starts at
+    # its song's build-up).
+    local_exit = a_meta["climax"]["exit"] - a_offset
+    if local_exit < min_exit:
+        emit({"type": "mix", "ok": False, "reason": "past the climax"})
+        return
+    b_gain = max(-MIX_MAX_GAIN, min(MIX_MAX_GAIN, a_meta["climax"]["level"] + a_gain - b_meta["climax"]["level"]))
+    out = os.path.join(MIX_DIR, f"seg-{a_id}-{b_id}.flac")
+    try:
+        render_segment(a_meta, a_gain, b_id, b_meta, b_gain, xfade, out)
+    except RuntimeError as exc:
+        fail(str(exc))
+    prune_mix()
+    emit({"type": "mix", "ok": True, "path": out, "exit": round(local_exit, 3)})
+
+
+# ---- backup sources ------------------------------------------------------------
+
+# Independent YouTube front ends (opt-in: setting backupMirrors). They are
+# the last resort, after the cache and every YouTube client. A mirror sees
+# which song is asked for, and nothing else: never cookies or the login.
+MIRROR_DIRECTORIES = {
+    "invidious": "https://api.invidious.io/instances.json?sort_by=health",
+    "piped": "https://piped-instances.kavin.rocks/",
+}
+MIRRORS_PATH = os.path.join(CACHE_DIR, "mirrors.json")
+MIRRORS_MAX_AGE = 24 * 3600
+MIRRORS_PER_KIND = 6
+MIRRORS_TRIED = 5
+MIRROR_DEADLINE = 60
+MIRROR_MAX_BYTES = 200 * 1024 * 1024
+MIRROR_UA = "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0"
+MIRROR_URL_RE = re.compile(r"^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$")
+# Nothing gets past these, mirrors included. (A region block or an age
+# check can: a mirror elsewhere may serve the song.)
+HOPELESS_RE = re.compile(r"members|private video|removed|terminated|account associated|copyright", re.I)
+AUDIO_TYPES = {"audio/webm": "webm", "audio/mp4": "m4a", "audio/ogg": "ogg", "audio/mpeg": "mp3"}
+
+
+def widget_settings():
+    """This widget's entry in shell.json, read when needed so that turning a
+    setting off applies at once, also to a player that is already running."""
+    config = os.environ.get("XDG_CONFIG_HOME") or os.path.join(HOME, ".config")
+    data = read_json(os.path.join(config, "omarchy", "shell.json"))
+    layout = ((data or {}).get("bar") or {}).get("layout") if isinstance(data, dict) else None
+    for entries in (layout or {}).values() if isinstance(layout, dict) else []:
+        for entry in entries if isinstance(entries, list) else []:
+            if isinstance(entry, dict) and entry.get("id") == PLUGIN_ID:
+                return entry
+    return {}
+
+
+def mirrors_enabled():
+    return widget_settings().get("backupMirrors") == "On"
+
+
+def parse_mirrors(text):
+    """'invidious:https://a piped:https://b' (spaces, commas or semicolons
+    between them) -> [{kind, url}], keeping only well-formed https URLs."""
+    out = []
+    for item in re.split(r"[\s,;]+", str(text or "")):
+        kind, _, url = item.partition(":")
+        url = url.rstrip("/")
+        if kind in MIRROR_DIRECTORIES and MIRROR_URL_RE.match(url):
+            out.append({"kind": kind, "url": url})
+    return out[:20]
+
+
+def http_get(url, max_bytes, timeout=15, accept="application/json"):
+    request = urllib.request.Request(url, headers={"User-Agent": MIRROR_UA, "Accept": accept})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        body = response.read(max_bytes + 1)
+        if len(body) > max_bytes:
+            raise RuntimeError("response too large")
+        return body, response
+
+
+def http_json(url, max_bytes=4 * 1024 * 1024, timeout=15):
+    body, _ = http_get(url, max_bytes, timeout)
+    return json.loads(body)
+
+
+def parse_invidious_directory(data):
+    out = []
+    for item in data if isinstance(data, list) else []:
+        if not (isinstance(item, list) and len(item) == 2 and isinstance(item[1], dict)):
+            continue
+        info = item[1]
+        url = str(info.get("uri") or "").rstrip("/")
+        if info.get("type") == "https" and info.get("api") is True and MIRROR_URL_RE.match(url):
+            out.append({"kind": "invidious", "url": url})
+    return out[:MIRRORS_PER_KIND]
+
+
+def parse_piped_directory(data):
+    out = []
+    for item in data if isinstance(data, list) else []:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("api_url") or "").rstrip("/")
+        if item.get("up_to_date") is not False and MIRROR_URL_RE.match(url):
+            out.append((float(item.get("uptime_24h") or 0), {"kind": "piped", "url": url}))
+    out.sort(key=lambda x: -x[0])
+    return [m for _, m in out][:MIRRORS_PER_KIND]
+
+
+def mirror_list(refresh=False):
+    """The user's own mirrors (setting `mirrors`), or else the healthiest
+    ones from the projects' public directories, cached for a day."""
+    custom = parse_mirrors(widget_settings().get("mirrors"))
+    if custom:
+        return custom
+    cached = read_json(MIRRORS_PATH)
+    if not refresh and isinstance(cached, dict) and time.time() - float(cached.get("fetchedAt") or 0) < MIRRORS_MAX_AGE:
+        return [m for m in cached.get("items") or [] if isinstance(m, dict) and MIRROR_URL_RE.match(str(m.get("url")))]
+    found = []
+    for kind, url in MIRROR_DIRECTORIES.items():
+        try:
+            data = http_json(url)
+        except Exception:
+            continue
+        found += parse_invidious_directory(data) if kind == "invidious" else parse_piped_directory(data)
+    # Alternate the two kinds: if one project is down, the next try is the other.
+    inv = [m for m in found if m["kind"] == "invidious"]
+    pip = [m for m in found if m["kind"] == "piped"]
+    items = [m for pair in zip(inv, pip) for m in pair] + inv[len(pip):] + pip[len(inv):]
+    if items:
+        write_json_atomic(MIRRORS_PATH, {"fetchedAt": int(time.time()), "items": items})
+    elif isinstance(cached, dict):
+        items = cached.get("items") or []      # an old list beats none
+    return items
+
+
+def best_audio(formats, url_key, type_key, bitrate_key):
+    """The highest-bitrate audio-only stream: (url, extension) or None."""
+    best = None
+    for f in formats if isinstance(formats, list) else []:
+        if not isinstance(f, dict):
+            continue
+        mime = str(f.get(type_key) or "").split(";")[0].strip().lower()
+        ext = AUDIO_TYPES.get(mime)
+        url = f.get(url_key)
+        if not ext or not isinstance(url, str):
+            continue
+        try:
+            rate = float(f.get(bitrate_key) or 0)
+        except (TypeError, ValueError):
+            rate = 0
+        if best is None or rate > best[0]:
+            best = (rate, url, ext)
+    return (best[1], best[2]) if best else None
+
+
+def mirror_stream(mirror, video_id):
+    """(stream URL, extension) for a song from one mirror. Invidious is
+    asked to proxy the audio itself (local=true), so it comes from the
+    mirror's own host; Piped serves it from its proxy hosts."""
+    base = mirror["url"]
+    if mirror["kind"] == "invidious":
+        data = http_json(f"{base}/api/v1/videos/{video_id}?local=true&fields=adaptiveFormats")
+        found = best_audio(data.get("adaptiveFormats") if isinstance(data, dict) else None, "url", "type", "bitrate")
+        if not found:
+            raise RuntimeError("no audio stream")
+        url = urllib.parse.urljoin(base + "/", found[0])
+        if urllib.parse.urlsplit(url).netloc != urllib.parse.urlsplit(base).netloc:
+            raise RuntimeError("stream not proxied by the mirror")
+    else:
+        data = http_json(f"{base}/streams/{video_id}")
+        found = best_audio(data.get("audioStreams") if isinstance(data, dict) else None, "url", "mimeType", "bitrate")
+        if not found:
+            raise RuntimeError("no audio stream")
+        url = found[0]
+    if urllib.parse.urlsplit(url).scheme != "https":
+        raise RuntimeError("not https")
+    return url, found[1]
+
+
+def decodes(path):
+    """True when ffmpeg can decode the start of a downloaded file: a mirror
+    could send anything."""
+    try:
+        proc = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-t", "3", "-i", path, "-f", "null", "-"],
+                              capture_output=True, timeout=30, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0
+
+
+def download_from_mirrors(video_id, mirrors=None, deadline=MIRROR_DEADLINE):
+    """Download a song through the mirrors in turn. Returns (metadata,
+    "mirror:<host>"); raises RuntimeError when none served it."""
+    os.makedirs(MIX_DIR, mode=0o700, exist_ok=True)
+    started = time.time()
+    last = "no mirror available"
+    for mirror in (mirrors if mirrors is not None else mirror_list())[:MIRRORS_TRIED]:
+        if time.time() - started > deadline:
+            break
+        host = urllib.parse.urlsplit(mirror["url"]).netloc
+        try:
+            url, ext = mirror_stream(mirror, video_id)
+            path = os.path.join(MIX_DIR, f"audio-{video_id}.{ext}")
+            body, _ = http_get(url, MIRROR_MAX_BYTES, timeout=30, accept="*/*")
+            tmp = path + ".part"
+            with open(tmp, "wb") as fh:
+                fh.write(body)
+            if not decodes(tmp):
+                os.unlink(tmp)
+                raise RuntimeError("not playable audio")
+            os.replace(tmp, path)
+        except Exception as exc:
+            last = f"{host}: {str(exc)[:120]}"
+            continue
+        meta = {"audio": os.path.basename(path), "heatmap": [], "usedAt": int(time.time()), "via": f"mirror:{host}"}
+        write_json_atomic(os.path.join(MIX_DIR, f"{video_id}.json"), meta)
+        return meta, f"mirror:{host}"
+    raise RuntimeError(last)
+
+
+def cmd_mirrors(args):
+    """List the mirrors backup sources would use; with --check, ask each one
+    for a public test video (no download) and say which answer."""
+    mirrors = mirror_list(refresh="--refresh" in args)
+    test_id = "dQw4w9WgXcQ"
+    for m in mirrors:
+        line = {"type": "mirror", "kind": m["kind"], "url": m["url"]}
+        if "--check" in args:
+            started = time.time()
+            try:
+                mirror_stream(m, test_id)
+                line.update(ok=True, ms=int((time.time() - started) * 1000))
+            except Exception as exc:
+                line.update(ok=False, reason=clean_text(str(exc), 120))
+        emit(line)
+    emit({"type": "mirrors", "count": len(mirrors), "enabled": mirrors_enabled()})
+
+
+def cmd_fallback(args):
+    """A song mpv couldn't open through its usual stream: play the cached
+    audio if there is one, otherwise download it through YouTube's other
+    clients. Called by mpv itself (mpv/ytmusic.lua), never for a reason
+    that no source can get past."""
+    if not args or not VIDEO_ID_RE.match(args[0]):
+        fail("fallback needs a video id")
+    video_id = args[0]
+    meta = audio_meta(video_id)
+    via = "cache"
+    if meta is None:
+        cookie_opts = mix_cookie_opts(opt(args, "--cookies-spec", ""))
+        try:
+            meta, via = download_audio(video_id, cookie_opts)
+        except RuntimeError as exc:
+            reason = str(exc)
+            meta = None
+            hopeless = bool(HOPELESS_RE.search(reason))
+            # Last resort, only when the user turned it on: the mirrors.
+            # "off" tells the panel to offer them.
+            mirrors = "skipped" if hopeless else ("tried" if mirrors_enabled() else "off")
+            if mirrors == "tried":
+                try:
+                    meta, via = download_from_mirrors(video_id)
+                except RuntimeError as mirror_exc:
+                    reason = f"{reason}; mirrors: {mirror_exc}"
+            if meta is None:
+                emit({"type": "fallback", "ok": False, "reason": clean_text(reason),
+                      "mirrors": mirrors, "hopeless": hopeless})
+                return
+    else:
+        meta["usedAt"] = int(time.time())
+        write_json_atomic(os.path.join(MIX_DIR, f"{video_id}.json"), meta)
+    prune_mix()
+    emit({"type": "fallback", "ok": True, "path": os.path.join(MIX_DIR, meta["audio"]), "via": via})
 
 
 # ---- writing to the account (like, add to playlist) --------------------------
@@ -1051,6 +1703,399 @@ def cmd_liked(_args):
     emit({"type": "likedIds", "known": isinstance(items, list), "ids": ids[:MAX_TRACKS]})
 
 
+# ---- explore: new releases, trending, charts, moods, search ---------------------
+
+EXPLORE_PATH = os.path.join(CACHE_DIR, "explore.json")
+EXPLORE_MAX_AGE = 6 * 3600
+EXPLORE_ITEMS = 30
+PARAMS_RE = re.compile(r"^[A-Za-z0-9_%=-]{1,400}$")
+# YouTube Music's "Songs" filter for search.
+SONGS_FILTER = "EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D"
+DURATION_RE = re.compile(r"^(?:(\d+):)?(\d{1,2}):(\d{2})$")
+
+
+def music_public(endpoint, body):
+    """YouTube Music's web API without an account: Explore is the same for
+    everyone (in the user's region), so no cookies are read or sent."""
+    payload = {"context": {"client": {"clientName": "WEB_REMIX", "clientVersion": music_client_version(), "hl": "en"}}, **body}
+    request = urllib.request.Request(f"{MUSIC_ORIGIN}/youtubei/v1/{endpoint}?prettyPrint=false",
+                                     data=json.dumps(payload).encode(),
+                                     headers={"Content-Type": "application/json", "Origin": MUSIC_ORIGIN,
+                                              "User-Agent": MIRROR_UA})
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            raw = response.read(MAX_API_RESPONSE + 1)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"YouTube Music didn't answer: {exc}")
+    if len(raw) > MAX_API_RESPONSE:
+        raise RuntimeError("YouTube Music's answer was too large")
+    try:
+        return json.loads(raw)
+    except ValueError:
+        raise RuntimeError("YouTube Music sent something unexpected")
+
+
+def first_value(node, key, test=None, depth=0):
+    """The first `key` value anywhere under `node` that passes `test`."""
+    if depth > 30:
+        return None
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if k == key and (test is None or test(v)):
+                return v
+            found = first_value(v, key, test, depth + 1)
+            if found is not None:
+                return found
+    elif isinstance(node, list):
+        for v in node:
+            found = first_value(v, key, test, depth + 1)
+            if found is not None:
+                return found
+    return None
+
+
+def parse_duration(text):
+    m = DURATION_RE.match((text or "").strip())
+    if not m:
+        return None
+    return int(m.group(1) or 0) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
+
+
+def explore_item(node):
+    """One Explore entry, normalized: a song (plays), a list (opens as a
+    playlist: an album, a chart, a mood's playlist) or a mood (opens its
+    playlists). None for anything else."""
+    if "musicNavigationButtonRenderer" in node:
+        r = node["musicNavigationButtonRenderer"]
+        ep = (r.get("clickCommand") or {}).get("browseEndpoint") or {}
+        params = ep.get("params") or ""
+        if ep.get("browseId") == "FEmusic_moods_and_genres_category" and PARAMS_RE.match(params):
+            return {"kind": "mood", "id": params, "title": clean_text(text_of(r.get("buttonText")), 80), "subtitle": ""}
+        return None
+    if "musicResponsiveListItemRenderer" in node:
+        r = node["musicResponsiveListItemRenderer"]
+        cols = [text_of((c.get("musicResponsiveListItemFlexColumnRenderer") or {}).get("text"))
+                for c in r.get("flexColumns") or [] if isinstance(c, dict)]
+        vid = (r.get("playlistItemData") or {}).get("videoId") or first_value(r, "videoId", lambda v: isinstance(v, str))
+        if not vid or not VIDEO_ID_RE.match(vid) or not cols:
+            return None
+        meta = [p.strip() for p in (cols[1] if len(cols) > 1 else "").split("•")]
+        duration = next((parse_duration(p) for p in reversed(meta) if parse_duration(p)), None)
+        artist = meta[0] if meta and meta[0].lower() not in ("song", "video") else (meta[1] if len(meta) > 1 else "")
+        return {"kind": "song", "id": vid, "title": clean_text(cols[0]), "artist": clean_text(artist, 120),
+                "duration": duration}
+    if "musicTwoRowItemRenderer" in node:
+        r = node["musicTwoRowItemRenderer"]
+        title = clean_text(text_of(r.get("title")))
+        subtitle = clean_text(text_of(r.get("subtitle")), 120)
+        nav = r.get("navigationEndpoint") or {}
+        vid = (nav.get("watchEndpoint") or {}).get("videoId")
+        if vid and VIDEO_ID_RE.match(vid):
+            return {"kind": "song", "id": vid, "title": title, "artist": subtitle.split("•")[0].strip(), "duration": None}
+        browse = (nav.get("browseEndpoint") or {}).get("browseId") or ""
+        # An album opens through its playlist (OLAK5uy_…), which yt-dlp reads.
+        list_id = first_value(r, "playlistId", lambda v: isinstance(v, str) and PLAYLIST_ID_RE.match(v) is not None)
+        if not list_id and browse.startswith("VL") and PLAYLIST_ID_RE.match(browse[2:]):
+            list_id = browse[2:]
+        if list_id:
+            return {"kind": "list", "id": list_id, "title": title, "subtitle": subtitle}
+    return None
+
+
+def explore_shelves(data):
+    """(title, items) for each carousel and grid in a browse response."""
+    out = []
+    for shelf in find_renderers(data, "musicCarouselShelfRenderer", []):
+        header = ((shelf.get("header") or {}).get("musicCarouselShelfBasicHeaderRenderer") or {})
+        items = [i for i in (explore_item(n) for n in shelf.get("contents") or [] if isinstance(n, dict)) if i]
+        if items:
+            out.append((clean_text(text_of(header.get("title")), 80), items[:EXPLORE_ITEMS]))
+    for grid in find_renderers(data, "gridRenderer", []):
+        header = ((grid.get("header") or {}).get("gridHeaderRenderer") or {})
+        items = [i for i in (explore_item(n) for n in grid.get("items") or [] if isinstance(n, dict)) if i]
+        if items:
+            out.append((clean_text(text_of(header.get("title")), 80), items[:EXPLORE_ITEMS]))
+    return out
+
+
+def fetch_explore():
+    sections = []
+    for title, items in explore_shelves(music_public("browse", {"browseId": "FEmusic_explore"})):
+        sections.append({"title": title, "items": items})
+    try:
+        charts = explore_shelves(music_public("browse", {"browseId": "FEmusic_charts"}))
+    except RuntimeError:
+        charts = []
+    for title, items in charts:
+        lists = [i for i in items if i["kind"] == "list"]
+        if lists:
+            sections.append({"title": title or "Charts", "items": lists})
+    if not sections:
+        raise RuntimeError("Explore is empty")
+    return {"sections": sections[:10]}
+
+
+def cmd_explore(args):
+    max_age = int(opt(args, "--max-age", str(EXPLORE_MAX_AGE)))
+    cached = read_json(EXPLORE_PATH)
+    if isinstance(cached, dict) and cached.get("sections"):
+        stale = time.time() - float(cached.get("fetchedAt") or 0) > max_age
+        emit({"type": "explore", "stale": stale, "sections": cached["sections"]})
+        if not stale:
+            return
+    try:
+        result = fetch_explore()
+    except RuntimeError as exc:
+        if isinstance(cached, dict) and cached.get("sections"):
+            return                    # the saved copy is already shown
+        fail(str(exc))
+    result["fetchedAt"] = int(time.time())
+    write_json_atomic(EXPLORE_PATH, result)
+    emit({"type": "explore", "stale": False, "sections": result["sections"]})
+
+
+def cmd_mood(args):
+    """A mood or genre's playlists."""
+    if not args or not PARAMS_RE.match(args[0]):
+        fail("mood needs its id")
+    try:
+        shelves = explore_shelves(music_public("browse", {"browseId": "FEmusic_moods_and_genres_category", "params": args[0]}))
+    except RuntimeError as exc:
+        fail(str(exc))
+    sections = [{"title": t, "items": [i for i in items if i["kind"] == "list"]} for t, items in shelves]
+    emit({"type": "explore", "stale": False, "mood": args[0], "sections": [s for s in sections if s["items"]][:10]})
+
+
+def cmd_search(args):
+    """Songs on YouTube Music matching a query."""
+    query = clean_text(" ".join(args[:1]), 150).strip()
+    if not query:
+        fail("search needs a query")
+    try:
+        data = music_public("search", {"query": query, "params": SONGS_FILTER})
+    except RuntimeError as exc:
+        fail(str(exc))
+    songs = [i for i in (explore_item({"musicResponsiveListItemRenderer": r})
+                         for r in find_renderers(data, "musicResponsiveListItemRenderer", [])) if i]
+    emit({"type": "search", "query": query, "items": songs[:50]})
+
+
+# ---- download a song --------------------------------------------------------------
+
+# Songs saved with `download`: a list of {id, title, artist, duration,
+# path, format, cover, at}. "Downloads" in the panel plays them from disk.
+DOWNLOADS_ID = "DOWNLOADS"
+DOWNLOADS_PATH = os.path.join(CACHE_DIR, "downloads.json")
+COVERS_DIR = os.path.join(CACHE_DIR, "covers")
+
+
+def downloaded_tracks():
+    """Downloaded songs whose files are still there, newest first."""
+    data = read_json(DOWNLOADS_PATH)
+    out = []
+    for t in data.get("items") if isinstance(data, dict) and isinstance(data.get("items"), list) else []:
+        if not isinstance(t, dict) or not VIDEO_ID_RE.match(str(t.get("id", ""))):
+            continue
+        path = t.get("path")
+        if not (isinstance(path, str) and os.path.isabs(path) and os.path.isfile(path)):
+            continue
+        cover = t.get("cover")
+        if not (isinstance(cover, str) and os.path.dirname(cover) == COVERS_DIR and os.path.isfile(cover)):
+            cover = None
+        out.append({"id": t["id"], "title": clean_text(t.get("title")) or t["id"], "artist": clean_text(t.get("artist")),
+                    "duration": t.get("duration") if isinstance(t.get("duration"), int) else None,
+                    "path": path, "cover": cover})
+    return out
+
+
+def record_download(entry):
+    data = read_json(DOWNLOADS_PATH)
+    items = data.get("items") if isinstance(data, dict) and isinstance(data.get("items"), list) else []
+    items = [t for t in items if isinstance(t, dict) and t.get("path") != entry["path"]]
+    write_json_atomic(DOWNLOADS_PATH, {"items": [entry] + items[:4999]})
+
+
+def file_duration(path):
+    try:
+        proc = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path],
+                              capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
+        seconds = float(proc.stdout.strip())
+        return int(seconds) if 0 < seconds < 86400 else None
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+
+
+DOWNLOAD_FORMATS = {
+    # extension, ffmpeg audio options, can carry a cover picture
+    "mp3": ("mp3", ["-c:a", "libmp3lame", "-q:a", "0", "-id3v2_version", "3"], True),
+    "m4a": ("m4a", ["-c:a", "aac", "-b:a", "256k"], True),
+    "opus": ("opus", ["-c:a", "libopus", "-b:a", "160k"], False),
+    "flac": ("flac", ["-c:a", "flac"], True),
+    "wav": ("wav", ["-c:a", "pcm_s16le"], False),
+}
+
+
+def safe_filename(text):
+    name = re.sub(r"[\x00-\x1f/\\]+", " ", text or "").strip().lstrip(".")
+    name = re.sub(r"\s+", " ", name)
+    while len(name.encode()) > 180:
+        name = name[:-1]
+    return name or "song"
+
+
+def fetch_cover(video_id, path):
+    """The song's YouTube thumbnail (never with cookies), for embedding."""
+    for size in ("maxresdefault", "hqdefault"):
+        try:
+            body, response = http_get(f"https://i.ytimg.com/vi/{video_id}/{size}.jpg", 5 * 1024 * 1024,
+                                      timeout=15, accept="image/jpeg")
+        except Exception:
+            continue
+        if response.headers.get_content_type() == "image/jpeg" and body[:3] == b"\xff\xd8\xff":
+            with open(path, "wb") as fh:
+                fh.write(body)
+            return True
+    return False
+
+
+def cmd_download(args):
+    """Save a song as an audio file in a folder the user picked: the same
+    download path as playback's backup sources (cache, YouTube's clients,
+    mirrors if on), then converted by ffmpeg with its title, artist and
+    cover embedded."""
+    if not args or not VIDEO_ID_RE.match(args[0]):
+        fail("download needs a video id")
+    video_id = args[0]
+    fmt = opt(args, "--format", "mp3")
+    if fmt not in DOWNLOAD_FORMATS:
+        fail("--format must be one of " + ", ".join(DOWNLOAD_FORMATS))
+    folder = os.path.realpath(os.path.expanduser(opt(args, "--dir", "~/Music")))
+    if not os.path.isdir(folder) or not os.access(folder, os.W_OK):
+        fail(f"Can't save to {folder}")
+    want_cover = opt(args, "--cover", "1") == "1"
+    title = clean_text(opt(args, "--title", ""), 200) or video_id
+    artist = clean_text(opt(args, "--artist", ""), 200)
+    options = player_options(args)
+    cookie_opts = {}
+    if options["playback_cookies"] and options["browser"] != "none":
+        cookie_opts = {"cookiesfrombrowser": browser_spec_tuple(options["browser"])}
+
+    emit({"type": "downloading", "id": video_id, "stage": "fetch"})
+    meta = audio_meta(video_id)
+    if meta is None:
+        try:
+            meta, _ = download_audio(video_id, cookie_opts)
+        except RuntimeError as exc:
+            reason = str(exc)
+            if not (mirrors_enabled() and not HOPELESS_RE.search(reason)):
+                fail(reason)
+            try:
+                meta, _ = download_from_mirrors(video_id)
+            except RuntimeError as mirror_exc:
+                fail(f"{reason}; mirrors: {mirror_exc}")
+    source = os.path.join(MIX_DIR, meta["audio"])
+
+    emit({"type": "downloading", "id": video_id, "stage": "convert"})
+    ext, codec, takes_cover = DOWNLOAD_FORMATS[fmt]
+    base = safe_filename(f"{artist} - {title}" if artist else title)
+    target = os.path.join(folder, f"{base}.{ext}")
+    n = 2
+    while os.path.exists(target):
+        target = os.path.join(folder, f"{base} ({n}).{ext}")
+        n += 1
+    # With a cover: embedded where the format can carry one, and kept for
+    # the Downloads list either way.
+    os.makedirs(COVERS_DIR, mode=0o700, exist_ok=True)
+    cover = os.path.join(COVERS_DIR, f"{video_id}.jpg")
+    got_cover = want_cover and (os.path.isfile(cover) or fetch_cover(video_id, cover))
+    has_cover = takes_cover and got_cover
+    cmd = ["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", source]
+    if has_cover:
+        cmd += ["-i", cover, "-map", "0:a", "-map", "1:v", "-c:v", "copy", "-disposition:v:0", "attached_pic",
+                "-metadata:s:v", "title=Album cover", "-metadata:s:v", "comment=Cover (front)"]
+    else:
+        cmd += ["-map", "0:a"]
+    cmd += codec + ["-metadata", f"title={title}"]
+    if artist:
+        cmd += ["-metadata", f"artist={artist}"]
+    cmd += ["-metadata", f"comment=https://music.youtube.com/watch?v={video_id}"]
+    tmp = os.path.join(folder, f".{base}.{ext}.part")
+    cmd += ["-f", {"m4a": "mp4", "opus": "ogg"}.get(fmt, fmt), tmp]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        proc = None
+    if proc is None or proc.returncode != 0:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        fail("ffmpeg couldn't convert the song" + (f": {proc.stderr.strip()[-160:]}" if proc else ""))
+    os.replace(tmp, target)
+    record_download({"id": video_id, "title": title, "artist": artist, "duration": file_duration(target),
+                     "path": target, "format": fmt, "cover": cover if got_cover else None, "at": int(time.time())})
+    emit({"type": "downloaded", "id": video_id, "path": target, "folder": folder})
+
+
+# ---- updates ------------------------------------------------------------------
+
+PLUGIN_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+UPDATE_CHECK_PATH = os.path.join(CACHE_DIR, "update-check.json")
+
+
+def git(*args, timeout=30):
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_SSH_COMMAND="ssh -oBatchMode=yes", LC_ALL="C")
+    return subprocess.run(["git", "-C", PLUGIN_DIR, *args], capture_output=True, text=True,
+                          timeout=timeout, stdin=subprocess.DEVNULL, env=env)
+
+
+def version_tuple(text):
+    parts = re.findall(r"\d+", str(text or ""))[:3]
+    return tuple(int(p) for p in parts) + (0,) * (3 - len(parts))
+
+
+def cmd_update_check(args):
+    """Is a newer version of this plugin out? `omarchy plugin add` installs
+    plugins as git checkouts and `omarchy plugin update` pulls them, so this
+    fetches the plugin's own repository (at most once per --max-age) and
+    compares. Reports the new version and its commit subjects."""
+    max_age = int(opt(args, "--max-age", "86400"))
+    last = read_json(UPDATE_CHECK_PATH)
+    if isinstance(last, dict) and time.time() - float(last.get("checkedAt") or 0) < max_age and last.get("result"):
+        emit(last["result"])
+        return
+    try:
+        if git("rev-parse", "--is-inside-work-tree").stdout.strip() != "true":
+            emit({"type": "update", "state": "unmanaged"})
+            return
+        upstream = git("rev-parse", "--abbrev-ref", "@{u}").stdout.strip()
+        if not re.match(r"^[A-Za-z0-9._/-]{1,100}$", upstream):
+            emit({"type": "update", "state": "unmanaged"})
+            return
+        fetched = git("fetch", "--quiet", "--no-tags", upstream.split("/", 1)[0], timeout=60)
+        if fetched.returncode != 0:
+            emit({"type": "update", "state": "error", "message": clean_text(fetched.stderr.strip()[-200:] or "git fetch failed")})
+            return
+        behind = int(git("rev-list", "--count", f"HEAD..{upstream}").stdout.strip() or 0)
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        emit({"type": "update", "state": "error", "message": clean_text(str(exc))})
+        return
+    current = (read_json(os.path.join(PLUGIN_DIR, "manifest.json")) or {}).get("version", "")
+    result = {"type": "update", "state": "current", "current": clean_text(current, 20)}
+    if behind > 0:
+        try:
+            newer = json.loads(git("show", f"{upstream}:manifest.json").stdout or "{}").get("version", "")
+        except ValueError:
+            newer = ""
+        notes = [clean_text(line, 120) for line in git("log", "--no-merges", "--format=%s", "-n", "6",
+                                                        f"HEAD..{upstream}").stdout.splitlines() if line.strip()]
+        if version_tuple(newer) > version_tuple(current) or not newer:
+            result = {"type": "update", "state": "available", "current": clean_text(current, 20),
+                      "version": clean_text(newer, 20), "commits": behind, "notes": notes[:6]}
+    write_json_atomic(UPDATE_CHECK_PATH, {"checkedAt": int(time.time()), "result": result})
+    emit(result)
+
+
 def cmd_paths(_args):
     emit({"type": "paths", "socket": SOCKET_PATH, "session": SESSION_PATH, "cache": CACHE_DIR, "log": MPV_LOG})
 
@@ -1079,6 +2124,14 @@ def main():
         "targets": cmd_targets,
         "signin": cmd_signin,
         "cookies": cmd_cookies,
+        "mixprep": cmd_mixprep,
+        "fallback": cmd_fallback,
+        "mirrors": cmd_mirrors,
+        "update-check": cmd_update_check,
+        "explore": cmd_explore,
+        "mood": cmd_mood,
+        "search": cmd_search,
+        "download": cmd_download,
         "stop": cmd_stop,
         "paths": cmd_paths,
     }

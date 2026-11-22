@@ -2095,7 +2095,10 @@ Panel {
             font.family: root.fontFamily
             font.pixelSize: Style.font.subtitle
             selectByMouse: true
-            onAccepted: { root.searchFromBar(text); focus = false }
+            // Enter is taken here: TextInput passes it on after `accepted`,
+            // and the panel would take it as "play the highlighted song".
+            Keys.onReturnPressed: function(event) { root.searchFromBar(text); focus = false; event.accepted = true }
+            Keys.onEnterPressed: function(event) { root.searchFromBar(text); focus = false; event.accepted = true }
             Keys.onEscapePressed: function(event) {
               if (text !== "") text = ""
               else focus = false
@@ -2867,7 +2870,8 @@ Panel {
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.body
                 selectByMouse: true
-                onAccepted: { root.saveSetup(setupCard.target, text); text = ""; focus = false }
+                Keys.onReturnPressed: function(event) { root.saveSetup(setupCard.target, text); text = ""; focus = false; event.accepted = true }
+                Keys.onEnterPressed: function(event) { root.saveSetup(setupCard.target, text); text = ""; focus = false; event.accepted = true }
                 Keys.onEscapePressed: function(event) { focus = false; event.accepted = true }
               }
               PlainText {
@@ -3711,7 +3715,8 @@ Panel {
         echoMode: field.secret ? TextInput.Password : TextInput.Normal
         onTextEdited: field.edited(text)
         onActiveFocusChanged: root.cloudTyping = activeFocus
-        onAccepted: { focus = false; root.connectCloud() }
+        Keys.onReturnPressed: function(event) { focus = false; root.connectCloud(); event.accepted = true }
+        Keys.onEnterPressed: function(event) { focus = false; root.connectCloud(); event.accepted = true }
         Keys.onEscapePressed: function(event) { focus = false; event.accepted = true }
       }
     }

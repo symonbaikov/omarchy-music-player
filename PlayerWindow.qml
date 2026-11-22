@@ -372,7 +372,8 @@ FloatingWindow {
             font.family: win.fontFamily
             font.pixelSize: Style.font.subtitle
             selectByMouse: true
-            onAccepted: { win.search(text); keys.forceActiveFocus() }
+            Keys.onReturnPressed: function(event) { win.search(text); keys.forceActiveFocus(); event.accepted = true }
+            Keys.onEnterPressed: function(event) { win.search(text); keys.forceActiveFocus(); event.accepted = true }
             Keys.onEscapePressed: function(event) {
               if (text !== "") text = ""
               else keys.forceActiveFocus()
@@ -1909,14 +1910,48 @@ FloatingWindow {
       }
     }
 
-    // Drawn through the effect below, with rounded corners.
-    SizedImage {
-      id: img
+    // A soft shadow under the cover (Now Playing): drawn from a plain shape
+    // of the cover's size, under it.
+    Rectangle {
+      id: shadowShape
       anchors.fill: parent
-      crop: true
-      url: cover.url
+      radius: cover.radius
+      color: "black"
       visible: false
-      onStatusChanged: if (status === Image.Error) cover.statusFailed()
+    }
+    MultiEffect {
+      anchors.fill: parent
+      source: shadowShape
+      visible: cover.shadow && cover.shown
+      shadowEnabled: true
+      shadowBlur: 0.8
+      shadowOpacity: 0.5
+      shadowVerticalOffset: Style.space(10)
+    }
+
+    // The cover itself, cropped square by clipping. Rounded corners come
+    // from an effect on this item's own layer, which holds exactly what
+    // it shows (an effect taking the image as its source would get the
+    // whole, uncropped 16:9 thumbnail and stretch it).
+    Item {
+      id: imgBox
+      anchors.fill: parent
+      visible: cover.shown
+      clip: true
+      layer.enabled: cover.radius > 0
+      layer.effect: MultiEffect {
+        maskEnabled: true
+        maskSource: mask
+        maskThresholdMin: 0.5
+        maskSpreadAtMin: 1.0
+      }
+      SizedImage {
+        id: img
+        anchors.fill: parent
+        crop: true
+        url: cover.url
+        onStatusChanged: if (status === Image.Error) cover.statusFailed()
+      }
     }
     Rectangle {
       id: mask
@@ -1924,19 +1959,6 @@ FloatingWindow {
       radius: cover.radius
       visible: false
       layer.enabled: true
-    }
-    MultiEffect {
-      anchors.fill: parent
-      source: img
-      visible: cover.shown
-      maskEnabled: true
-      maskSource: mask
-      maskThresholdMin: 0.5
-      maskSpreadAtMin: 1.0
-      shadowEnabled: cover.shadow
-      shadowBlur: 0.8
-      shadowOpacity: 0.5
-      shadowVerticalOffset: Style.space(10)
     }
 
     MouseArea {
@@ -2407,7 +2429,8 @@ FloatingWindow {
         selectByMouse: true
         echoMode: field.secret ? TextInput.Password : TextInput.Normal
         onTextEdited: field.edited(text)
-        onAccepted: { keys.forceActiveFocus(); field.submitted() }
+        Keys.onReturnPressed: function(event) { keys.forceActiveFocus(); field.submitted(); event.accepted = true }
+        Keys.onEnterPressed: function(event) { keys.forceActiveFocus(); field.submitted(); event.accepted = true }
         Keys.onEscapePressed: function(event) { keys.forceActiveFocus(); event.accepted = true }
       }
     }

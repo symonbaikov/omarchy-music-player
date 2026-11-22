@@ -28,6 +28,7 @@ Commands (every result is one JSON object per line on stdout):
   download <video-id> [--dir D] [--format mp3|m4a|opus|flac|wav] [--cover 0|1] [--title T] [--artist A] [PLAYER]
   tracks DOWNLOADS   the downloaded songs (they play from their files)
   cloud | cloud-add (form as JSON on stdin) | cloud-remove <source> | cloud-stop
+  lyrics <track> [--title T] [--artist A] [--duration S]
   playlists --service cl   your cloud storage's folders (rclone)
   stop
   paths
@@ -3376,6 +3377,162 @@ def cmd_cloud_stop(args):
     emit({"type": "cloud", "state": "stopped"})
 
 
+# ---- lyrics --------------------------------------------------------------------
+# The full-screen view's Lyrics, like Apple Music's: lines that light up in
+# time with the song. They come from LRCLIB (lrclib.net, an open lyrics
+# database: synced lines where it has them), asked with the song's title,
+# artist and length only; else from YouTube Music's own lyrics (plain text,
+# no account). Only fetched when the Lyrics view is open; cached.
+
+LYRICS_DIR = os.path.join(CACHE_DIR, "lyrics")
+LYRICS_MISS_AGE = 3 * 86400        # a song with no lyrics is asked again after this
+LRCLIB_API = "https://lrclib.net/api"
+LRCLIB_UA = "Omarchy Music Player (https://github.com/symonbaikov/omarchy-music-player)"
+LRC_TIME_RE = re.compile(r"\[(\d{1,3}):(\d{1,2}(?:[.:]\d{1,3})?)\]")
+MAX_LYRIC_LINES = 600
+TITLE_NOISE_RE = re.compile(
+    r"\s*[\(\[][^\)\]]*\b(official|video|lyrics?|audio|visuali[sz]er|remaster(ed)?|hd|4k|mv|m/v|clip|"
+    r"music video|explicit|from|soundtrack|ost)\b[^\)\]]*[\)\]]", re.I)
+
+
+def parse_lrc(text):
+    """[[seconds, line], …] from LRC text, in time order."""
+    out = []
+    for raw in str(text or "").splitlines():
+        stamps = LRC_TIME_RE.findall(raw)
+        if not stamps:
+            continue
+        line = clean_text(LRC_TIME_RE.sub("", raw), 300)
+        for m, s in stamps:
+            out.append([round(int(m) * 60 + float(s.replace(":", ".")), 2), line])
+    out.sort(key=lambda x: x[0])
+    return out[:MAX_LYRIC_LINES]
+
+
+def lyric_names(title, artist):
+    """(artist, title) pairs to look a song up by: YouTube titles are often
+    "Artist - Title (Official Video) | More", and the artist the channel."""
+    title = clean_text(title, 200)
+    artist = re.sub(r"\s*-\s*Topic$|VEVO$|\s*\(official\)$", "", clean_text(artist, 200), flags=re.I).strip()
+    base = TITLE_NOISE_RE.sub("", title.split(" | ")[0]).strip(" -\"'“”")
+    pairs = []
+    if " - " in base:
+        left, right = [x.strip(" \"'“”") for x in base.split(" - ", 1)]
+        pairs.append((left, TITLE_NOISE_RE.sub("", right).strip()))
+    pairs.append((artist, base))
+    no_feat = re.sub(r"\s+(feat\.?|ft\.?)\s.*$", "", base, flags=re.I)
+    if no_feat != base:
+        pairs.append((artist, no_feat))
+    seen, out = set(), []
+    for a, t in pairs:
+        if t and (a, t) not in seen:
+            seen.add((a, t))
+            out.append((a, t))
+    return out
+
+
+def lrclib(path, params):
+    url = f"{LRCLIB_API}/{path}?" + urllib.parse.urlencode(params)
+    request = urllib.request.Request(url, headers={"User-Agent": LRCLIB_UA, "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            body = response.read(4 * 1024 * 1024 + 1)
+    except (OSError, ValueError):
+        return []
+    try:
+        data = json.loads(body[:4 * 1024 * 1024])
+    except ValueError:
+        return []
+    return data if isinstance(data, list) else []
+
+
+def best_lyrics(results, artist, title, duration):
+    """The LRCLIB entry that is this song: names alike, the same length
+    (when known), synced lines preferred."""
+    best, best_score = None, 1.5
+    for r in results[:20]:
+        if not isinstance(r, dict):
+            continue
+        cand = {"title": r.get("trackName"), "artist": r.get("artistName"),
+                "duration": r.get("duration") if isinstance(r.get("duration"), (int, float)) else None}
+        score = match_score({"title": title, "artist": artist, "duration": duration or None}, cand)
+        if r.get("syncedLyrics"):
+            score += 0.5
+        if score > best_score:
+            best, best_score = r, score
+    return best
+
+
+def lyrics_from_lrclib(title, artist, duration):
+    for a, t in lyric_names(title, artist):
+        params = {"track_name": t}
+        if a:
+            params["artist_name"] = a
+        hit = best_lyrics(lrclib("search", params), a, t, duration)
+        if not hit:
+            hit = best_lyrics(lrclib("search", {"q": f"{a} {t}".strip()}), a, t, duration)
+        if hit:
+            if hit.get("instrumental"):
+                return {"instrumental": True, "source": "LRCLIB"}
+            synced = parse_lrc(hit.get("syncedLyrics"))
+            if synced:
+                return {"synced": synced, "source": "LRCLIB"}
+            plain = str(hit.get("plainLyrics") or "").strip()
+            if plain:
+                return {"plain": plain[:20000], "source": "LRCLIB"}
+    return None
+
+
+def lyrics_from_youtube(key):
+    """YouTube Music's own lyrics for a song (plain text), without an account."""
+    try:
+        vid = key if VIDEO_ID_RE.match(key) else (
+            (read_json(SP_MATCH_PATH) or {}).get(key[3:]) if key.startswith("sp:") else None)
+        if not vid or not VIDEO_ID_RE.match(str(vid)):
+            return None
+        nxt = music_public("next", {"videoId": vid})
+        browse_id = first_value(nxt, "browseId", lambda v: isinstance(v, str) and v.startswith("MPLYt"))
+        if not browse_id:
+            return None
+        shelf = find_renderers(music_public("browse", {"browseId": browse_id}), "musicDescriptionShelfRenderer", [])
+    except RuntimeError:
+        return None
+    if not shelf:
+        return None
+    plain = text_of(shelf[0].get("description")).strip()
+    footer = clean_text(text_of(shelf[0].get("footer")), 80)
+    if not plain:
+        return None
+    return {"plain": plain[:20000], "source": "YouTube Music" + (f" ({footer.replace('Source: ', '')})" if footer else "")}
+
+
+def cmd_lyrics(args):
+    """lyrics <track> [--title T] [--artist A] [--duration S]: the song's
+    lyrics, timed where possible."""
+    key = args[0] if args else ""
+    if not TRACK_KEY_RE.match(key):
+        fail("lyrics needs a track")
+    title = clean_text(opt(args, "--title", ""), 200)
+    artist = clean_text(opt(args, "--artist", ""), 200)
+    try:
+        duration = max(0, min(86400, float(opt(args, "--duration", "0"))))
+    except ValueError:
+        duration = 0
+    os.makedirs(LYRICS_DIR, mode=0o700, exist_ok=True)
+    path = os.path.join(LYRICS_DIR, hashlib.sha1(f"{key}\0{title}".encode()).hexdigest()[:20] + ".json")
+    cached = read_json(path)
+    if isinstance(cached, dict) and (not cached.get("none") or time.time() - float(cached.get("at") or 0) < LYRICS_MISS_AGE):
+        emit({"type": "lyrics", "key": key, **{k: v for k, v in cached.items() if k != "at"}})
+        return
+    found = lyrics_from_lrclib(title, artist, duration) if title else None
+    if not found or (not found.get("synced") and not found.get("instrumental")):
+        found = lyrics_from_youtube(key) or found
+    result = found or {"none": True}
+    result["at"] = int(time.time())
+    write_json_atomic(path, result)
+    emit({"type": "lyrics", "key": key, **{k: v for k, v in result.items() if k != "at"}})
+
+
 # ---- problem reports ------------------------------------------------------------
 # One click in the panel: everything about the error is gathered here and
 # opened as a filled-in GitHub issue in the browser, so the user only presses
@@ -3614,6 +3771,7 @@ def main():
         "explore": cmd_explore,
         "mixes": cmd_mixes,
         "resolve": cmd_resolve,
+        "lyrics": cmd_lyrics,
         "cloud": cmd_cloud,
         "cloud-add": cmd_cloud_add,
         "cloud-remove": cmd_cloud_remove,

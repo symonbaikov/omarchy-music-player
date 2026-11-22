@@ -126,6 +126,11 @@ that song. Fades, Peak mix and Downloads work across services.
   bottom; and **Now Playing**, with the song's cover big, blurred behind
   everything, and what's up next. `Esc` goes back, then leaves; `Space`
   plays and pauses, `/` searches.
+- **Lyrics** (the speech-bubble button in full screen, or `l`): like Apple
+  Music's, big lines that light up in time with the song and scroll by
+  themselves, the others dimmed and soft; click a line to jump there.
+  Timed lyrics come from [LRCLIB](https://lrclib.net); when it has none,
+  YouTube Music's own lyrics are shown as text.
 - A **settings** screen (the gear in the panel's top right corner) for
   fades, peak mix, autoplay, playing with your account, covers and the bar
   title.
@@ -259,7 +264,7 @@ omarchy-shell io.github.symonbaikov.ytmusic-mpv explore       # Explore
 omarchy-shell io.github.symonbaikov.ytmusic-mpv tab sp        # a tab: yt, sp, sc, cl or my
 omarchy-shell io.github.symonbaikov.ytmusic-mpv download      # download the playing song
 omarchy-shell io.github.symonbaikov.ytmusic-mpv fullscreen    # full screen on / off
-omarchy-shell io.github.symonbaikov.ytmusic-mpv full nowplaying # full screen on a page: home, browse, nowplaying, yt, sp, sc, cl, my
+omarchy-shell io.github.symonbaikov.ytmusic-mpv full lyrics  # full screen on a page: home, browse, nowplaying, lyrics, yt, sp, sc, cl, my
 omarchy-shell io.github.symonbaikov.ytmusic-mpv cloud         # connect a cloud storage
 ```
 
@@ -332,6 +337,10 @@ omarchy bar set io.github.symonbaikov.ytmusic-mpv playbackCookies On
 - **SoundCloud** is read by yt-dlp with the same browser cookies as
   YouTube. Album art comes from Spotify's (`i.scdn.co`) and SoundCloud's
   (`sndcdn.com`) image hosts.
+- **Lyrics** are fetched only while the Lyrics view is open, for the song
+  that's playing: its title, artist and length go to `lrclib.net` (an open
+  lyrics database, no account), or its ID to YouTube Music's web API without
+  an account. They're cached in the cache folder.
 - **Your mixes** are kept in `~/.local/share/io.github.symonbaikov.ytmusic-mpv/mixes.json`.
 - **Cloud storage** is reached only by rclone, and only the storage you
   connected. A new storage's settings go into rclone's own config (passwords

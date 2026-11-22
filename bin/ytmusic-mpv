@@ -122,11 +122,12 @@ VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 # SoundCloud, "sp:<id>" for Spotify (played from its YouTube Music match),
 # "cl:<source>/<hash>" for a file in your own cloud storage (see "cloud").
 TRACK_KEY_RE = re.compile(r"^(?:[A-Za-z0-9_-]{11}|sc:(?:[0-9]{1,20}|[A-Za-z0-9_-]{1,100}/[A-Za-z0-9_-]{1,200})|sp:[A-Za-z0-9]{22}"
-                          r"|cl:[a-f0-9]{8}/[a-f0-9]{16}|rd:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$")
+                          r"|cl:[a-f0-9]{8}/[a-f0-9]{16}|ms:[a-f0-9]{8}/[A-Za-z0-9_-]{1,64}|rd:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$")
 SERVICE_LIST_RE = re.compile(
     r"^(?:sc:(?:likes|sets):[A-Za-z0-9_-]{1,100}|sc:set:[A-Za-z0-9_-]{1,100}/[A-Za-z0-9_-]{1,200}|sc:search"
     r"|sp:liked|sp:pl:[A-Za-z0-9]{22}|mix:all|mix:[a-f0-9]{8}|cl:[a-f0-9]{8}(?::[a-f0-9]{16})?"
-    r"|rd:(?:fav|top|vote|search|country:[A-Z]{2}|tag:[a-z0-9-]{1,40}))$")
+    r"|rd:(?:fav|top|vote|search|country:[A-Z]{2}|tag:[a-z0-9-]{1,40})"
+    r"|ms:[a-f0-9]{8}:(?:fav|rnd|al:[A-Za-z0-9_-]{1,64}|pl:[A-Za-z0-9_-]{1,64}))$")
 SC_USER_RE = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
 SPOTIFY_SCHEME = "ytmusic-spotify://"
 # browser[+keyring][:profile]; the profile may be a path (Zen, LibreWolf and
@@ -174,7 +175,7 @@ def is_list_id(value):
 
 
 def source_of(key):
-    return key[:2] if key[:3] in ("sc:", "sp:", "cl:", "rd:") else "yt"
+    return key[:2] if key[:3] in ("sc:", "sp:", "cl:", "rd:", "ms:") else "yt"
 
 
 def check_playlist_id(value):
@@ -374,6 +375,8 @@ def list_source(playlist_id):
 def fetch_tracks(playlist_id, browser):
     if playlist_id.startswith("rd:"):
         return fetch_radio(playlist_id)
+    if playlist_id.startswith("ms:"):
+        return fetch_server_tracks(playlist_id)
     if playlist_id.startswith("sc:"):
         return fetch_sc_tracks(playlist_id, browser)
     if playlist_id.startswith("sp:"):
@@ -714,6 +717,9 @@ def cmd_resolve(args):
         if key.startswith("rd:"):
             emit({"type": "resolved", "key": key, "url": radio_stream_url(key)})
             return
+        if key.startswith("ms:"):
+            emit({"type": "resolved", "key": key, "url": server_stream_url(key)})
+            return
         vid = resolve_spotify(key) if key.startswith("sp:") else None
     except RuntimeError as exc:
         fail(str(exc))
@@ -967,8 +973,8 @@ def cmd_playlists(args):
         cached, stale = [], False
         for src in sources:
             index = read_json(os.path.join(CLOUD_DIR, f"{src['id']}.json"))
-            if isinstance(index, dict) and isinstance(index.get("tracks"), list):
-                cached += cloud_lists(src, index)
+            if isinstance(index, dict) and (isinstance(index.get("tracks"), list) or isinstance(index.get("lists"), list)):
+                cached += source_lists(src, index)
                 stale = stale or time.time() - float(index.get("fetchedAt") or 0) > limit
             else:
                 stale = True
@@ -1192,6 +1198,9 @@ def track_url(track):
     if key.startswith("rd:"):
         # mpv/ytmusic.lua resolves it to the station's stream.
         return RADIO_SCHEME + key[3:]
+    if key.startswith("ms:"):
+        # mpv/ytmusic.lua resolves it to the media server's stream.
+        return SERVER_SCHEME + key[3:]
     return f"https://music.youtube.com/watch?v={key}"
 
 
@@ -1462,6 +1471,8 @@ def cache_name(key):
         return resolve_spotify(key)
     if key.startswith("cl:"):
         return "cl" + key.rsplit("/", 1)[-1]
+    if key.startswith("ms:"):
+        return "ms" + hashlib.sha1(key.encode()).hexdigest()[:16]
     return key
 
 
@@ -1588,6 +1599,8 @@ def mix_entry(name):
         return sc_track_key(name), None
     if (name or "").startswith(CLOUD_SCHEME) and CLOUD_KEY_RE.match("cl:" + name[len(CLOUD_SCHEME):]):
         return "cl:" + name[len(CLOUD_SCHEME):], None
+    if (name or "").startswith(SERVER_SCHEME) and SERVER_KEY_RE.match("ms:" + name[len(SERVER_SCHEME):]):
+        return "ms:" + name[len(SERVER_SCHEME):], None
     path = os.path.realpath(name or "")
     if os.path.dirname(path) != os.path.realpath(MIX_DIR):
         return None, None
@@ -1645,6 +1658,8 @@ def download_audio(video_id, cookie_opts, clients=None, deadline=AUDIO_DEADLINE)
     name = cache_name(video_id)
     if video_id.startswith("cl:"):
         return copy_cloud_audio(video_id, name), "cloud"
+    if video_id.startswith("ms:"):
+        return download_server_audio(video_id, name), "server"
     url = download_url(video_id)
     if video_id.startswith("sc:"):
         clients = [None]
@@ -2828,7 +2843,7 @@ CLOUD_KINDS = {
     "dropbox": {"type": "dropbox", "oauth": True},
     "onedrive": {"type": "onedrive", "oauth": True},
 }
-CLOUD_KIND_NAMES = {"local": "This computer", "s3": "S3", "sftp": "SFTP", "smb": "SMB", "webdav": "WebDAV", "ftp": "FTP",
+CLOUD_KIND_NAMES = {"local": "This computer", "subsonic": "Subsonic", "jellyfin": "Jellyfin", "plex": "Plex", "s3": "S3", "sftp": "SFTP", "smb": "SMB", "webdav": "WebDAV", "ftp": "FTP",
                     "drive": "Google Drive", "dropbox": "Dropbox", "onedrive": "OneDrive", "remote": "rclone"}
 FIELD_RE = {
     "host": re.compile(r"^[A-Za-z0-9.:\[\]_-]{1,253}$"),
@@ -2875,8 +2890,9 @@ def read_cloud():
     items = data.get("sources") if isinstance(data, dict) and isinstance(data.get("sources"), list) else []
     out = []
     for s in items:
-        local = isinstance(s, dict) and s.get("kind") == "local" and s.get("remote") == "" \
-            and isinstance(s.get("path"), str) and os.path.isabs(s["path"])
+        local = isinstance(s, dict) and s.get("remote") == "" and isinstance(s.get("path"), str) and (
+            (s.get("kind") == "local" and os.path.isabs(s["path"]))
+            or (s.get("kind") in SERVER_KINDS and SERVER_URL_RE.match(s["path"]) is not None))
         if (isinstance(s, dict) and CLOUD_SRC_RE.match(str(s.get("id", "")))
                 and (local or REMOTE_NAME_RE.match(str(s.get("remote", "")))) and isinstance(s.get("path", ""), str)):
             out.append({"id": s["id"], "remote": s["remote"], "path": s.get("path", ""), "kind": str(s.get("kind", "remote")),
@@ -3033,6 +3049,9 @@ def cmd_cloud_add(args):
     if kind == "local":
         add_local_folder(form)
         return
+    if kind in SERVER_KINDS:
+        add_media_server(kind, form)
+        return
     if not rclone_available():
         fail("rclone isn't installed (omarchy pkg add rclone)", setup="rclone")
     fields = form.get("fields") if isinstance(form.get("fields"), dict) else {}
@@ -3115,6 +3134,8 @@ def cmd_cloud_remove(args):
     if not src:
         fail("No such storage")
     write_cloud([s for s in read_cloud() if s["id"] != src["id"]])
+    if src["kind"] in SERVER_KINDS:
+        save_server_secret(src["id"], None)
     if src["created"] and src["remote"] and not any(s["remote"] == src["remote"] for s in read_cloud()):
         delete_remote(src["remote"])
     for path in (os.path.join(CLOUD_DIR, f"{src['id']}.json"),):
@@ -3266,10 +3287,10 @@ def cloud_index(src, max_age=None):
     older than max_age seconds)."""
     path = os.path.join(CLOUD_DIR, f"{src['id']}.json")
     cached = read_json(path)
-    if isinstance(cached, dict) and isinstance(cached.get("tracks"), list):
+    if isinstance(cached, dict) and (isinstance(cached.get("tracks"), list) or isinstance(cached.get("lists"), list)):
         if max_age is None or time.time() - float(cached.get("fetchedAt") or 0) <= max_age:
             return cached
-    index = fetch_cloud_index(src)
+    index = fetch_server_index(src) if src["kind"] in SERVER_KINDS else fetch_cloud_index(src)
     index["fetchedAt"] = int(time.time())
     os.makedirs(CLOUD_DIR, mode=0o700, exist_ok=True)
     write_json_atomic(path, index)
@@ -3309,11 +3330,15 @@ def cloud_lists(src, index):
     return items
 
 
+def source_lists(src, index):
+    return server_lists(src, index) if src["kind"] in SERVER_KINDS else cloud_lists(src, index)
+
+
 def fetch_cloud_playlists(sources, max_age):
     items, errors = [], []
     for src in sources:
         try:
-            items += cloud_lists(src, cloud_index(src, max_age))
+            items += source_lists(src, cloud_index(src, max_age))
         except RuntimeError as exc:
             errors.append(f"{src['title']}: {exc}")
             items.append({"id": f"cl:{src['id']}", "title": src["title"], "count": None, "subtitle": str(exc)[:120]})
@@ -3373,7 +3398,7 @@ def stop_cloud_server():
 
 
 def cloud_upstreams(sources):
-    return " ".join(f'"{s["id"]}={s["remote"]}:{s["path"]}"' for s in sources if s["kind"] != "local")
+    return " ".join(f'"{s["id"]}={s["remote"]}:{s["path"]}"' for s in sources if s["kind"] not in ("local",) + SERVER_KINDS)
 
 
 def server_answers(state, timeout=2):
@@ -4107,6 +4132,483 @@ def cmd_radio_favs(_args):
     emit({"type": "radioFavs", "ids": [t["id"] for t in radio_favorites()]})
 
 
+# ---- media servers: Navidrome / Subsonic, Jellyfin, Plex ---------------------------
+# Your own music server, in the Files tab: its recently added albums (with
+# their covers), playlists, favorites and a random mix. Signing in keeps a
+# token, never the password: Subsonic's salted token (md5 of password and
+# salt), Jellyfin's access token, Plex's token from its PIN sign-in in the
+# browser. Tokens live owner-only in servers.json.
+#
+# A song is "ms:<source>/<id>"; lists are "ms:<source>:al:<id>" (an album),
+# "ms:<source>:pl:<id>" (a playlist), "ms:<source>:fav" and "ms:<source>:rnd".
+# mpv gets ytmusic-server://<source>/<id>, resolved here to a stream URL.
+
+SERVER_KINDS = ("subsonic", "jellyfin", "plex")
+SERVER_SECRETS_PATH = os.path.join(DATA_DIR, "servers.json")
+SERVER_SCHEME = "ytmusic-server://"
+SERVER_KEY_RE = re.compile(r"^ms:([a-f0-9]{8})/([A-Za-z0-9_-]{1,64})$")
+SERVER_LIST_RE = re.compile(r"^ms:([a-f0-9]{8}):(fav|rnd|al:[A-Za-z0-9_-]{1,64}|pl:[A-Za-z0-9_-]{1,64})$")
+SERVER_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+SERVER_URL_RE = re.compile(r"^https?://[A-Za-z0-9.\[\]:_-]{1,253}(?::[0-9]{1,5})?(?:/[A-Za-z0-9._~/%-]{0,200})?$")
+SUBSONIC_CLIENT = "OmarchyMusicPlayer"
+PLEX_PRODUCT = "Omarchy Music Player"
+SERVER_ALBUMS = 60
+
+
+def server_secrets():
+    data = read_json(SERVER_SECRETS_PATH)
+    return data if isinstance(data, dict) else {}
+
+
+def save_server_secret(src_id, secret):
+    data = server_secrets()
+    if secret is None:
+        data.pop(src_id, None)
+    else:
+        data[src_id] = secret
+    os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
+    fd = os.open(SERVER_SECRETS_PATH + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        json.dump(data, fh)
+    os.replace(SERVER_SECRETS_PATH + ".tmp", SERVER_SECRETS_PATH)
+
+
+def server_request(url, headers=None, method="GET", body=None, timeout=15):
+    data = json.dumps(body).encode() if body is not None else None
+    hdrs = {"Accept": "application/json", "User-Agent": LRCLIB_UA, **(headers or {})}
+    if data is not None:
+        hdrs["Content-Type"] = "application/json"
+    request = urllib.request.Request(url, data=data, method=method, headers=hdrs)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read(16 * 1024 * 1024)
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            raise RuntimeError("the server refused the sign-in (check the user name and password)")
+        raise RuntimeError(f"the server answered {exc.code}")
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"couldn't reach the server: {getattr(exc, 'reason', exc)}")
+    try:
+        return json.loads(raw or b"{}")
+    except ValueError:
+        raise RuntimeError("the server's answer wasn't JSON (is this the right address?)")
+
+
+def server_base(raw):
+    url = str(raw or "").strip().rstrip("/")
+    if url and "://" not in url:
+        url = "http://" + url
+    if not SERVER_URL_RE.match(url):
+        raise RuntimeError("That server address doesn't look right")
+    return url
+
+
+# -- Subsonic (Navidrome, Airsonic, Gonic …)
+
+def subsonic_params(secret, **extra):
+    return urllib.parse.urlencode({"u": secret["user"], "t": secret["token"], "s": secret["salt"],
+                                   "v": "1.16.1", "c": SUBSONIC_CLIENT, "f": "json", **extra})
+
+
+def subsonic(src, secret, method, **params):
+    data = server_request(f"{src['path']}/rest/{method}?" + subsonic_params(secret, **params))
+    body = data.get("subsonic-response") if isinstance(data, dict) else None
+    if not isinstance(body, dict):
+        raise RuntimeError("that doesn't look like a Subsonic server")
+    if body.get("status") != "ok":
+        err = body.get("error") or {}
+        if err.get("code") in (40, 41, 50):
+            raise RuntimeError("the server refused the sign-in (check the user name and password)")
+        raise RuntimeError(clean_text(err.get("message") or "the server said no", 200))
+    return body
+
+
+def subsonic_song(src_id, s):
+    if not isinstance(s, dict) or not SERVER_ID_RE.match(str(s.get("id", ""))):
+        return None
+    return {"id": f"ms:{src_id}/{s['id']}", "title": clean_text(s.get("title"), 200) or str(s["id"]),
+            "artist": clean_text(s.get("artist"), 200), "album": clean_text(s.get("album"), 200),
+            "duration": int(s["duration"]) if isinstance(s.get("duration"), (int, float)) and s["duration"] > 0 else None,
+            "_art": s.get("coverArt") or s.get("albumId")}
+
+
+# -- Jellyfin
+
+def jellyfin_headers(secret=None):
+    auth = (f'MediaBrowser Client="{PLEX_PRODUCT}", Device="Omarchy", '
+            f'DeviceId="{(secret or {}).get("device") or "omarchy"}", Version="1"')
+    if secret and secret.get("token"):
+        auth += f', Token="{secret["token"]}"'
+    return {"Authorization": auth, "X-Emby-Authorization": auth}
+
+
+def jellyfin(src, secret, path, **params):
+    query = ("?" + urllib.parse.urlencode(params)) if params else ""
+    return server_request(f"{src['path']}{path}{query}", jellyfin_headers(secret))
+
+
+def jellyfin_song(src_id, it):
+    if not isinstance(it, dict) or not SERVER_ID_RE.match(str(it.get("Id", ""))):
+        return None
+    ticks = it.get("RunTimeTicks")
+    artists = it.get("Artists") if isinstance(it.get("Artists"), list) else []
+    return {"id": f"ms:{src_id}/{it['Id']}", "title": clean_text(it.get("Name"), 200) or it["Id"],
+            "artist": clean_text(", ".join(str(a) for a in artists[:3]) or it.get("AlbumArtist"), 200),
+            "album": clean_text(it.get("Album"), 200),
+            "duration": int(ticks / 10_000_000) if isinstance(ticks, (int, float)) and ticks > 0 else None,
+            "_art": it.get("AlbumId") or it["Id"]}
+
+
+# -- Plex
+
+def plex_headers(secret):
+    return {"X-Plex-Token": secret["token"], "X-Plex-Client-Identifier": secret["client"],
+            "X-Plex-Product": PLEX_PRODUCT}
+
+
+def plex(src, secret, path, **params):
+    query = ("?" + urllib.parse.urlencode(params)) if params else ""
+    data = server_request(f"{src['path']}{path}{query}", plex_headers(secret))
+    container = data.get("MediaContainer") if isinstance(data, dict) else None
+    if not isinstance(container, dict):
+        raise RuntimeError("that doesn't look like a Plex server")
+    return container
+
+
+def plex_music_sections(src, secret):
+    dirs = plex(src, secret, "/library/sections").get("Directory") or []
+    return [d["key"] for d in dirs if isinstance(d, dict) and d.get("type") == "artist" and SERVER_ID_RE.match(str(d.get("key", "")))]
+
+
+def plex_song(src_id, m):
+    if not isinstance(m, dict) or not SERVER_ID_RE.match(str(m.get("ratingKey", ""))):
+        return None
+    dur = m.get("duration")
+    return {"id": f"ms:{src_id}/{m['ratingKey']}", "title": clean_text(m.get("title"), 200) or m["ratingKey"],
+            "artist": clean_text(m.get("originalTitle") or m.get("grandparentTitle"), 200),
+            "album": clean_text(m.get("parentTitle"), 200),
+            "duration": int(dur / 1000) if isinstance(dur, (int, float)) and dur > 0 else None,
+            "_art": m.get("parentThumb") or m.get("thumb")}
+
+
+# -- signing in (from cloud-add)
+
+def add_media_server(kind, form):
+    """Sign in to a server and keep it as a source of the Files tab."""
+    fields = form.get("fields") if isinstance(form.get("fields"), dict) else {}
+    src_id = os.urandom(4).hex()
+    if kind == "plex":
+        base, secret, title = plex_sign_in()
+    else:
+        try:
+            base = server_base(fields.get("url"))
+        except RuntimeError as exc:
+            fail(str(exc))
+        user = clean_text(fields.get("user"), 200)
+        password = str(fields.get("pass") or "")
+        if not user:
+            fail("user is needed")
+        emit({"type": "cloud", "state": "checking"})
+        src = {"id": src_id, "path": base}
+        try:
+            if kind == "subsonic":
+                salt = os.urandom(8).hex()
+                secret = {"user": user, "salt": salt, "token": hashlib.md5((password + salt).encode()).hexdigest()}
+                subsonic(src, secret, "ping")
+                title = "Navidrome" if "navidrome" in base.lower() else "Subsonic"
+            else:
+                device = os.urandom(8).hex()
+                auth = server_request(f"{base}/Users/AuthenticateByName", jellyfin_headers({"device": device}),
+                                      method="POST", body={"Username": user, "Pw": password})
+                token, uid = auth.get("AccessToken"), (auth.get("User") or {}).get("Id")
+                if not isinstance(token, str) or not SERVER_ID_RE.match(str(uid or "")):
+                    raise RuntimeError("Jellyfin didn't sign us in")
+                secret = {"token": token, "user": uid, "device": device}
+                title = "Jellyfin"
+        except RuntimeError as exc:
+            fail(f"Couldn't sign in: {exc}")
+    title = clean_text(form.get("title"), 80) or title
+    sources = read_cloud()
+    sources.append({"id": src_id, "remote": "", "path": base, "kind": kind, "title": title, "created": False})
+    save_server_secret(src_id, secret)
+    write_cloud(sources)
+    emit({"type": "cloud", "state": "added", "id": src_id, "title": title})
+
+
+def plex_sign_in():
+    """Plex's PIN sign-in: the browser opens plex.tv, the user allows it,
+    and Plex hands over a token; then the first server with music."""
+    client = os.urandom(12).hex()
+    head = {"X-Plex-Client-Identifier": client, "X-Plex-Product": PLEX_PRODUCT}
+    try:
+        pin = server_request("https://plex.tv/api/v2/pins?strong=true", head, method="POST", body={})
+    except RuntimeError as exc:
+        fail(f"Couldn't reach plex.tv: {exc}")
+    if not isinstance(pin.get("id"), int) or not isinstance(pin.get("code"), str):
+        fail("Plex didn't start the sign-in")
+    url = "https://app.plex.tv/auth#?" + urllib.parse.urlencode(
+        {"clientID": client, "code": pin["code"], "context[device][product]": PLEX_PRODUCT})
+    emit({"type": "cloud", "state": "waiting", "kind": "plex"})
+    opener = shutil_which("xdg-open")
+    if opener:
+        subprocess.Popen([opener, url], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    token = None
+    for _ in range(150):                       # five minutes
+        time.sleep(2)
+        try:
+            state = server_request(f"https://plex.tv/api/v2/pins/{pin['id']}", head)
+        except RuntimeError:
+            continue
+        if isinstance(state.get("authToken"), str) and state["authToken"]:
+            token = state["authToken"]
+            break
+    if not token:
+        fail("The Plex sign-in didn't finish")
+    emit({"type": "cloud", "state": "checking"})
+    secret = {"token": token, "client": client}
+    try:
+        resources = server_request("https://plex.tv/api/v2/resources?includeHttps=1", plex_headers(secret))
+    except RuntimeError as exc:
+        fail(f"Couldn't list your Plex servers: {exc}")
+    for res in resources if isinstance(resources, list) else []:
+        if not isinstance(res, dict) or "server" not in str(res.get("provides", "")):
+            continue
+        secret = {"token": res.get("accessToken") or token, "client": client}
+        conns = sorted((c for c in res.get("connections") or [] if isinstance(c, dict)),
+                       key=lambda c: (not c.get("local"), c.get("relay") is True))
+        for c in conns:
+            try:
+                base = server_base(c.get("uri"))
+                if plex_music_sections({"path": base}, secret):
+                    return base, secret, clean_text(res.get("name"), 60) or "Plex"
+            except RuntimeError:
+                continue
+    fail("No Plex server with a music library answered")
+
+
+# -- lists, songs, streams
+
+def server_secret(src):
+    secret = server_secrets().get(src["id"])
+    if not isinstance(secret, dict):
+        raise RuntimeError("Sign in to this server again (remove it and add it)")
+    return secret
+
+
+def server_cover_path(src_id, art):
+    return os.path.join(COVERS_DIR, f"ms-{src_id}-{hashlib.sha1(str(art).encode()).hexdigest()[:16]}.jpg")
+
+
+def server_cover_url(src, secret, art):
+    if src["kind"] == "subsonic":
+        return f"{src['path']}/rest/getCoverArt?" + subsonic_params(secret, id=art, size=300)
+    if src["kind"] == "jellyfin":
+        return f"{src['path']}/Items/{urllib.parse.quote(str(art))}/Images/Primary?maxWidth=300&quality=85"
+    return (f"{src['path']}/photo/:/transcode?" + urllib.parse.urlencode(
+        {"width": 300, "height": 300, "minSize": 1, "url": art, "X-Plex-Token": secret["token"]}))
+
+
+def fetch_server_covers(src, secret, arts):
+    """The covers, made local files (the panel shows only local ones)."""
+    import concurrent.futures
+    os.makedirs(COVERS_DIR, mode=0o700, exist_ok=True)
+    headers = jellyfin_headers(secret) if src["kind"] == "jellyfin" else {}
+    def one(art):
+        path = server_cover_path(src["id"], art)
+        if os.path.isfile(path):
+            return
+        try:
+            request = urllib.request.Request(server_cover_url(src, secret, art), headers={"User-Agent": LRCLIB_UA, **headers})
+            with urllib.request.urlopen(request, timeout=10) as response:
+                body = response.read(4 * 1024 * 1024)
+                kind = response.headers.get_content_type()
+        except (OSError, ValueError):
+            return
+        if not kind.startswith("image/"):
+            return
+        if kind == "image/jpeg":
+            with open(path, "wb") as fh:
+                fh.write(body)
+            return
+        tmp = path + ".src"
+        with open(tmp, "wb") as fh:
+            fh.write(body)
+        try:
+            subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", tmp, "-frames:v", "1", path],
+                           capture_output=True, timeout=20, stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+        list(pool.map(one, [a for a in dict.fromkeys(arts) if a][:120]))
+
+
+def with_server_covers(src_id, items):
+    out = []
+    for it in items:
+        it = dict(it)
+        art = it.pop("_art", None)
+        if art and os.path.isfile(server_cover_path(src_id, art)):
+            it["cover"] = server_cover_path(src_id, art)
+        out.append(it)
+    return out
+
+
+def fetch_server_index(src):
+    """A server's lists: favorites, a random mix, playlists, newest albums."""
+    secret = server_secret(src)
+    sid, kind = src["id"], src["kind"]
+    lists = [{"id": f"ms:{sid}:fav", "title": f"{src['title']} · Favorites", "count": None, "subtitle": "Songs you starred"},
+             {"id": f"ms:{sid}:rnd", "title": f"{src['title']} · Random mix", "count": None, "subtitle": "New every time"}]
+    albums, playlists = [], []
+    if kind == "subsonic":
+        for p in (subsonic(src, secret, "getPlaylists").get("playlists") or {}).get("playlist") or []:
+            if SERVER_ID_RE.match(str(p.get("id", ""))):
+                playlists.append({"id": f"ms:{sid}:pl:{p['id']}", "title": clean_text(p.get("name"), 120), "count": p.get("songCount"),
+                                  "subtitle": "Playlist", "_art": p.get("coverArt")})
+        for a in (subsonic(src, secret, "getAlbumList2", type="newest", size=SERVER_ALBUMS).get("albumList2") or {}).get("album") or []:
+            if SERVER_ID_RE.match(str(a.get("id", ""))):
+                albums.append({"id": f"ms:{sid}:al:{a['id']}", "title": clean_text(a.get("name"), 120), "count": a.get("songCount"),
+                               "subtitle": clean_text(a.get("artist"), 120), "_art": a.get("coverArt") or a["id"]})
+    elif kind == "jellyfin":
+        uid = secret["user"]
+        for p in jellyfin(src, secret, f"/Users/{uid}/Items", IncludeItemTypes="Playlist", Recursive="true",
+                          Fields="ChildCount").get("Items") or []:
+            if SERVER_ID_RE.match(str(p.get("Id", ""))) and p.get("MediaType") in (None, "Audio"):
+                playlists.append({"id": f"ms:{sid}:pl:{p['Id']}", "title": clean_text(p.get("Name"), 120), "count": p.get("ChildCount"),
+                                  "subtitle": "Playlist", "_art": p["Id"]})
+        for a in jellyfin(src, secret, f"/Users/{uid}/Items", IncludeItemTypes="MusicAlbum", Recursive="true",
+                          SortBy="DateCreated", SortOrder="Descending", Limit=SERVER_ALBUMS, Fields="ChildCount").get("Items") or []:
+            if SERVER_ID_RE.match(str(a.get("Id", ""))):
+                albums.append({"id": f"ms:{sid}:al:{a['Id']}", "title": clean_text(a.get("Name"), 120), "count": a.get("ChildCount"),
+                               "subtitle": clean_text(a.get("AlbumArtist"), 120), "_art": a["Id"]})
+    else:
+        for p in plex(src, secret, "/playlists", playlistType="audio").get("Metadata") or []:
+            if SERVER_ID_RE.match(str(p.get("ratingKey", ""))):
+                playlists.append({"id": f"ms:{sid}:pl:{p['ratingKey']}", "title": clean_text(p.get("title"), 120),
+                                  "count": p.get("leafCount"), "subtitle": "Playlist", "_art": p.get("composite") or p.get("thumb")})
+        for section in plex_music_sections(src, secret)[:3]:
+            for a in plex(src, secret, f"/library/sections/{section}/all", type=9, sort="addedAt:desc",
+                          **{"X-Plex-Container-Start": 0, "X-Plex-Container-Size": SERVER_ALBUMS}).get("Metadata") or []:
+                if SERVER_ID_RE.match(str(a.get("ratingKey", ""))):
+                    albums.append({"id": f"ms:{sid}:al:{a['ratingKey']}", "title": clean_text(a.get("title"), 120),
+                                   "count": a.get("leafCount"), "subtitle": clean_text(a.get("parentTitle"), 120), "_art": a.get("thumb")})
+        lists = lists[1:]                       # Plex has no starred songs
+    fetch_server_covers(src, secret, [i.get("_art") for i in playlists + albums])
+    return {"lists": lists + with_server_covers(sid, playlists) + with_server_covers(sid, albums[:SERVER_ALBUMS])}
+
+
+def server_lists(src, index):
+    return [dict(l) for l in index.get("lists") or [] if isinstance(l, dict)]
+
+
+def fetch_server_tracks(list_id):
+    m = SERVER_LIST_RE.match(list_id)
+    src = cloud_source(m.group(1)) if m else None
+    if not src or src["kind"] not in SERVER_KINDS:
+        raise RuntimeError("That server isn't connected any more")
+    secret = server_secret(src)
+    sid, what = src["id"], m.group(2)
+    songs = []
+    if src["kind"] == "subsonic":
+        if what == "fav":
+            raw = (subsonic(src, secret, "getStarred2").get("starred2") or {}).get("song") or []
+        elif what == "rnd":
+            raw = (subsonic(src, secret, "getRandomSongs", size=100).get("randomSongs") or {}).get("song") or []
+        elif what.startswith("al:"):
+            raw = (subsonic(src, secret, "getAlbum", id=what[3:]).get("album") or {}).get("song") or []
+        else:
+            raw = (subsonic(src, secret, "getPlaylist", id=what[3:]).get("playlist") or {}).get("entry") or []
+        songs = [subsonic_song(sid, s) for s in raw]
+    elif src["kind"] == "jellyfin":
+        uid = secret["user"]
+        common = {"IncludeItemTypes": "Audio", "Recursive": "true", "Limit": 500}
+        if what == "fav":
+            raw = jellyfin(src, secret, f"/Users/{uid}/Items", Filters="IsFavorite", **common).get("Items") or []
+        elif what == "rnd":
+            raw = jellyfin(src, secret, f"/Users/{uid}/Items", SortBy="Random", **dict(common, Limit=100)).get("Items") or []
+        elif what.startswith("al:"):
+            raw = jellyfin(src, secret, f"/Users/{uid}/Items", ParentId=what[3:], SortBy="ParentIndexNumber,IndexNumber",
+                           **common).get("Items") or []
+        else:
+            raw = jellyfin(src, secret, f"/Playlists/{what[3:]}/Items", UserId=uid).get("Items") or []
+        songs = [jellyfin_song(sid, s) for s in raw]
+    else:
+        if what == "rnd":
+            raw = []
+            for section in plex_music_sections(src, secret)[:1]:
+                raw = plex(src, secret, f"/library/sections/{section}/all", type=10, sort="random",
+                           **{"X-Plex-Container-Start": 0, "X-Plex-Container-Size": 100}).get("Metadata") or []
+        elif what.startswith("al:"):
+            raw = plex(src, secret, f"/library/metadata/{what[3:]}/children").get("Metadata") or []
+        elif what.startswith("pl:"):
+            raw = plex(src, secret, f"/playlists/{what[3:]}/items").get("Metadata") or []
+        else:
+            raw = []
+        songs = [plex_song(sid, s) for s in raw]
+    songs = [s for s in songs if s][:MAX_TRACKS]
+    fetch_server_covers(src, secret, [s.get("_art") for s in songs])
+    return {"title": "", "items": with_server_covers(sid, songs)}
+
+
+def server_stream_url(key):
+    m = SERVER_KEY_RE.match(key or "")
+    src = cloud_source(m.group(1)) if m else None
+    if not src or src["kind"] not in SERVER_KINDS:
+        raise RuntimeError("That server isn't connected any more")
+    secret, item = server_secret(src), m.group(2)
+    if src["kind"] == "subsonic":
+        return f"{src['path']}/rest/stream?" + subsonic_params(secret, id=item)
+    if src["kind"] == "jellyfin":
+        return f"{src['path']}/Audio/{item}/stream?" + urllib.parse.urlencode({"static": "true", "api_key": secret["token"]})
+    meta = (plex(src, secret, f"/library/metadata/{item}").get("Metadata") or [{}])[0]
+    part = (((meta.get("Media") or [{}])[0].get("Part")) or [{}])[0].get("key")
+    if not isinstance(part, str) or not part.startswith("/library/parts/"):
+        raise RuntimeError("Plex didn't say where the song's file is")
+    return f"{src['path']}{part}?" + urllib.parse.urlencode({"X-Plex-Token": secret["token"]})
+
+
+def download_server_audio(key, name):
+    """A server song into the audio cache (peak mix, downloads)."""
+    url = server_stream_url(key)
+    os.makedirs(MIX_DIR, mode=0o700, exist_ok=True)
+    tmp = os.path.join(MIX_DIR, f".audio-{name}.part")
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": LRCLIB_UA}), timeout=30) as response:
+            kind = response.headers.get_content_type()
+            ext = {"audio/mpeg": "mp3", "audio/flac": "flac", "audio/x-flac": "flac", "audio/ogg": "ogg", "audio/opus": "opus",
+                   "audio/mp4": "m4a", "audio/aac": "m4a", "audio/x-m4a": "m4a", "audio/wav": "wav", "audio/x-wav": "wav",
+                   "audio/webm": "webm"}.get(kind, "audio")
+            total = 0
+            with open(tmp, "wb") as fh:
+                while True:
+                    chunk = response.read(1 << 16)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > 200 * 1024 * 1024:
+                        raise RuntimeError("the file is too big")
+                    fh.write(chunk)
+    except (OSError, ValueError) as exc:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise RuntimeError(f"couldn't fetch the song from the server: {exc}")
+    if ext == "audio":
+        ext = "mka"
+    target = os.path.join(MIX_DIR, f"audio-{name}.{ext}")
+    os.replace(tmp, target)
+    meta = {"audio": os.path.basename(target), "heatmap": [], "usedAt": int(time.time())}
+    write_json_atomic(os.path.join(MIX_DIR, f"{name}.json"), meta)
+    return meta
+
+
 # ---- problem reports ------------------------------------------------------------
 # One click in the panel: everything about the error is gathered here and
 # opened as a filled-in GitHub issue in the browser, so the user only presses
@@ -4120,6 +4622,9 @@ REPORT_MAX_URL = 7500
 
 def redact(text):
     text = str(text or "")
+    # A media server's sign-in in a stream URL (Subsonic's u/t/s, Jellyfin's
+    # api_key, Plex's token).
+    text = re.sub(r"([?&](?:u|t|s|p|api_key|X-Plex-Token)=)[^&\s\"']+", r"\1<hidden>", text)
     # The local cloud server's credentials and which file it served.
     text = re.sub(r"https?://[^/\s:@]+:[^/\s@]+@127\.0\.0\.1:[0-9]+/[^\s\"']*", "http://<cloud>/<file>", text)
     text = re.sub(r"ytmusic-cloud://[a-f0-9/]+", "ytmusic-cloud://<song>", text)

@@ -1031,6 +1031,165 @@ class LocalFolder(unittest.TestCase):
                     h.local_file(src, bad)
 
 
+
+class FakeServer:
+    """A tiny HTTP server answering like Subsonic, Jellyfin or Plex."""
+
+    def __init__(self, routes):
+        import http.server, threading
+        routes_ = routes
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+            def answer(self):
+                path, _, query = self.path.partition("?")
+                params = dict(urllib.parse.parse_qsl(query))
+                length = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(length) or b"{}") if length else {}
+                for prefix, fn in routes_:
+                    if path.startswith(prefix):
+                        status, ctype, data = fn(path, params, body, self.headers)
+                        self.send_response(status)
+                        self.send_header("Content-Type", ctype)
+                        self.end_headers()
+                        self.wfile.write(data if isinstance(data, bytes) else json.dumps(data).encode())
+                        return
+                self.send_response(404)
+                self.end_headers()
+            do_GET = do_POST = answer
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.httpd.server_port}"
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.httpd.shutdown()
+
+
+JPEG = b"\xff\xd8\xff\xe0" + b"0" * 64
+AUDIO = b"ID3" + b"\x00" * 2048
+
+
+class MediaServers(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        d = self.dir.name
+        self.env = dict(os.environ, XDG_DATA_HOME=os.path.join(d, "data"), XDG_CACHE_HOME=os.path.join(d, "cache"),
+                        XDG_RUNTIME_DIR=os.path.join(d, "run"))
+        self.servers = []
+
+    def tearDown(self):
+        for srv in self.servers:
+            srv.close()
+        self.dir.cleanup()
+
+    def run_helper(self, *args, stdin=""):
+        import subprocess
+        proc = subprocess.run([sys.executable, "-I", str(HELPER), *args], input=stdin, capture_output=True, text=True,
+                              env=self.env, timeout=60)
+        return [json.loads(l) for l in proc.stdout.splitlines() if l.startswith("{")]
+
+    def check_server(self, kind, routes, fields):
+        srv = FakeServer(routes)
+        self.servers.append(srv)
+        out = self.run_helper("cloud-add", stdin=json.dumps({"kind": kind, "path": "", "fields": dict(fields, url=srv.url)}) + "\n")
+        self.assertEqual(out[-1].get("state"), "added", out)
+        sid = out[-1]["id"]
+        secrets = pathlib.Path(self.env["XDG_DATA_HOME"], h.PLUGIN_ID, "servers.json")
+        self.assertEqual(oct(secrets.stat().st_mode & 0o777), "0o600")
+        self.assertNotIn("hunter2", secrets.read_text())             # never the password
+        lists = [m for m in self.run_helper("playlists", "--service", "cl", "--max-age", "0") if m["type"] == "playlists"][-1]["items"]
+        ids = [l["id"] for l in lists]
+        self.assertIn(f"ms:{sid}:al:al1", ids)
+        album = next(l for l in lists if l["id"] == f"ms:{sid}:al:al1")
+        self.assertTrue(album["cover"].endswith(".jpg") and os.path.isfile(album["cover"]))
+        tracks = [m for m in self.run_helper("tracks", f"ms:{sid}:al:al1") if m["type"] == "tracks"][-1]["items"]
+        self.assertEqual([t["title"] for t in tracks], ["First", "Second"])
+        self.assertEqual(tracks[0]["duration"], 200)
+        self.assertEqual(tracks[0]["artist"], "Band")
+        key = tracks[0]["id"]
+        self.assertTrue(h.TRACK_KEY_RE.match(key))
+        url = self.run_helper("resolve", key)[-1]["url"]
+        self.assertTrue(url.startswith(srv.url))
+        self.assertNotIn("hunter2", url)
+        self.assertNotIn(url.split("?", 1)[-1], h.redact(url))        # the sign-in is masked in reports
+        return sid, key
+
+    def test_subsonic(self):
+        def rest(path, params, body, headers):
+            ok = params.get("u") == "me" and params.get("t") == __import__("hashlib").md5(("hunter2" + params.get("s", "")).encode()).hexdigest()
+            if not ok:
+                return 200, "application/json", {"subsonic-response": {"status": "failed", "error": {"code": 40, "message": "Wrong"}}}
+            song = lambda i, t: {"id": f"tr{i}", "title": t, "artist": "Band", "album": "Album", "duration": 200, "coverArt": "al1"}
+            data = {"ping": {}, "getPlaylists": {"playlists": {"playlist": [{"id": "pl1", "name": "Mine", "songCount": 2}]}},
+                    "getAlbumList2": {"albumList2": {"album": [{"id": "al1", "name": "Album", "artist": "Band", "songCount": 2, "coverArt": "al1"}]}},
+                    "getAlbum": {"album": {"song": [song(1, "First"), song(2, "Second")]}}}
+            method = path.rsplit("/", 1)[-1]
+            if method == "getCoverArt":
+                return 200, "image/jpeg", JPEG
+            if method == "stream":
+                return 200, "audio/mpeg", AUDIO
+            return 200, "application/json", {"subsonic-response": {"status": "ok", **data.get(method, {})}}
+        sid, key = self.check_server("subsonic", [("/rest/", rest)], {"user": "me", "pass": "hunter2"})
+        bad = self.run_helper("cloud-add", stdin=json.dumps({"kind": "subsonic", "fields": {"url": self.servers[0].url, "user": "me", "pass": "wrong"}}) + "\n")
+        self.assertIn("check the user name and password", bad[-1]["message"])
+
+    def test_jellyfin(self):
+        def route(path, params, body, headers):
+            if path == "/Users/AuthenticateByName":
+                if body.get("Pw") != "hunter2":
+                    return 401, "application/json", {}
+                return 200, "application/json", {"AccessToken": "tok123", "User": {"Id": "u1"}}
+            if "tok123" not in headers.get("Authorization", "") and params.get("api_key") != "tok123":
+                return 401, "application/json", {}
+            if path.startswith("/Items/") and path.endswith("/Images/Primary"):
+                return 200, "image/jpeg", JPEG
+            if path == "/Users/u1/Items" and params.get("IncludeItemTypes") == "MusicAlbum":
+                return 200, "application/json", {"Items": [{"Id": "al1", "Name": "Album", "AlbumArtist": "Band", "ChildCount": 2}]}
+            if path == "/Users/u1/Items" and params.get("ParentId") == "al1":
+                mk = lambda i, t: {"Id": f"tr{i}", "Name": t, "Artists": ["Band"], "Album": "Album", "AlbumId": "al1",
+                                   "RunTimeTicks": 200 * 10_000_000}
+                return 200, "application/json", {"Items": [mk(1, "First"), mk(2, "Second")]}
+            return 200, "application/json", {"Items": []}
+        self.check_server("jellyfin", [("/", route)], {"user": "me", "pass": "hunter2"})
+
+    def test_plex_lists_and_stream(self):
+        def route(path, params, body, headers):
+            if headers.get("X-Plex-Token") != "ptok" and params.get("X-Plex-Token") != "ptok":
+                return 401, "application/json", {}
+            mc = lambda **k: {"MediaContainer": k}
+            if path == "/library/sections":
+                return 200, "application/json", mc(Directory=[{"key": "3", "type": "artist"}])
+            if path == "/library/sections/3/all":
+                return 200, "application/json", mc(Metadata=[{"ratingKey": "al1", "title": "Album", "parentTitle": "Band", "leafCount": 2, "thumb": "/t/1"}])
+            if path == "/playlists":
+                return 200, "application/json", mc(Metadata=[])
+            if path == "/library/metadata/al1/children":
+                mk = lambda i, t: {"ratingKey": f"tr{i}", "title": t, "grandparentTitle": "Band", "parentTitle": "Album",
+                                   "duration": 200000, "parentThumb": "/t/1"}
+                return 200, "application/json", mc(Metadata=[mk(1, "First"), mk(2, "Second")])
+            if path == "/library/metadata/tr1":
+                return 200, "application/json", mc(Metadata=[{"Media": [{"Part": [{"key": "/library/parts/9/file.flac"}]}]}])
+            if path.startswith("/photo/"):
+                return 200, "image/jpeg", JPEG
+            return 200, "application/json", mc()
+        srv = FakeServer([("/", route)])
+        self.servers.append(srv)
+        sid = "0a1b2c3d"
+        data = pathlib.Path(self.env["XDG_DATA_HOME"], h.PLUGIN_ID)
+        data.mkdir(parents=True)
+        (data / "cloud.json").write_text(json.dumps({"sources": [{"id": sid, "remote": "", "path": srv.url, "kind": "plex",
+                                                                    "title": "Plex", "created": False}]}))
+        (data / "servers.json").write_text(json.dumps({sid: {"token": "ptok", "client": "c"}}))
+        lists = [m for m in self.run_helper("playlists", "--service", "cl", "--max-age", "0") if m["type"] == "playlists"][-1]["items"]
+        self.assertIn(f"ms:{sid}:al:al1", [l["id"] for l in lists])
+        tracks = [m for m in self.run_helper("tracks", f"ms:{sid}:al:al1") if m["type"] == "tracks"][-1]["items"]
+        self.assertEqual([t["title"] for t in tracks], ["First", "Second"])
+        url = self.run_helper("resolve", tracks[0]["id"])[-1]["url"]
+        self.assertEqual(url, f"{srv.url}/library/parts/9/file.flac?X-Plex-Token=ptok")
+        self.assertEqual(self.run_helper("cloud-remove", sid)[-1]["state"], "removed")
+        self.assertNotIn(sid, json.loads((data / "servers.json").read_text()))
+
+
 class Reports(unittest.TestCase):
     def test_redact_removes_everything_personal(self):
         home = os.path.expanduser("~")

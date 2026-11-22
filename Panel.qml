@@ -176,7 +176,7 @@ Panel {
   property var cloudRemotes: []
   property bool rcloneInstalled: true
   // The form can be used: a folder on this computer needs no rclone.
-  readonly property bool cloudFormUsable: rcloneInstalled || cloudKind === "local"
+  readonly property bool cloudFormUsable: rcloneInstalled || cloudKind === "local" || cloudKindSpec.server === true
   // ~/Music, when it's there and not added yet: offered in one click.
   property string cloudMusicDir: ""
   property bool cloudFormOpen: false
@@ -3155,7 +3155,7 @@ Panel {
             }
             CloudField {
               id: cloudPathField
-              visible: root.cloudFormUsable
+              visible: root.cloudFormUsable && root.cloudKindSpec.server !== true
               width: parent.width
               label: strings.t(root.cloudKind === "s3" ? "cloud.pathS3" : root.cloudKind === "smb" ? "cloud.pathSmb"
                 : root.cloudKind === "local" ? "cloud.pathLocal" : "cloud.path")
@@ -3513,6 +3513,10 @@ Panel {
                     if (/^sc:likes:/.test(rowItem.modelData.id)) return Model.GLYPH.soundcloud
                     if (/^cl:[a-f0-9]{8}$/.test(rowItem.modelData.id)) return Model.GLYPH.cloud
                     if (rowItem.modelData.id === "rd:fav") return Model.GLYPH.heart
+                    if (/^ms:[a-f0-9]{8}:fav$/.test(rowItem.modelData.id)) return Model.GLYPH.heart
+                    if (/^ms:[a-f0-9]{8}:rnd$/.test(rowItem.modelData.id)) return Model.GLYPH.shuffle
+                    if (/^ms:[a-f0-9]{8}:pl:/.test(rowItem.modelData.id)) return Model.GLYPH.playlist
+                    if (/^ms:/.test(rowItem.modelData.id)) return Model.GLYPH.album
                     if (/^rd:/.test(rowItem.modelData.id)) return Model.GLYPH.radioService
                     if (/^cl:/.test(rowItem.modelData.id)) return Model.GLYPH.album
                     if (rowItem.modelData.id === Model.SUPERMIX_ID) return Model.GLYPH.supermix

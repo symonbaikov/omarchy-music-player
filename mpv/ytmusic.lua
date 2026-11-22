@@ -297,6 +297,7 @@ end
 local SPOTIFY = "ytmusic-spotify://"
 local CLOUD = "ytmusic-cloud://"
 local RADIO = "ytmusic-radio://"
+local SERVER = "ytmusic-server://"
 
 local function watch_id(url)
     return url and url:match("^https://music%.youtube%.com/watch%?v=([%w_-]+)$")
@@ -396,6 +397,7 @@ mp.register_event("end-file", function(e)
     local name = entry and entry.filename or ""
     local radio = name:sub(1, #RADIO) == RADIO
     if not entry or not (watch_id(name) or name:sub(1, #SPOTIFY) == SPOTIFY or name:sub(1, #CLOUD) == CLOUD or radio
+        or name:sub(1, #SERVER) == SERVER
         or name:match("^https://[%w.]*soundcloud%.com/")) then return end
     -- A mix ending this song early, or the song simply finishing.
     if mix and mix.state == "ready" and mix.pos == index then return end
@@ -421,7 +423,7 @@ end)
 -- server. The entry keeps its name, so the panel still knows which song it is.
 local function resolved_ok(kind, url)
     if kind == "sp" then return watch_id(url) ~= nil end
-    if kind == "rd" then return url:match("^https?://[^%s]+$") ~= nil end
+    if kind == "rd" or kind == "ms" then return url:match("^https?://[^%s]+$") ~= nil end
     -- A song in a local folder: its file.
     if kind == "cl" and url:sub(1, 1) == "/" then return true end
     return url:match("^http://[%w]+:[%w]+@127%.0%.0%.1:%d+/") ~= nil
@@ -440,6 +442,9 @@ mp.add_hook("on_load", 5, function(hook)
         kind, key = "cl", url:sub(#CLOUD + 1)
         if not key:match("^[%x]+/[%x]+$") then return end
         used_cloud = true
+    elseif url:sub(1, #SERVER) == SERVER then
+        kind, key = "ms", url:sub(#SERVER + 1)
+        if not key:match("^%x+/[%w_%-]+$") then return end
     elseif url:sub(1, #RADIO) == RADIO then
         kind, key = "rd", url:sub(#RADIO + 1)
         if not key:match("^[%x%-]+$") then return end
@@ -462,6 +467,8 @@ mp.add_hook("on_load", 5, function(hook)
         end
         if out and out.type == "resolved" and type(out.url) == "string" and resolved_ok(kind, out.url) then
             mp.set_property("stream-open-filename", out.url)
+        elseif kind == "ms" then
+            msg.error("server song " .. key .. " can't be opened: " .. tostring(out and out.message or "helper failed"))
         elseif kind == "rd" then
             msg.error("radio station " .. key .. " can't be reached: " .. tostring(out and out.message or "helper failed"))
         elseif kind == "sp" then

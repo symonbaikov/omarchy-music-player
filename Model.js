@@ -10,10 +10,10 @@ var MAX_TEXT = 300
 // A list: a YouTube playlist id, or one of the other services' lists
 // (sc:… SoundCloud, sp:… Spotify, mix:… your mixes, cl:… your cloud storage:
 // a source, or one folder in it).
-var PLAYLIST_ID_RE = /^(?:[A-Za-z0-9_-]{2,80}|sc:(?:likes|sets):[A-Za-z0-9_-]{1,100}|sc:set:[A-Za-z0-9_-]{1,100}\/[A-Za-z0-9_-]{1,200}|sc:search|sp:liked|sp:pl:[A-Za-z0-9]{22}|mix:all|mix:[a-f0-9]{8}|cl:[a-f0-9]{8}(?::[a-f0-9]{16})?|rd:(?:fav|top|vote|search|country:[A-Z]{2}|tag:[a-z0-9-]{1,40}))$/
+var PLAYLIST_ID_RE = /^(?:[A-Za-z0-9_-]{2,80}|sc:(?:likes|sets):[A-Za-z0-9_-]{1,100}|sc:set:[A-Za-z0-9_-]{1,100}\/[A-Za-z0-9_-]{1,200}|sc:search|sp:liked|sp:pl:[A-Za-z0-9]{22}|mix:all|mix:[a-f0-9]{8}|cl:[a-f0-9]{8}(?::[a-f0-9]{16})?|rd:(?:fav|top|vote|search|country:[A-Z]{2}|tag:[a-z0-9-]{1,40})|ms:[a-f0-9]{8}:(?:fav|rnd|al:[A-Za-z0-9_-]{1,64}|pl:[A-Za-z0-9_-]{1,64}))$/
 var VIDEO_ID_RE = /^[A-Za-z0-9_-]{11}$/
 // A track from any service: a YouTube video id, sc:…, sp:… or cl:….
-var TRACK_KEY_RE = /^(?:[A-Za-z0-9_-]{11}|sc:(?:[0-9]{1,20}|[A-Za-z0-9_-]{1,100}\/[A-Za-z0-9_-]{1,200})|sp:[A-Za-z0-9]{22}|cl:[a-f0-9]{8}\/[a-f0-9]{16}|rd:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/
+var TRACK_KEY_RE = /^(?:[A-Za-z0-9_-]{11}|sc:(?:[0-9]{1,20}|[A-Za-z0-9_-]{1,100}\/[A-Za-z0-9_-]{1,200})|sp:[A-Za-z0-9]{22}|cl:[a-f0-9]{8}\/[a-f0-9]{16}|rd:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|ms:[a-f0-9]{8}\/[A-Za-z0-9_-]{1,64})$/
 var SERVICES = ["yt", "sp", "sc", "cl", "rd", "my"]
 // Tabs shown unless the user picks others (the "+" tab).
 var DEFAULT_TABS = "yt,sp,sc,cl,rd,my"
@@ -32,6 +32,9 @@ function canDownload(key) { return TRACK_KEY_RE.test(String(key || "")) && !isRa
 // CLOUD_KINDS), with the fields each asks for.
 var CLOUD_KINDS = [
   { id: "local", label: "This computer", fields: [] },
+  { id: "subsonic", label: "Navidrome / Subsonic", server: true, fields: ["url", "user", "pass"] },
+  { id: "jellyfin", label: "Jellyfin", server: true, fields: ["url", "user", "pass"] },
+  { id: "plex", label: "Plex", server: true, oauth: true, fields: [] },
   { id: "drive", label: "Google Drive", oauth: true, fields: [] },
   { id: "dropbox", label: "Dropbox", oauth: true, fields: [] },
   { id: "onedrive", label: "OneDrive", oauth: true, fields: [] },
@@ -47,7 +50,7 @@ var SECRET_FIELDS = ["pass", "secret_access_key"]
 function serviceOf(key) {
   var k = String(key || "")
   var p = k.slice(0, 3)
-  return p === "sc:" || p === "sp:" || p === "cl:" || p === "rd:" ? k.slice(0, 2) : "yt"
+  return p === "sc:" || p === "sp:" || p === "cl:" || p === "rd:" || p === "ms:" ? k.slice(0, 2) : "yt"
 }
 
 // Liking, adding to a YouTube playlist and radio are YouTube Music's.

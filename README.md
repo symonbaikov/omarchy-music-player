@@ -36,7 +36,7 @@ permanent. It started as a YouTube Music player.)
 | <img src="docs/icons/youtubemusic.svg" width="20" height="20" alt="" align="center" />&nbsp;YouTube&nbsp;Music | Your playlists, Liked Music, My Supermix, Explore, search, radio, likes, add to playlist | The browser you're signed in with (see Settings) |
 | <img src="docs/icons/spotify.svg" width="20" height="20" alt="" align="center" />&nbsp;Spotify | Your Liked Songs and the playlists you own or collaborate on | Once: your own Spotify app (below) |
 | <img src="docs/icons/soundcloud.svg" width="20" height="20" alt="" align="center" />&nbsp;SoundCloud | Your likes and playlists, and search across SoundCloud | Your profile name or link |
-| <img src="docs/icons/cloud.svg" width="20" height="20" alt="" align="center" />&nbsp;Files | Your Music folder and your own storage: every folder an album, with its cover | One click for ~/Music; pick a storage and sign in (below) |
+| <img src="docs/icons/cloud.svg" width="20" height="20" alt="" align="center" />&nbsp;Files | Your Music folder, your music server (Navidrome, Jellyfin, Plex) and your own storage, with covers | One click for ~/Music; your server's address and sign-in; or a storage |
 | <img src="docs/icons/radio.svg" width="20" height="20" alt="" align="center" />&nbsp;Radio | About 50,000 stations: top, most liked, your country's, genres, search, favorites | Nothing |
 | <img src="docs/icons/mymusic.svg" width="20" height="20" alt="" align="center" />&nbsp;My&nbsp;Music | **My Mix** (your likes from every service, alternating), your own mixed playlists, Downloads | Nothing |
 
@@ -67,8 +67,21 @@ genres, search, and your favorites (the heart on a station). The song on
 air shows when the station announces it.
 
 **Files** starts with your **Music folder**: one click adds `~/Music` (or
-pick any folder on this computer), played straight from its files. It
-also plays the audio files in your own storage through
+pick any folder on this computer), played straight from its files.
+
+Your **music server** goes there too:
+
+- **Navidrome**, or any server with the Subsonic API (Airsonic, Gonic …):
+  its address, your user name and password.
+- **Jellyfin**: its address, your user name and password.
+- **Plex**: your browser opens Plex's sign-in; allow it, and the server
+  with your music is found by itself.
+
+Each brings its newest albums (with covers), your playlists, your
+favorites (starred songs; not on Plex) and a random mix. Songs stream from
+the server and work with fades, Peak mix, mixes and downloads.
+
+Files also plays the audio files in your own storage through
 [rclone](https://rclone.org) (`omarchy pkg add rclone`; the tab offers to
 install it). In the Cloud tab pick where your music lives:
 
@@ -380,6 +393,12 @@ omarchy bar set io.github.symonbaikov.ytmusic-mpv playbackCookies On
   open, the song's title and artist go to `songsterr.com` to find tabs; the
   MuseScore and Ultimate Guitar buttons only open their search in your
   browser.
+- **Music servers**: only your server is contacted (and plex.tv for Plex's
+  sign-in and to find your server). The password is never stored: Subsonic
+  keeps a salted token, Jellyfin and Plex the token they hand out, owner-only
+  in `~/.local/share/io.github.symonbaikov.ytmusic-mpv/servers.json`;
+  removing the server deletes it. Covers are copied to the cache. Problem
+  reports mask any sign-in in a URL.
 - **Radio**: the lists and search come from Radio Browser's servers
   (`*.api.radio-browser.info`), which also count a listen when a station is
   played. A station's logo is fetched once from the station's own site by

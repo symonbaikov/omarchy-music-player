@@ -198,6 +198,9 @@ FloatingWindow {
     if (/^sc:/.test(id)) return Model.GLYPH.soundcloud
     if (/^cl:[a-f0-9]{8}$/.test(id)) return Model.GLYPH.cloud
     if (/^cl:/.test(id)) return Model.GLYPH.album
+    if (/^ms:[a-f0-9]{8}:fav$/.test(id)) return Model.GLYPH.heart
+    if (/^ms:[a-f0-9]{8}:rnd$/.test(id)) return Model.GLYPH.shuffle
+    if (/^ms:/.test(id)) return Model.GLYPH.album
     return Model.GLYPH.playlist
   }
 
@@ -810,7 +813,7 @@ FloatingWindow {
           }
           FormField {
             id: fullCloudPath
-            visible: win.p.cloudFormUsable
+            visible: win.p.cloudFormUsable && win.p.cloudKindSpec.server !== true
             width: parent.width
             label: win.t(win.p.cloudKind === "s3" ? "cloud.pathS3" : win.p.cloudKind === "smb" ? "cloud.pathSmb"
               : win.p.cloudKind === "local" ? "cloud.pathLocal" : "cloud.path")

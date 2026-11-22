@@ -8,7 +8,7 @@ const source = readFileSync(new URL("../Model.js", import.meta.url), "utf8").rep
 const M = {}
 // QML's V4 engine lacks some newer built-ins; remove them so tests catch their use.
 const V4_MISSING = "delete String.prototype.trimEnd; delete String.prototype.trimStart; delete Array.prototype.at; delete Object.hasOwn;\n"
-vm.runInNewContext(V4_MISSING + source + "\n;Object.assign(__out, { cleanText, plain, truncate, formatTime, parseLine, parseSession, clampIndex, mpvCommand, GLYPH, normalizeRepeat, nextRepeat, repeatFromMpv, repeatCommands, coverUrl, OBSERVED, SUPERMIX_ID, isMix, radioListId, autoplaySeed, isLoading, addTargets, likedSet, withLiked, playbackFailure, seconds, stepChoice, recentReport, mirrorOffer, parseUpdate, exploreRows, DOWNLOAD_FORMATS, trackCover, serviceOf, isYouTube, TRACK_KEY_RE, cloudForm, tileHue, CLOUD_KINDS, SERVICES, lyricIndex, chordTones, chordNoteNames, guitarDiagram, GUITAR_SHAPES, chordLabel, keyLabel, visibleTabs, isRadio, canDownload })", { __out: M })
+vm.runInNewContext(V4_MISSING + source + "\n;Object.assign(__out, { cleanText, plain, truncate, formatTime, parseLine, parseSession, clampIndex, mpvCommand, GLYPH, normalizeRepeat, nextRepeat, repeatFromMpv, repeatCommands, coverUrl, OBSERVED, SUPERMIX_ID, isMix, radioListId, autoplaySeed, isLoading, addTargets, likedSet, withLiked, playbackFailure, seconds, stepChoice, recentReport, mirrorOffer, parseUpdate, exploreRows, DOWNLOAD_FORMATS, trackCover, serviceOf, isYouTube, TRACK_KEY_RE, cloudForm, tileHue, CLOUD_KINDS, SERVICES, lyricIndex, chordTones, chordNoteNames, guitarDiagram, GUITAR_SHAPES, chordLabel, keyLabel, visibleTabs, isRadio, canDownload, isPodcast, isPodcastShow, validCover })", { __out: M })
 
 const MARKUP = '<img src="https://example.invalid/tracker">Song'
 
@@ -460,7 +460,7 @@ test("radio keys and lists; the tabs setting", () => {
   assert.equal(lists.service, "rd")
   assert.deepEqual(Array.from(lists.items, i => i.id), ["rd:fav", "rd:tag:hip-hop", "rd:country:US"])
   assert.deepEqual(Array.from(M.parseLine(JSON.stringify({ type: "radioFavs", ids: [st, "x"] })).ids), [st])
-  assert.deepEqual(Array.from(M.visibleTabs("")), ["yt", "sp", "sc", "cl", "rd", "my"])
+  assert.deepEqual(Array.from(M.visibleTabs("")), ["yt", "sp", "sc", "cl", "rd", "pc", "my"])
   assert.deepEqual(Array.from(M.visibleTabs("rd,sc,bogus")), ["yt", "sc", "rd", "my"])
 })
 
@@ -480,4 +480,24 @@ test("AI Mix and recently played lists; notes on songs", () => {
   const t = M.parseLine(JSON.stringify({ type: "tracks", playlistId: "ai:mix", items: [
     { id: "dQw4w9WgXcQ", title: "Helvegen", artist: "Wardruna", note: "Haunting authentic Norse folk\u0000" }] }))
   assert.equal(t.items[0].note, "Haunting authentic Norse folk")
+})
+
+test("podcast episodes, shows and subscriptions", () => {
+  const ep = "pc:2abd05655129946b/d6129de71b4292d6"
+  assert.ok(M.TRACK_KEY_RE.test(ep))
+  assert.ok(M.isPodcast(ep))
+  assert.equal(M.serviceOf(ep), "pc")
+  assert.equal(M.canDownload(ep), false)
+  assert.ok(M.isPodcastShow("pc:2abd05655129946b"))
+  assert.equal(M.isPodcastShow(ep), false)
+  const lists = M.parseLine(JSON.stringify({ type: "playlists", service: "pc", items: [
+    { id: "pc:new", title: "New episodes" },
+    { id: "pc:2abd05655129946b", title: "The Rest Is History", subtitle: "Goalhanger",
+      cover: "https://is1-ssl.mzstatic.com/image/thumb/Podcasts211/v4/12/e4/mza_93.jpg/600x600bb.jpg" },
+    { id: "pc:XYZ", title: "bad" }] }))
+  assert.deepEqual(Array.from(lists.items, i => i.id), ["pc:new", "pc:2abd05655129946b"])
+  assert.ok(lists.items[1].cover.startsWith("https://is1-ssl.mzstatic.com/"))
+  const subs = M.parseLine(JSON.stringify({ type: "podcastSubs", ids: ["pc:2abd05655129946b", ep, "x"] }))
+  assert.deepEqual(Array.from(subs.ids), ["pc:2abd05655129946b"])
+  assert.equal(M.validCover("https://evil.example/x.jpg"), "")
 })

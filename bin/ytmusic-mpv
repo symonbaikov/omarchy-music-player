@@ -28,6 +28,7 @@ Commands (every result is one JSON object per line on stdout):
   download <video-id> [--dir D] [--format mp3|m4a|opus|flac|wav] [--cover 0|1] [--title T] [--artist A] [PLAYER]
   tracks DOWNLOADS   the downloaded songs (they play from their files)
   cloud | cloud-add (form as JSON on stdin) | cloud-remove <source> | cloud-stop
+  podcast-sub [<pc:show> [--remove 1]]   subscribe to a podcast; lists them
   lyrics <track> [--title T] [--artist A] [--duration S]
   chords <track> [PLAYER] | scores <track> [--title T] [--artist A] | open-score <url>
   playlists --service cl   your cloud storage's folders (rclone)
@@ -122,11 +123,11 @@ VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 # SoundCloud, "sp:<id>" for Spotify (played from its YouTube Music match),
 # "cl:<source>/<hash>" for a file in your own cloud storage (see "cloud").
 TRACK_KEY_RE = re.compile(r"^(?:[A-Za-z0-9_-]{11}|sc:(?:[0-9]{1,20}|[A-Za-z0-9_-]{1,100}/[A-Za-z0-9_-]{1,200})|sp:[A-Za-z0-9]{22}"
-                          r"|cl:[a-f0-9]{8}/[a-f0-9]{16}|ms:[a-f0-9]{8}/[A-Za-z0-9_-]{1,64}|rd:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$")
+                          r"|cl:[a-f0-9]{8}/[a-f0-9]{16}|ms:[a-f0-9]{8}/[A-Za-z0-9_-]{1,64}|rd:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|pc:[a-f0-9]{16}/[a-f0-9]{16})$")
 SERVICE_LIST_RE = re.compile(
     r"^(?:sc:(?:likes|sets):[A-Za-z0-9_-]{1,100}|sc:set:[A-Za-z0-9_-]{1,100}/[A-Za-z0-9_-]{1,200}|sc:search"
     r"|sp:liked|sp:pl:[A-Za-z0-9]{22}|mix:all|mix:[a-f0-9]{8}|cl:[a-f0-9]{8}(?::[a-f0-9]{16})?"
-    r"|rd:(?:fav|top|vote|search|country:[A-Z]{2}|tag:[a-z0-9-]{1,40})"
+    r"|rd:(?:fav|top|vote|search|country:[A-Z]{2}|tag:[a-z0-9-]{1,40})|pc:(?:new|[a-f0-9]{16})"
     r"|ms:[a-f0-9]{8}:(?:fav|rnd|al:[A-Za-z0-9_-]{1,64}|pl:[A-Za-z0-9_-]{1,64})|ai:mix|hist:recent)$")
 SC_USER_RE = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
 SPOTIFY_SCHEME = "ytmusic-spotify://"
@@ -175,7 +176,7 @@ def is_list_id(value):
 
 
 def source_of(key):
-    return key[:2] if key[:3] in ("sc:", "sp:", "cl:", "rd:", "ms:") else "yt"
+    return key[:2] if key[:3] in ("sc:", "sp:", "cl:", "rd:", "ms:", "pc:") else "yt"
 
 
 def check_playlist_id(value):
@@ -720,6 +721,10 @@ def cmd_resolve(args):
         if key.startswith("ms:"):
             emit({"type": "resolved", "key": key, "url": server_stream_url(key)})
             return
+        if key.startswith("pc:"):
+            url, start = podcast_stream(key)
+            emit({"type": "resolved", "key": key, "url": url, "start": start})
+            return
         vid = resolve_spotify(key) if key.startswith("sp:") else None
     except RuntimeError as exc:
         fail(str(exc))
@@ -964,6 +969,10 @@ def cmd_playlists(args):
     if service == "rd":
         emit({"type": "playlists", "stale": False, "items": radio_lists(), **extra})
         return
+    if service == "pc":
+        emit({"type": "podcastSubs", "ids": ["pc:" + s["h"] for s in podcast_state()["subs"]]})
+        emit({"type": "playlists", "stale": False, "items": podcast_lists(), **extra})
+        return
     if service == "cl":
         sources = read_cloud()
         if not sources:
@@ -1027,9 +1036,10 @@ def cmd_tracks(args):
         emit({"type": "tracks", "stale": False, "playlistId": playlist_id, "title": "Favorite stations",
               "items": with_radio_covers(radio_favorites())})
         return
-    if playlist_id.startswith("cl:"):
+    if playlist_id.startswith("cl:") or playlist_id.startswith("pc:"):
         try:
-            emit({"type": "tracks", "stale": False, "playlistId": playlist_id, **cloud_tracks(playlist_id)})
+            emit({"type": "tracks", "stale": False, "playlistId": playlist_id,
+                  **(podcast_tracks if playlist_id.startswith("pc:") else cloud_tracks)(playlist_id)})
         except RuntimeError as exc:
             fail(str(exc))
         return
@@ -1167,9 +1177,9 @@ def load_tracks(playlist_id, browser, max_age=None, raise_errors=False):
         return {"title": "Recently played", "items": recent_tracks(100)}
     if playlist_id == "rd:fav":
         return {"title": "Favorite stations", "items": with_radio_covers(radio_favorites())}
-    if playlist_id.startswith("cl:"):
+    if playlist_id.startswith("cl:") or playlist_id.startswith("pc:"):
         try:
-            return cloud_tracks(playlist_id)
+            return (podcast_tracks if playlist_id.startswith("pc:") else cloud_tracks)(playlist_id)
         except RuntimeError as exc:
             if raise_errors:
                 raise
@@ -1218,6 +1228,9 @@ def track_url(track):
     if key.startswith("ms:"):
         # mpv/ytmusic.lua resolves it to the media server's stream.
         return SERVER_SCHEME + key[3:]
+    if key.startswith("pc:"):
+        # mpv/ytmusic.lua resolves it to the episode's file.
+        return PODCAST_SCHEME + key[3:]
     return f"https://music.youtube.com/watch?v={key}"
 
 
@@ -1618,6 +1631,8 @@ def mix_entry(name):
         return "cl:" + name[len(CLOUD_SCHEME):], None
     if (name or "").startswith(SERVER_SCHEME) and SERVER_KEY_RE.match("ms:" + name[len(SERVER_SCHEME):]):
         return "ms:" + name[len(SERVER_SCHEME):], None
+    if (name or "").startswith(PODCAST_SCHEME) and PODCAST_KEY_RE.match("pc:" + name[len(PODCAST_SCHEME):]):
+        return "pc:" + name[len(PODCAST_SCHEME):], None
     path = os.path.realpath(name or "")
     if os.path.dirname(path) != os.path.realpath(MIX_DIR):
         return None, None
@@ -2597,6 +2612,14 @@ def cmd_search(args):
     query = clean_text(" ".join(args[:1]), 150).strip()
     if not query:
         fail("search needs a query")
+    if opt(args, "--service", "yt") == "pc":
+        try:
+            shows = podcast_search(query)
+        except RuntimeError as exc:
+            fail(str(exc))
+        emit({"type": "search", "query": query, "service": "pc",
+              "items": [dict(podcast_list_item(s), kind="list", artist=s.get("author", "")) for s in shows[:60]]})
+        return
     if opt(args, "--service", "yt") == "rd":
         try:
             stations = radio_search(query)
@@ -2743,6 +2766,8 @@ def cmd_download(args):
     video_id = args[0]
     if video_id.startswith("rd:"):
         fail("A radio station is live: there is no song to download")
+    if video_id.startswith("pc:"):
+        fail("Podcast episodes play from their feed and can't be downloaded here")
     fmt = opt(args, "--format", "mp3")
     if fmt not in DOWNLOAD_FORMATS:
         fail("--format must be one of " + ", ".join(DOWNLOAD_FORMATS))
@@ -4190,6 +4215,340 @@ def cmd_radio_favs(_args):
     emit({"type": "radioFavs", "ids": [t["id"] for t in radio_favorites()]})
 
 
+# ---- podcasts ---------------------------------------------------------------------
+# Apple Podcasts' public directory (search and the top shows, no account) finds
+# shows; each show is its own RSS feed, read here. Subscriptions, and where you
+# stopped in each episode, live in podcasts.json. An episode is
+# "pc:<show>/<episode>" (hashes of the feed URL and the episode's guid); lists
+# are "pc:new" (new episodes of your shows), "pc:<show>" and "pc:search". mpv
+# gets ytmusic-podcast://<show>/<episode>, which mpv/ytmusic.lua resolves here
+# to the episode's file, with where you stopped.
+
+PODCAST_SCHEME = "ytmusic-podcast://"
+PODCASTS_PATH = os.path.join(DATA_DIR, "podcasts.json")
+PODCAST_SHOWS_PATH = os.path.join(CACHE_DIR, "podcast-shows.json")
+PODCAST_DIR = os.path.join(CACHE_DIR, "podcasts")
+PODCAST_KEY_RE = re.compile(r"^pc:([a-f0-9]{16})/([a-f0-9]{16})$")
+PODCAST_FEED_RE = re.compile(r"^https?://[^\s<>\"]{4,2000}$")
+PODCAST_ART_RE = re.compile(r"^https://is[0-9]-ssl\.mzstatic\.com/image/thumb/[A-Za-z0-9_./=%-]{1,400}$")
+ITUNES_NS = "{http://www.itunes.com/dtds/podcast-1.0.dtd}"
+PODCAST_FEED_MAX = 20 * 1024 * 1024
+PODCAST_EPISODES = 300
+
+
+def podcast_hash(text):
+    return hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def podcast_state():
+    data = read_json(PODCASTS_PATH)
+    data = data if isinstance(data, dict) else {}
+    subs = [s for s in data.get("subs") or [] if isinstance(s, dict) and PODCAST_FEED_RE.match(str(s.get("feed", "")))]
+    progress = {k: v for k, v in (data.get("progress") or {}).items()
+                if PODCAST_KEY_RE.match(str(k)) and isinstance(v, (int, float)) and 0 < v < 86400}
+    done = [k for k in data.get("done") or [] if PODCAST_KEY_RE.match(str(k))]
+    return {"subs": subs, "progress": progress, "done": done}
+
+
+def write_podcast_state(state):
+    os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
+    write_json_atomic(PODCASTS_PATH, state)
+    os.chmod(PODCASTS_PATH, 0o600)
+
+
+def podcast_show(feed, title, author="", art=""):
+    return {"h": podcast_hash(feed), "feed": feed, "title": clean_text(title, 150) or "Podcast",
+            "author": clean_text(author, 120), "art": art if PODCAST_ART_RE.match(art or "") else ""}
+
+
+def known_shows():
+    data = read_json(PODCAST_SHOWS_PATH)
+    return data if isinstance(data, dict) else {}
+
+
+def remember_shows(shows):
+    known = known_shows()
+    for s in shows:
+        known[s["h"]] = s
+    if len(known) > 2000:
+        known = dict(list(known.items())[-2000:])
+    write_json_atomic(PODCAST_SHOWS_PATH, known)
+
+
+def find_show(h):
+    for s in podcast_state()["subs"]:
+        if s.get("h") == h:
+            return s
+    s = known_shows().get(h)
+    return s if isinstance(s, dict) and PODCAST_FEED_RE.match(str(s.get("feed", ""))) else None
+
+
+def podcast_cover_path(h):
+    return os.path.join(COVERS_DIR, f"pc-{h}.jpg")
+
+
+def podcast_cover(show):
+    path = podcast_cover_path(show["h"])
+    return path if os.path.isfile(path) else (show.get("art") or None)
+
+
+def save_podcast_cover(h, url):
+    """A show's artwork, made a local JPEG (feed images live on any host)."""
+    path = podcast_cover_path(h)
+    if os.path.isfile(path) or not re.match(r"^https?://", url or ""):
+        return
+    os.makedirs(COVERS_DIR, mode=0o700, exist_ok=True)
+    try:
+        body, response = http_get(url, 8 * 1024 * 1024, timeout=10, accept="image/*")
+    except Exception:
+        return
+    if not response.headers.get_content_type().startswith("image/") or b"<svg" in body[:400].lower():
+        return
+    tmp = path + ".src"
+    try:
+        with open(tmp, "wb") as fh:
+            fh.write(body)
+        subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", tmp, "-frames:v", "1",
+                        "-vf", "scale=300:300:force_original_aspect_ratio=decrease", path],
+                       capture_output=True, timeout=20, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def podcast_list_item(show, subtitle=None):
+    return {"id": "pc:" + show["h"], "title": show["title"], "count": None,
+            "subtitle": subtitle if subtitle is not None else show.get("author", ""), "cover": podcast_cover(show)}
+
+
+def itunes(path, params):
+    return http_json("https://itunes.apple.com/" + path + "?" + urllib.parse.urlencode(params), timeout=15)
+
+
+def itunes_shows(results):
+    out = []
+    for r in results or []:
+        if isinstance(r, dict) and PODCAST_FEED_RE.match(str(r.get("feedUrl") or "")):
+            out.append(podcast_show(r["feedUrl"], r.get("collectionName"), r.get("artistName"),
+                                    str(r.get("artworkUrl600") or "")))
+    return out
+
+
+def podcast_search(query):
+    if re.match(r"^https?://", query):
+        show = podcast_feed(podcast_show(query, query), max_age=0)["show"]
+        found = [show]
+    else:
+        params = {"media": "podcast", "entity": "podcast", "limit": 40, "term": query}
+        if radio_country():
+            params["country"] = radio_country()
+        try:
+            found = itunes_shows(itunes("search", params).get("results"))
+        except (OSError, ValueError) as exc:
+            raise RuntimeError("Apple Podcasts can't be reached") from exc
+    remember_shows(found)
+    return found
+
+
+def podcast_top(max_age=86400):
+    country = (radio_country() or "us").lower()
+    path = os.path.join(PODCAST_DIR, f"top-{country}.json")
+    cached = read_json(path)
+    if isinstance(cached, dict) and time.time() - float(cached.get("fetchedAt") or 0) < max_age:
+        return [s for s in cached.get("shows") or [] if isinstance(s, dict) and s.get("h")]
+    try:
+        feed = http_json(f"https://rss.marketingtools.apple.com/api/v2/{country}/podcasts/top/30/podcasts.json")
+        ids = [str(r.get("id")) for r in feed.get("feed", {}).get("results", []) if str(r.get("id", "")).isdigit()]
+        shows = itunes_shows(itunes("lookup", {"id": ",".join(ids[:30]), "entity": "podcast"}).get("results")) if ids else []
+    except (OSError, ValueError, AttributeError):
+        return [s for s in (cached or {}).get("shows") or [] if isinstance(s, dict) and s.get("h")] if isinstance(cached, dict) else []
+    os.makedirs(PODCAST_DIR, mode=0o700, exist_ok=True)
+    write_json_atomic(path, {"fetchedAt": int(time.time()), "shows": shows})
+    remember_shows(shows)
+    return shows
+
+
+def parse_duration(text):
+    text = str(text or "").strip()
+    if re.match(r"^\d+$", text):
+        return int(text)
+    m = re.match(r"^(?:(\d+):)?(\d{1,2}):(\d{1,2})$", text)
+    if m:
+        return int(m.group(1) or 0) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
+    return None
+
+
+def parse_feed(body, show):
+    """A podcast's RSS: the show (title, author, artwork) and its episodes
+    with an audio file, newest first."""
+    import email.utils
+    import xml.etree.ElementTree as ET
+    if b"<!ENTITY" in body[:20000]:
+        raise RuntimeError("This feed can't be read")
+    try:
+        channel = ET.fromstring(body).find("channel")
+    except ET.ParseError as exc:
+        raise RuntimeError("This isn't a podcast feed") from exc
+    if channel is None:
+        raise RuntimeError("This isn't a podcast feed")
+    image = channel.find(ITUNES_NS + "image")
+    art = image.get("href", "") if image is not None else (channel.findtext("image/url") or "")
+    show = dict(show, title=clean_text(channel.findtext("title"), 150) or show["title"],
+                author=clean_text(channel.findtext(ITUNES_NS + "author"), 120) or show.get("author", ""),
+                image=art.strip())
+    episodes = []
+    for item in channel.findall("item"):
+        enc = item.find("enclosure")
+        url = (enc.get("url", "") if enc is not None else "").strip()
+        kind = (enc.get("type", "") if enc is not None else "")
+        if not PODCAST_FEED_RE.match(url) or (kind and not kind.startswith(("audio/", "video/"))):
+            continue
+        guid = (item.findtext("guid") or url).strip()
+        try:
+            date = int(email.utils.parsedate_to_datetime(item.findtext("pubDate") or "").timestamp())
+        except (TypeError, ValueError, IndexError):
+            date = 0
+        duration = parse_duration(item.findtext(ITUNES_NS + "duration"))
+        episodes.append({"e": podcast_hash(guid), "title": clean_text(item.findtext("title"), 200) or "Episode",
+                         "url": url, "date": date, "duration": duration if duration and duration < 86400 else None})
+    episodes.sort(key=lambda e: -e["date"])
+    return show, episodes[:PODCAST_EPISODES]
+
+
+def podcast_feed(show, max_age=3600):
+    path = os.path.join(PODCAST_DIR, show["h"] + ".json")
+    cached = read_json(path)
+    if isinstance(cached, dict) and time.time() - float(cached.get("fetchedAt") or 0) < max_age:
+        return cached
+    try:
+        body, _ = http_get(show["feed"], PODCAST_FEED_MAX, timeout=20,
+                           accept="application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5")
+        show, episodes = parse_feed(body, show)
+    except (OSError, RuntimeError) as exc:
+        if isinstance(cached, dict):
+            return cached
+        raise RuntimeError(str(exc) if isinstance(exc, RuntimeError) else "The podcast's feed can't be reached") from exc
+    save_podcast_cover(show["h"], show.get("art") or show.get("image"))
+    data = {"fetchedAt": int(time.time()), "show": {k: show[k] for k in ("h", "feed", "title", "author", "art")},
+            "episodes": episodes}
+    os.makedirs(PODCAST_DIR, mode=0o700, exist_ok=True)
+    write_json_atomic(path, data)
+    return data
+
+
+def episode_note(key, ep, state):
+    parts = [time.strftime("%-d %b %Y", time.localtime(ep["date"]))] if ep.get("date") else []
+    if key in state["done"]:
+        parts.append("Played")
+    elif key in state["progress"] and ep.get("duration"):
+        parts.append("%d min left" % max(1, round((ep["duration"] - state["progress"][key]) / 60)))
+    return " · ".join(parts)
+
+
+def episode_tracks(feed, state, episodes=None):
+    show = feed["show"]
+    cover = podcast_cover(show)
+    out = []
+    for ep in episodes if episodes is not None else feed.get("episodes") or []:
+        key = f"pc:{show['h']}/{ep['e']}"
+        t = {"id": key, "title": ep["title"], "artist": show["title"], "duration": ep.get("duration"),
+             "note": episode_note(key, ep, state), "date": ep.get("date", 0)}
+        if cover:
+            t["cover"] = cover
+        out.append(t)
+    return out
+
+
+def podcast_tracks(list_id):
+    state = podcast_state()
+    if list_id == "pc:new":
+        import concurrent.futures
+        def latest(show):
+            try:
+                feed = podcast_feed(show, 3 * 3600)
+            except RuntimeError:
+                return []
+            recent = [e for e in feed.get("episodes") or [] if e.get("date", 0) > time.time() - 30 * 86400]
+            return episode_tracks(feed, state, recent[:3])
+        with concurrent.futures.ThreadPoolExecutor(6) as pool:
+            items = [t for ts in pool.map(latest, state["subs"][:60]) for t in ts]
+        items.sort(key=lambda t: -t.get("date", 0))
+        return {"title": "New episodes", "items": items[:100]}
+    show = find_show(list_id[3:])
+    if not show:
+        raise RuntimeError("This podcast isn't known any more: search for it again")
+    feed = podcast_feed(show)
+    return {"title": feed["show"]["title"], "items": episode_tracks(feed, state)}
+
+
+def podcast_lists():
+    state = podcast_state()
+    items = []
+    if state["subs"]:
+        items.append({"id": "pc:new", "title": "New episodes", "count": None, "subtitle": "From your podcasts"})
+        items += [podcast_list_item(s) for s in state["subs"]]
+    subscribed = {s["h"] for s in state["subs"]}
+    items += [podcast_list_item(s, "Top podcast · " + s.get("author", "")) for s in podcast_top() if s["h"] not in subscribed]
+    return items
+
+
+def podcast_episode(key):
+    m = PODCAST_KEY_RE.match(key)
+    show = find_show(m.group(1)) if m else None
+    if not show:
+        raise RuntimeError("This episode's podcast isn't known any more")
+    for max_age in (None, 0):
+        feed = podcast_feed(show, max_age=86400 * 365 if max_age is None else 0)
+        ep = next((e for e in feed.get("episodes") or [] if e["e"] == m.group(2)), None)
+        if ep:
+            return ep
+    raise RuntimeError("This episode isn't in the podcast's feed any more")
+
+
+def podcast_stream(key):
+    """The episode's file, and where you stopped in it."""
+    ep = podcast_episode(key)
+    state = podcast_state()
+    start = 0 if key in state["done"] else state["progress"].get(key, 0)
+    return ep["url"], max(0, int(start) - 5) if start > 30 else 0
+
+
+def note_podcast_progress(key, played, duration, reason):
+    state = podcast_state()
+    finished = reason == "eof" or (duration and played >= duration - 60)
+    if finished:
+        state["progress"].pop(key, None)
+        if key not in state["done"]:
+            state["done"] = (state["done"] + [key])[-3000:]
+    elif played >= 30:
+        state["progress"][key] = int(played)
+        if len(state["progress"]) > 500:
+            state["progress"] = dict(list(state["progress"].items())[-500:])
+    else:
+        return
+    write_podcast_state(state)
+
+
+def cmd_podcast_sub(args):
+    """podcast-sub [<pc:show> [--remove 1]]: subscribe to a show (or stop);
+    without a show, lists the subscriptions."""
+    state = podcast_state()
+    if args and not args[0].startswith("--"):
+        m = re.match(r"^pc:([a-f0-9]{16})$", args[0])
+        show = find_show(m.group(1)) if m else None
+        if not show:
+            fail("This podcast isn't known any more")
+        state["subs"] = [s for s in state["subs"] if s["h"] != show["h"]]
+        if opt(args, "--remove", "0") != "1":
+            state["subs"].insert(0, {k: show.get(k, "") for k in ("h", "feed", "title", "author", "art")})
+        write_podcast_state(state)
+    emit({"type": "podcastSubs", "ids": ["pc:" + s["h"] for s in state["subs"]]})
+
+
 # ---- media servers: Navidrome / Subsonic, Jellyfin, Plex ---------------------------
 # Your own music server, in the Files tab: its recently added albums (with
 # their covers), playlists, favorites and a random mix. Signing in keeps a
@@ -4708,6 +5067,10 @@ def cmd_history_add(args):
     except ValueError:
         return
     reason = opt(args, "--reason", "")
+    if key.startswith("pc:"):
+        # Episodes keep where you stopped; they aren't music taste.
+        note_podcast_progress(key, played, duration, reason)
+        return
     track = session_track(key) or next((t for t in downloaded_tracks() if t["id"] == key), {})
     finished = reason == "eof" and (duration == 0 or played >= duration * 0.8)
     # Skipped: moved on to another song early ("stop"). Starting another
@@ -5184,6 +5547,7 @@ def main():
         "ai-mix": cmd_ai_mix,
         "radio-countries": cmd_radio_countries,
         "radio-favs": cmd_radio_favs,
+        "podcast-sub": cmd_podcast_sub,
         "chords": cmd_chords,
         "scores": cmd_scores,
         "open-score": cmd_open_score,

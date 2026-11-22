@@ -10,13 +10,13 @@ var MAX_TEXT = 300
 // A list: a YouTube playlist id, or one of the other services' lists
 // (sc:… SoundCloud, sp:… Spotify, mix:… your mixes, cl:… your cloud storage:
 // a source, or one folder in it).
-var PLAYLIST_ID_RE = /^(?:[A-Za-z0-9_-]{2,80}|sc:(?:likes|sets):[A-Za-z0-9_-]{1,100}|sc:set:[A-Za-z0-9_-]{1,100}\/[A-Za-z0-9_-]{1,200}|sc:search|sp:liked|sp:pl:[A-Za-z0-9]{22}|mix:all|mix:[a-f0-9]{8}|cl:[a-f0-9]{8}(?::[a-f0-9]{16})?|rd:(?:fav|top|vote|search|country:[A-Z]{2}|tag:[a-z0-9-]{1,40})|ms:[a-f0-9]{8}:(?:fav|rnd|al:[A-Za-z0-9_-]{1,64}|pl:[A-Za-z0-9_-]{1,64})|ai:mix|hist:recent)$/
+var PLAYLIST_ID_RE = /^(?:[A-Za-z0-9_-]{2,80}|sc:(?:likes|sets):[A-Za-z0-9_-]{1,100}|sc:set:[A-Za-z0-9_-]{1,100}\/[A-Za-z0-9_-]{1,200}|sc:search|sp:liked|sp:pl:[A-Za-z0-9]{22}|mix:all|mix:[a-f0-9]{8}|cl:[a-f0-9]{8}(?::[a-f0-9]{16})?|rd:(?:fav|top|vote|search|country:[A-Z]{2}|tag:[a-z0-9-]{1,40})|ms:[a-f0-9]{8}:(?:fav|rnd|al:[A-Za-z0-9_-]{1,64}|pl:[A-Za-z0-9_-]{1,64})|pc:(?:new|[a-f0-9]{16})|ai:mix|hist:recent)$/
 var VIDEO_ID_RE = /^[A-Za-z0-9_-]{11}$/
 // A track from any service: a YouTube video id, sc:…, sp:… or cl:….
-var TRACK_KEY_RE = /^(?:[A-Za-z0-9_-]{11}|sc:(?:[0-9]{1,20}|[A-Za-z0-9_-]{1,100}\/[A-Za-z0-9_-]{1,200})|sp:[A-Za-z0-9]{22}|cl:[a-f0-9]{8}\/[a-f0-9]{16}|rd:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|ms:[a-f0-9]{8}\/[A-Za-z0-9_-]{1,64})$/
-var SERVICES = ["yt", "sp", "sc", "cl", "rd", "my"]
+var TRACK_KEY_RE = /^(?:[A-Za-z0-9_-]{11}|sc:(?:[0-9]{1,20}|[A-Za-z0-9_-]{1,100}\/[A-Za-z0-9_-]{1,200})|sp:[A-Za-z0-9]{22}|cl:[a-f0-9]{8}\/[a-f0-9]{16}|rd:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|ms:[a-f0-9]{8}\/[A-Za-z0-9_-]{1,64}|pc:[a-f0-9]{16}\/[a-f0-9]{16})$/
+var SERVICES = ["yt", "sp", "sc", "cl", "rd", "pc", "my"]
 // Tabs shown unless the user picks others (the "+" tab).
-var DEFAULT_TABS = "yt,sp,sc,cl,rd,my"
+var DEFAULT_TABS = "yt,sp,sc,cl,rd,pc,my"
 
 // The tabs to show, from the setting: known services, each once, in the
 // usual order; YouTube Music and My Music always.
@@ -26,8 +26,11 @@ function visibleTabs(setting) {
 }
 
 function isRadio(key) { return /^rd:[0-9a-f-]{36}$/.test(String(key || "")) }
-// A song that can be saved as a file (a live station can't).
-function canDownload(key) { return TRACK_KEY_RE.test(String(key || "")) && !isRadio(key) }
+function isPodcast(key) { return /^pc:[a-f0-9]{16}\/[a-f0-9]{16}$/.test(String(key || "")) }
+// A podcast (a list of its episodes), which you can subscribe to.
+function isPodcastShow(id) { return /^pc:[a-f0-9]{16}$/.test(String(id || "")) }
+// A song that can be saved as a file (a live station or an episode can't).
+function canDownload(key) { return TRACK_KEY_RE.test(String(key || "")) && !isRadio(key) && !isPodcast(key) }
 // Kinds of storage the "Connect storage" form offers (see the helper's
 // CLOUD_KINDS), with the fields each asks for.
 var CLOUD_KINDS = [
@@ -50,7 +53,7 @@ var SECRET_FIELDS = ["pass", "secret_access_key"]
 function serviceOf(key) {
   var k = String(key || "")
   var p = k.slice(0, 3)
-  return p === "sc:" || p === "sp:" || p === "cl:" || p === "rd:" || p === "ms:" ? k.slice(0, 2) : "yt"
+  return p === "sc:" || p === "sp:" || p === "cl:" || p === "rd:" || p === "ms:" || p === "pc:" ? k.slice(0, 2) : "yt"
 }
 
 // Liking, adding to a YouTube playlist and radio are YouTube Music's.
@@ -269,7 +272,7 @@ function repeatCommands(mode) {
 // for a downloaded song saved without one, else YouTube's thumbnail.
 // Spotify's album images and SoundCloud's artwork, the only remote covers
 // besides YouTube's own thumbnails.
-var REMOTE_COVER_RE = /^https:\/\/(?:i\.scdn\.co\/image\/[A-Za-z0-9]{1,100}|i[0-9]?\.sndcdn\.com\/[A-Za-z0-9_.\/-]{1,300}|(?:(?:lh3|yt3)\.googleusercontent\.com|yt3\.ggpht\.com|i[0-9]?\.ytimg\.com)\/[A-Za-z0-9_.\/=%~&?-]{1,500})$/
+var REMOTE_COVER_RE = /^https:\/\/(?:i\.scdn\.co\/image\/[A-Za-z0-9]{1,100}|i[0-9]?\.sndcdn\.com\/[A-Za-z0-9_.\/-]{1,300}|(?:(?:lh3|yt3)\.googleusercontent\.com|yt3\.ggpht\.com|i[0-9]?\.ytimg\.com)\/[A-Za-z0-9_.\/=%~&?-]{1,500}|is[0-9]-ssl\.mzstatic\.com\/image\/thumb\/[A-Za-z0-9_.\/=%-]{1,400})$/
 
 function trackCover(track, size) {
   if (!track) return ""
@@ -431,6 +434,8 @@ function parseLine(line) {
   }
   case "radioFavs":
     return { type: "radioFavs", ids: Array.isArray(msg.ids) ? msg.ids.filter(isRadio).slice(0, 500) : [] }
+  case "podcastSubs":
+    return { type: "podcastSubs", ids: Array.isArray(msg.ids) ? msg.ids.filter(isPodcastShow).slice(0, 500) : [] }
   case "chords":
     return sanitizeChords(msg)
   case "chordsProgress":

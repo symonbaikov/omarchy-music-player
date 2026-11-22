@@ -1012,6 +1012,85 @@ class Radio(unittest.TestCase):
         self.assertEqual(h.source_of("rd:" + self.UUID), "rd")
 
 
+def capture(fn, args):
+    import contextlib
+    import io
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        fn(args)
+    return [json.loads(line) for line in out.getvalue().splitlines()]
+
+
+class Podcasts(unittest.TestCase):
+    FEED = b"""<?xml version="1.0"?>
+<rss xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel>
+<title>Show Title</title><itunes:author>Host</itunes:author><itunes:image href="https://x.example/art.jpg"/>
+<item><title>Old</title><guid>g1</guid><pubDate>Mon, 03 Mar 2025 10:00:00 +0000</pubDate>
+  <enclosure url="https://cdn.example/1.mp3" type="audio/mpeg"/><itunes:duration>1:02:03</itunes:duration></item>
+<item><title>New</title><guid>g2</guid><pubDate>Tue, 04 Mar 2025 10:00:00 +0000</pubDate>
+  <enclosure url="https://cdn.example/2.mp3" type="audio/mpeg"/><itunes:duration>600</itunes:duration></item>
+<item><title>A PDF</title><enclosure url="https://cdn.example/x.pdf" type="application/pdf"/></item>
+<item><title>Bad link</title><enclosure url="javascript:alert(1)" type="audio/mpeg"/></item>
+</channel></rss>"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.saved = (h.DATA_DIR, h.PODCASTS_PATH, h.PODCAST_DIR, h.PODCAST_SHOWS_PATH, h.COVERS_DIR)
+        h.DATA_DIR = self.tmp.name
+        h.PODCASTS_PATH = os.path.join(self.tmp.name, "podcasts.json")
+        h.PODCAST_DIR = os.path.join(self.tmp.name, "pc")
+        h.PODCAST_SHOWS_PATH = os.path.join(self.tmp.name, "shows.json")
+        h.COVERS_DIR = os.path.join(self.tmp.name, "covers")
+
+    def tearDown(self):
+        h.DATA_DIR, h.PODCASTS_PATH, h.PODCAST_DIR, h.PODCAST_SHOWS_PATH, h.COVERS_DIR = self.saved
+        self.tmp.cleanup()
+
+    def test_feed_episodes_newest_first_audio_only(self):
+        show = h.podcast_show("https://feed.example/rss", "x")
+        show, eps = h.parse_feed(self.FEED, show)
+        self.assertEqual(show["title"], "Show Title")
+        self.assertEqual(show["author"], "Host")
+        self.assertEqual([e["title"] for e in eps], ["New", "Old"])
+        self.assertEqual(eps[1]["duration"], 3723)
+        self.assertEqual(eps[0]["e"], h.podcast_hash("g2"))
+        with self.assertRaises(RuntimeError):
+            h.parse_feed(b'<!DOCTYPE x [<!ENTITY a "aaaa">]><rss><channel/></rss>', show)
+        with self.assertRaises(RuntimeError):
+            h.parse_feed(b"<html>not a feed", show)
+
+    def test_ids_progress_and_resume(self):
+        show = h.podcast_show("https://feed.example/rss", "Show", "Host")
+        h.remember_shows([show])
+        _, eps = h.parse_feed(self.FEED, show)
+        os.makedirs(h.PODCAST_DIR)
+        h.write_json_atomic(os.path.join(h.PODCAST_DIR, show["h"] + ".json"),
+                            {"fetchedAt": int(time.time()), "show": show, "episodes": eps})
+        key = f"pc:{show['h']}/{eps[1]['e']}"
+        self.assertTrue(h.TRACK_KEY_RE.match(key))
+        self.assertTrue(h.is_list_id("pc:" + show["h"]) and h.is_list_id("pc:new"))
+        self.assertFalse(h.is_list_id("pc:../x"))
+        self.assertEqual(h.track_url({"id": key}), "ytmusic-podcast://" + key[3:])
+        self.assertEqual(h.mix_entry("ytmusic-podcast://" + key[3:])[0], key)
+        self.assertEqual(h.podcast_stream(key), ("https://cdn.example/1.mp3", 0))
+        h.note_podcast_progress(key, 1200, 3723, "quit")
+        self.assertEqual(h.podcast_stream(key), ("https://cdn.example/1.mp3", 1195))
+        items = h.podcast_tracks("pc:" + show["h"])["items"]
+        self.assertIn("42 min left", items[1]["note"])
+        h.note_podcast_progress(key, 3720, 3723, "eof")
+        self.assertEqual(h.podcast_stream(key)[1], 0)
+        self.assertIn("Played", h.podcast_tracks("pc:" + show["h"])["items"][1]["note"])
+        self.assertEqual(oct(os.stat(h.PODCASTS_PATH).st_mode & 0o777), "0o600")
+
+    def test_subscribe(self):
+        show = h.podcast_show("https://feed.example/rss", "Show")
+        h.remember_shows([show])
+        out = capture(h.cmd_podcast_sub, ["pc:" + show["h"]])
+        self.assertEqual(out[-1], {"type": "podcastSubs", "ids": ["pc:" + show["h"]]})
+        out = capture(h.cmd_podcast_sub, ["pc:" + show["h"], "--remove", "1"])
+        self.assertEqual(out[-1]["ids"], [])
+
+
 class LocalFolder(unittest.TestCase):
     def test_lists_songs_and_never_leaves_the_folder(self):
         with tempfile.TemporaryDirectory() as d:

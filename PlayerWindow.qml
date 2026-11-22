@@ -47,6 +47,7 @@ FloatingWindow {
   readonly property int gutter: Style.space(36)
 
   function t(key) { return p.i18n.t(key) }
+  readonly property bool podcastList: Model.isPodcastShow(p.openPlaylist ? p.openPlaylist.id : "")
 
   // ---- lyrics ----------------------------------------------------------------
   // What Now Playing shows beside the cover: "lyrics", "notes" or "queue".
@@ -956,10 +957,19 @@ FloatingWindow {
                   onClicked: win.p.play(0, false)
                 }
                 BigButton {
+                  visible: !win.podcastList
                   glyph: Model.GLYPH.shuffle
                   label: win.t("list.shuffle")
                   enabled: win.p.tracks.length > 1
                   onClicked: win.p.play(Math.floor(Math.random() * win.p.tracks.length), true)
+                }
+                // A podcast: subscribe, and its new episodes come to New episodes.
+                BigButton {
+                  visible: win.podcastList
+                  readonly property bool on: win.podcastList && !!win.p.podcastSubs[win.p.openPlaylist.id]
+                  glyph: on ? Model.GLYPH.check : Model.GLYPH.plus
+                  label: win.t(on ? "pc.subscribedButton" : "pc.subscribe")
+                  onClicked: win.p.toggleSubscribe(win.p.openPlaylist.id)
                 }
               }
               Txt {

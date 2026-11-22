@@ -43,7 +43,7 @@
       "pauseFade": 600,
       "aiMix": "Off",
       "transition": "Off",
-      "tabs": "yt,sp,sc,cl,rd,my",
+      "tabs": "yt,sp,sc,cl,rd,pc,my",
       "radioCountry": "",
       "crossfade": 6,
       "backupMirrors": "Off",

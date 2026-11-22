@@ -11,10 +11,11 @@ are always there.
 | <img src="icons/soundcloud.svg" width="20" height="20" alt="" align="center" />&nbsp;SoundCloud | Your likes and playlists, and search across SoundCloud | Your profile name or link |
 | <img src="icons/cloud.svg" width="20" height="20" alt="" align="center" />&nbsp;Files | Your Music folder, your music server and your own storage, with covers | One click for ~/Music; a server's address and sign-in; or a storage |
 | <img src="icons/radio.svg" width="20" height="20" alt="" align="center" />&nbsp;Radio | About 50,000 stations: top, most liked, a country's, genres, search, favorites | Nothing |
+| <img src="icons/podcasts.svg" width="20" height="20" alt="" align="center" />&nbsp;Podcasts | Apple Podcasts' directory or any feed: top shows, search, subscriptions, new episodes | Nothing |
 | <img src="icons/mymusic.svg" width="20" height="20" alt="" align="center" />&nbsp;My&nbsp;Music | AI Mix, My Mix, your own mixes, Recently played, Downloads | Nothing |
 
 A search field sits under the tabs: `Enter` (or `/` to get there) searches
-YouTube Music, or SoundCloud or radio stations on their tabs. Back returns
+YouTube Music, or SoundCloud, radio stations or podcasts on their tabs. Back returns
 to where you were.
 
 ## YouTube Music
@@ -104,6 +105,20 @@ search, and your **favorite stations** (the heart on a station).
 type to narrow it. It starts with the one your language setting names. The
 song on air shows when the station announces it; a dropped stream reopens
 by itself.
+
+## Podcasts
+
+Shows come from [Apple Podcasts](https://podcasts.apple.com)' public
+directory (no account): the top shows in your country, and search. Paste a
+feed link into the search to add any podcast that has an RSS feed.
+
+- **Subscribe** on a show's page; its new episodes (from the last 30 days)
+  gather in **New episodes**, newest first.
+- **Each episode goes on where you stopped**, even after a restart; the list
+  says how much is left, or *Played*. An episode you finish starts from the
+  beginning next time.
+- Episodes play straight from the podcast's own server. Peak mix leaves them
+  alone, and they don't count towards your music taste (AI Mix).
 
 ## My Music
 

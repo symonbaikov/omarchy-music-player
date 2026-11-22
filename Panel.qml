@@ -125,6 +125,7 @@ Panel {
     { id: "sc", glyph: Model.GLYPH.soundcloud, color: "#FF5500", label: strings.t("tab.sc") },
     { id: "cl", glyph: Model.GLYPH.cloud, color: "#4FA3FF", label: strings.t("tab.cl") },
     { id: "rd", glyph: Model.GLYPH.radioService, color: "#B388FF", label: strings.t("tab.rd") },
+    { id: "pc", glyph: Model.GLYPH.podcast, color: "#D56DFB", label: strings.t("tab.pc") },
     { id: "my", glyph: Model.GLYPH.supermix, color: Commons.Color.accent, label: strings.t("tab.my") }
   ]
   // Per service: { items, loading, error, setup } ("setup": needs connecting).
@@ -132,6 +133,7 @@ Panel {
                        sc: { items: [], loading: false, error: "", setup: "" },
                        cl: { items: [], loading: false, error: "", setup: "" },
                        rd: { items: [], loading: false, error: "", setup: "" },
+                       pc: { items: [], loading: false, error: "", setup: "" },
                        my: { items: [], loading: false, error: "", setup: "" } })
   readonly property string spClientId: String(setting("spotifyClientId", "") || "")
   readonly property string scUserSetting: String(setting("soundcloudUser", "") || "")
@@ -471,6 +473,11 @@ Panel {
     } else if (msg.type === "radioCountries") {
       radioCountries = msg.items
       radioCountry = msg.current
+    } else if (msg.type === "podcastSubs") {
+      var subs = {}
+      for (var si = 0; si < msg.ids.length; si++) subs[msg.ids[si]] = true
+      podcastSubs = subs
+      if (source === "podcastSub" && service === "pc") loadService("pc", true)
     } else if (msg.type === "radioFavs") {
       var set = {}
       for (var fi = 0; fi < msg.ids.length; fi++) set[msg.ids[fi]] = true
@@ -1257,7 +1264,7 @@ Panel {
     if (view !== "explore") {
       if (view === "addTo") closeAddTo()
       searchReturnView = view === "settings" || view === "download" ? "playlists" : view
-      exploreService = service === "sc" || service === "rd" ? service : "yt"
+      exploreService = service === "sc" || service === "rd" || service === "pc" ? service : "yt"
     }
     view = "explore"
     runSearch(q)
@@ -1857,6 +1864,26 @@ Panel {
     stdout: SplitParser { onRead: function(line) { root.handleHelperLine(line, "radioFav") } }
   }
 
+  // ---- podcasts --------------------------------------------------------------------
+  // Subscribed shows ({ "pc:<show>": true }); their new episodes are a list.
+  property var podcastSubs: ({})
+  readonly property bool podcastOpen: view === "tracks" && openPlaylist !== null && Model.isPodcastShow(openPlaylist.id)
+  function toggleSubscribe(id) {
+    if (!Model.isPodcastShow(id) || podcastSubProc.running) return
+    var on = !podcastSubs[id]
+    var next = Object.assign({}, podcastSubs)
+    if (on) next[id] = true
+    else delete next[id]
+    podcastSubs = next
+    podcastSubProc.command = helper(["podcast-sub", id].concat(on ? [] : ["--remove", "1"]))
+    podcastSubProc.running = true
+    showNotice(strings.t(on ? "pc.subscribed" : "pc.unsubscribed"))
+  }
+  Process {
+    id: podcastSubProc
+    stdout: SplitParser { onRead: function(line) { root.handleHelperLine(line, "podcastSub") } }
+  }
+
   // The heart, like YouTube Music's: likes the song (it goes to Liked Music)
   // or removes the like. Shown at once, rolled back if YouTube refuses.
   function toggleLike(track) {
@@ -2167,6 +2194,8 @@ Panel {
   Component.onCompleted: {
     radioFavProc.command = helper(["radio-favs"])
     radioFavProc.running = true
+    podcastSubProc.command = helper(["podcast-sub"])
+    podcastSubProc.running = true
     pathsProc.running = true
     likedProc.running = true
     // Settings may have changed while the shell wasn't running.
@@ -2361,7 +2390,8 @@ Panel {
             visible: searchField.text === "" && !searchField.preeditText
             readonly property string where: root.view === "explore" ? root.exploreService : root.service
             text: root.view === "countries" ? strings.t("rd.countryField")
-              : where === "sc" ? strings.t("sc.searchField") : where === "rd" ? strings.t("rd.searchField") : strings.t("explore.search")
+              : where === "sc" ? strings.t("sc.searchField") : where === "rd" ? strings.t("rd.searchField")
+              : where === "pc" ? strings.t("pc.searchField") : strings.t("explore.search")
             color: root.dim
             font.pixelSize: Style.font.subtitle
           }
@@ -2928,7 +2958,17 @@ Panel {
             spacing: Style.space(6)
 
             Button {
-              visible: root.view === "tracks" && root.tracks.length > 0
+              visible: root.podcastOpen
+              iconText: root.podcastOpen && root.podcastSubs[root.openPlaylist.id] ? Model.GLYPH.check : Model.GLYPH.plus
+              text: strings.t(root.podcastOpen && root.podcastSubs[root.openPlaylist.id] ? "pc.subscribedButton" : "pc.subscribe")
+              fontSize: Style.font.body
+              foreground: root.fg
+              fontFamily: root.fontFamily
+              bordered: true
+              onClicked: root.toggleSubscribe(root.openPlaylist.id)
+            }
+            Button {
+              visible: root.view === "tracks" && root.tracks.length > 0 && !root.podcastOpen
               iconText: Model.GLYPH.play
               text: strings.t("list.playAll")
               fontSize: Style.font.body
@@ -2938,7 +2978,7 @@ Panel {
               onClicked: root.play(0, false)
             }
             Button {
-              visible: root.view === "tracks" && root.tracks.length > 1
+              visible: root.view === "tracks" && root.tracks.length > 1 && !root.podcastOpen
               iconText: Model.GLYPH.shuffle
               text: strings.t("list.shuffle")
               fontSize: Style.font.body
@@ -3750,6 +3790,8 @@ Panel {
                     if (/^ms:[a-f0-9]{8}:pl:/.test(rowItem.modelData.id)) return Model.GLYPH.playlist
                     if (/^ms:/.test(rowItem.modelData.id)) return Model.GLYPH.album
                     if (/^rd:/.test(rowItem.modelData.id)) return Model.GLYPH.radioService
+                    if (rowItem.modelData.id === "pc:new") return Model.GLYPH.history
+                    if (/^pc:/.test(rowItem.modelData.id)) return Model.GLYPH.podcast
                     if (/^cl:/.test(rowItem.modelData.id)) return Model.GLYPH.album
                     if (rowItem.modelData.id === Model.SUPERMIX_ID) return Model.GLYPH.supermix
                     return root.view === "explore" ? Model.GLYPH.album : Model.GLYPH.playlist

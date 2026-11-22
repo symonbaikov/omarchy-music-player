@@ -130,6 +130,8 @@ local function prepare()
     if not cur or not nxt or is_segment(nxt) then return end
     -- A radio station is live: no climax to mix from or into.
     if cur:sub(1, 16) == "ytmusic-radio://" or nxt:sub(1, 16) == "ytmusic-radio://" then return end
+    -- Nor a podcast: talk has no climax, and an episode isn't cut short.
+    if cur:sub(1, 18) == "ytmusic-podcast://" or nxt:sub(1, 18) == "ytmusic-podcast://" then return end
     if mix and mix.pos == pos and mix.from == cur and mix.to == nxt then return end
     local raw = mp.get_property_native("ytdl-raw-options") or {}
     local job = { pos = pos, from = cur, to = nxt, state = "pending" }
@@ -298,6 +300,7 @@ local SPOTIFY = "ytmusic-spotify://"
 local CLOUD = "ytmusic-cloud://"
 local RADIO = "ytmusic-radio://"
 local SERVER = "ytmusic-server://"
+local PODCAST = "ytmusic-podcast://"
 
 local function watch_id(url)
     return url and url:match("^https://music%.youtube%.com/watch%?v=([%w_-]+)$")
@@ -434,7 +437,7 @@ mp.register_event("end-file", function(e)
     local name = entry and entry.filename or ""
     local radio = name:sub(1, #RADIO) == RADIO
     if not entry or not (watch_id(name) or name:sub(1, #SPOTIFY) == SPOTIFY or name:sub(1, #CLOUD) == CLOUD or radio
-        or name:sub(1, #SERVER) == SERVER
+        or name:sub(1, #SERVER) == SERVER or name:sub(1, #PODCAST) == PODCAST
         or name:match("^https://[%w.]*soundcloud%.com/")) then return end
     -- A mix ending this song early, or the song simply finishing.
     if mix and mix.state == "ready" and mix.pos == index then return end
@@ -460,7 +463,7 @@ end)
 -- server. The entry keeps its name, so the panel still knows which song it is.
 local function resolved_ok(kind, url)
     if kind == "sp" then return watch_id(url) ~= nil end
-    if kind == "rd" or kind == "ms" then return url:match("^https?://[^%s]+$") ~= nil end
+    if kind == "rd" or kind == "ms" or kind == "pc" then return url:match("^https?://[^%s]+$") ~= nil end
     -- A song in a local folder: its file.
     if kind == "cl" and url:sub(1, 1) == "/" then return true end
     return url:match("^http://[%w]+:[%w]+@127%.0%.0%.1:%d+/") ~= nil
@@ -485,6 +488,9 @@ mp.add_hook("on_load", 5, function(hook)
     elseif url:sub(1, #RADIO) == RADIO then
         kind, key = "rd", url:sub(#RADIO + 1)
         if not key:match("^[%x%-]+$") then return end
+    elseif url:sub(1, #PODCAST) == PODCAST then
+        kind, key = "pc", url:sub(#PODCAST + 1)
+        if not key:match("^%x+/%x+$") then return end
     else
         return
     end
@@ -504,8 +510,15 @@ mp.add_hook("on_load", 5, function(hook)
         end
         if out and out.type == "resolved" and type(out.url) == "string" and resolved_ok(kind, out.url) then
             mp.set_property("stream-open-filename", out.url)
+            -- A podcast episode carries on where you stopped.
+            if kind == "pc" and type(out.start) == "number" and out.start > 0
+                and (mp.get_property("file-local-options/start") or "none") == "none" then
+                mp.set_property("file-local-options/start", tostring(math.floor(out.start)))
+            end
         elseif kind == "ms" then
             msg.error("server song " .. key .. " can't be opened: " .. tostring(out and out.message or "helper failed"))
+        elseif kind == "pc" then
+            msg.error("podcast episode " .. key .. " can't be opened: " .. tostring(out and out.message or "helper failed"))
         elseif kind == "rd" then
             msg.error("radio station " .. key .. " can't be reached: " .. tostring(out and out.message or "helper failed"))
         elseif kind == "sp" then

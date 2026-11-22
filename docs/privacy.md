@@ -47,6 +47,12 @@ before use.
   line. Songs reach mpv through `rclone serve http` on `127.0.0.1`:
   read-only, a random user and password each run (in the environment, kept
   owner-only), stopped with the player.
+- **Podcasts**: search and the top shows come from Apple's public directory
+  (`itunes.apple.com`, `rss.marketingtools.apple.com`), with only what you
+  typed and your country; show artwork from Apple's image host. Feeds and
+  episodes come from each podcast's own servers (which, like any podcast
+  app, see a download). Subscriptions and where you stopped are kept in
+  `podcasts.json`.
 - **Radio**: Radio Browser's servers (`*.api.radio-browser.info`) for lists
   and search; they count a listen when a station plays. Station logos are
   fetched once by the helper and cached; the stream comes from the station.

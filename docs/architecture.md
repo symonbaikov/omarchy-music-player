@@ -57,10 +57,11 @@ Commands: `playlists`, `tracks`, `play`, `radio`, `search`, `explore`,
   - `cl:<8 hex>/<16 hex>` a file in a storage or local folder; lists `cl:<8>` and `cl:<8>:<16>`.
   - `ms:<8>/<id>` a media server song; lists `ms:<8>:fav|rnd|al:<id>|pl:<id>`.
   - `rd:<uuid>` a radio station; lists `rd:fav|top|vote|search|country:XX|tag:<x>`.
+  - `pc:<16 hex>/<16 hex>` a podcast episode (hashes of the feed URL and the episode's guid); lists `pc:new` and `pc:<16 hex>` (a show).
   - `mix:<8 hex>` your mixes, `mix:all` My Mix, `ai:mix`, `hist:recent`, `DOWNLOADS`.
 - **Custom schemes**: non-YouTube songs go into the queue as
   `ytmusic-spotify://`, `ytmusic-cloud://`, `ytmusic-radio://`,
-  `ytmusic-server://` URLs. The Lua `on_load` hook asks the helper
+  `ytmusic-server://`, `ytmusic-podcast://` URLs. The Lua `on_load` hook asks the helper
   (`resolve`) for the real stream and checks it (`resolved_ok`) before mpv
   opens it.
 - **Secrets** never go on a command line: forms come on stdin, rclone gets
@@ -83,7 +84,10 @@ Commands: `playlists`, `tracks`, `play`, `radio`, `search`, `explore`,
   `file-local-options/end`.
 - Backup sources: the `on_load_fail` hook asks `fallback`.
 - History: `end-file` → `note_play` → a **detached** `history-add`
-  subprocess (it must outlive mpv, which quits when a new list starts).
+  subprocess (it must outlive mpv, which quits when a new list starts). With
+  repeat one, each time the song comes round counts. For a podcast episode
+  `history-add` only saves where you stopped (`podcasts.json`), and
+  `resolve` hands back `start`, which the script sets as the file's start.
 
 ## The panel and the window
 

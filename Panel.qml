@@ -62,6 +62,7 @@ Panel {
   property int cursorIndex: -1
   readonly property var libraryRows: service === "yt" ? [exploreEntry].concat(playlists)
     : service === "sc" ? (svc.sc.setup ? [] : [scSearchEntry].concat(svc.sc.items))
+    : service === "cl" ? (svc.cl.setup || cloudFormOpen ? [] : svc.cl.items.concat([cloudAddEntry]))
     : svc[service].setup ? [] : svc[service].items
   readonly property var rows: view === "settings" || view === "download" ? []
     : view === "explore" ? exploreRowsData
@@ -113,11 +114,13 @@ Panel {
     { id: "yt", glyph: Model.GLYPH.youtube, color: "#FF0033", label: strings.t("tab.yt") },
     { id: "sp", glyph: Model.GLYPH.spotify, color: "#1ED760", label: strings.t("tab.sp") },
     { id: "sc", glyph: Model.GLYPH.soundcloud, color: "#FF5500", label: strings.t("tab.sc") },
+    { id: "cl", glyph: Model.GLYPH.cloud, color: "#4FA3FF", label: strings.t("tab.cl") },
     { id: "my", glyph: Model.GLYPH.supermix, color: Commons.Color.accent, label: strings.t("tab.my") }
   ]
   // Per service: { items, loading, error, setup } ("setup": needs connecting).
   property var svc: ({ sp: { items: [], loading: false, error: "", setup: "" },
                        sc: { items: [], loading: false, error: "", setup: "" },
+                       cl: { items: [], loading: false, error: "", setup: "" },
                        my: { items: [], loading: false, error: "", setup: "" } })
   readonly property string spClientId: String(setting("spotifyClientId", "") || "")
   readonly property string scUserSetting: String(setting("soundcloudUser", "") || "")
@@ -136,7 +139,77 @@ Panel {
     service = name
     view = "playlists"
     cursorIndex = -1
+    if (name === "cl") loadCloud()
     if (name !== "yt" && svc[name].items.length === 0 && !svc[name].loading) loadPlaylists(false)
+  }
+
+  // ---- cloud storage -----------------------------------------------------------
+  // Your own music folders through rclone (S3, Google Drive, Dropbox,
+  // OneDrive, SFTP, SMB, WebDAV, FTP, or a remote rclone already has).
+  property var cloudSources: []
+  property var cloudRemotes: []
+  property bool rcloneInstalled: true
+  property bool cloudFormOpen: false
+  property string cloudKind: "drive"
+  property bool cloudKindTouched: false
+  property var cloudValues: ({})
+  property string cloudRemote: ""
+  property string cloudBusy: ""              // "" | "waiting" (browser sign-in) | "checking"
+  property string cloudError: ""
+  property bool cloudTyping: false
+  // Bumped to clear the form's fields (their delegates are made again).
+  property int cloudFormEpoch: 0
+  readonly property bool cloudFormShown: view === "playlists" && service === "cl" && (svc.cl.setup !== "" || cloudFormOpen)
+  readonly property var cloudKindSpec: {
+    for (var i = 0; i < Model.CLOUD_KINDS.length; i++) if (Model.CLOUD_KINDS[i].id === cloudKind) return Model.CLOUD_KINDS[i]
+    return Model.CLOUD_KINDS[0]
+  }
+  readonly property var cloudAddEntry: ({ kind: "explore", id: "__cloudadd", title: strings.t("cloud.addEntry"),
+    artist: strings.t("cloud.addHint") })
+
+  function loadCloud() {
+    if (!cloudProc.running) cloudProc.running = true
+  }
+
+  function openCloudForm() {
+    fullOpen = false
+    cloudError = ""
+    cloudFormOpen = true
+    if (service !== "cl") switchService("cl")
+    view = "playlists"
+    loadCloud()
+    if (!opened) open()
+  }
+
+  function setCloudValue(key, value) {
+    var next = Object.assign({}, cloudValues)
+    next[key] = value
+    cloudValues = next
+  }
+
+  function connectCloud() {
+    if (cloudAddProc.running) return
+    if (cloudKind === "remote" && cloudRemote === "") { cloudError = strings.t("cloud.pickRemote"); return }
+    var form = Model.cloudForm(cloudKind, cloudValues, cloudRemote, cloudPathField.text, cloudTitleField.text)
+    if (!form) return
+    cloudError = ""
+    cloudBusy = cloudKindSpec.oauth ? "waiting" : "checking"
+    cloudAddProc.form = form
+    cloudAddProc.running = true
+  }
+
+  // rclone does the talking to every storage; installing it needs the
+  // password, so it runs in a terminal the user sees.
+  function installRclone() {
+    installProc.command = ["omarchy-launch-floating-terminal-with-presentation", "omarchy pkg add rclone"]
+    installProc.running = true
+    close()
+  }
+
+  function removeCloud(id) {
+    if (cloudRemoveProc.running) return
+    cloudRemoveProc.command = helper(["cloud-remove", id])
+    cloudRemoveProc.running = true
   }
 
   // Mixes you can add a song to, plus starting a new one.
@@ -265,6 +338,8 @@ Panel {
     ? Model.trackCover(currentTrack, largeCoverFailedFor === currentTrack.id ? "small" : "large") : ""
 
   Commons.Translations { id: strings; directory: Qt.resolvedUrl("i18n") }
+  // For FullView.qml, which shares this panel's strings.
+  readonly property var i18n: strings
 
   function playlistTitle(p) {
     if (!p) return ""
@@ -323,6 +398,32 @@ Panel {
     if (!msg) return
     if (msg.type === "playlists" && msg.service !== "yt") {
       setSvc(msg.service, { items: msg.items, loading: msg.stale, error: "", setup: "" })
+    } else if (msg.type === "cloud") {
+      if (msg.state === "list") {
+        cloudSources = msg.sources
+        cloudRemotes = msg.remotes
+        rcloneInstalled = msg.rclone
+        if (cloudRemote === "" && msg.remotes.length > 0) cloudRemote = msg.remotes[0].name
+        // rclone already knows a storage: offer it first, nothing to type.
+        if (!cloudKindTouched && msg.remotes.length > 0) cloudKind = "remote"
+      } else if (msg.state === "waiting" || msg.state === "checking") {
+        cloudBusy = msg.state
+      } else if (msg.state === "added") {
+        cloudBusy = ""
+        cloudFormOpen = false
+        cloudValues = ({})
+        cloudFormEpoch++
+        cloudPathField.text = ""
+        cloudTitleField.text = ""
+        showNotice(strings.t("cloud.added").arg(msg.title))
+        setSvc("cl", { setup: "", error: "", items: [] })
+        loadCloud()
+        loadService("cl", true)
+      } else if (msg.state === "removed") {
+        loadCloud()
+        setSvc("cl", { items: [] })
+        loadService("cl", true)
+      }
     } else if (msg.type === "mixAdded") {
       showNotice(strings.t(msg.already ? "mix.already" : "mix.added").arg(msg.title))
       loadService("my", true)
@@ -410,6 +511,8 @@ Panel {
       else if (source === "signin") showNotice(msg.message)
       else if (source === "service") setSvc(servicePlaylistsProc.target, { loading: false, error: msg.setup ? "" : msg.message, setup: msg.setup })
       else if (source === "spotify") { spotifyWaiting = false; showNotice(msg.message, false, true) }
+      else if (source === "cloudAdd") { cloudBusy = ""; cloudError = msg.message; if (msg.setup === "rclone") rcloneInstalled = false }
+      else if (source === "cloud") showNotice(msg.message)
       else if (source === "mix") showNotice(strings.t("notice.failed").arg(msg.message))
       else if (source === "explore" || source === "search") { exploreError = msg.message; exploreLoading = false }
       else if (source === "download") {
@@ -510,13 +613,45 @@ Panel {
     id: servicePlaylistsProc
     property string target: ""
     stdout: SplitParser { onRead: function(line) { root.handleHelperLine(line, "service") } }
-    onExited: if (root.svc[target] && root.svc[target].loading) root.setSvc(target, { loading: false })
+    onExited: {
+      if (root.svc[target] && root.svc[target].loading) root.setSvc(target, { loading: false })
+      // The full-screen view asks for every service at once: one at a time.
+      if (root.serviceQueue.length > 0) {
+        var next = root.serviceQueue[0]
+        root.serviceQueue = root.serviceQueue.slice(1)
+        Qt.callLater(function() { root.loadService(next.name, next.force) })
+      }
+    }
   }
 
   Process {
     id: spotifyLoginProc
     stdout: SplitParser { onRead: function(line) { root.handleHelperLine(line, "spotify") } }
     onExited: root.spotifyWaiting = false
+  }
+
+  Process {
+    id: cloudProc
+    command: root.helper(["cloud"])
+    stdout: SplitParser { onRead: function(line) { root.handleHelperLine(line, "cloud") } }
+  }
+
+  // The form goes over stdin, so no password is ever on a command line.
+  Process {
+    id: cloudAddProc
+    property string form: ""
+    command: root.helper(["cloud-add"])
+    stdinEnabled: true
+    onStarted: write(form + "\n")
+    stdout: SplitParser { onRead: function(line) { root.handleHelperLine(line, "cloudAdd") } }
+    onExited: { root.cloudBusy = ""; form = "" }
+  }
+
+  Process { id: installProc }
+
+  Process {
+    id: cloudRemoveProc
+    stdout: SplitParser { onRead: function(line) { root.handleHelperLine(line, "cloud") } }
   }
 
   Process {
@@ -747,8 +882,14 @@ Panel {
   // the ytdl hook's "ERROR: …" log line, then "end-file" with reason "error".
   property string ytdlError: ""
 
+  property var serviceQueue: []
   function loadService(name, force) {
-    if (name === "yt" || servicePlaylistsProc.running) return
+    if (name === "yt") return
+    if (servicePlaylistsProc.running) {
+      if (servicePlaylistsProc.target !== name && !serviceQueue.some(function(q) { return q.name === name }))
+        serviceQueue = serviceQueue.concat([{ name: name, force: force }])
+      return
+    }
     setSvc(name, { loading: true, error: "" })
     servicePlaylistsProc.target = name
     servicePlaylistsProc.command = helper(["playlists", "--service", name, "--browser", browser, "--max-age", force ? "0" : "3600"])
@@ -785,6 +926,28 @@ Panel {
     mixEditProc.command = helper(["mix-remove", openPlaylist.id, track.id])
     mixEditProc.running = true
   }
+
+  // ---- full screen ---------------------------------------------------------------
+  // The whole player on the whole screen (FullView.qml), like Apple Music's
+  // window: a sidebar with every service, big covers, the queue. It shares
+  // this panel's state, so both always agree.
+  property bool fullOpen: false
+
+  function openFull() {
+    close()
+    fullOpen = true
+    if (playlists.length === 0 && !playlistsLoading) loadYouTube(false)
+    var names = ["my", "sp", "sc", "cl"]
+    for (var i = 0; i < names.length; i++)
+      if (svc[names[i]].items.length === 0 && svc[names[i]].setup === "") loadService(names[i], false)
+    loadCloud()
+    if (exploreSections.length === 0 && !exploreProc.running) loadExplore(21600)
+    if (!likedProc.running) likedProc.running = true
+    if (connected) requestPosition()
+    else attach()
+  }
+
+  function closeFull() { fullOpen = false }
 
   // ---- explore ---------------------------------------------------------------
   function openSoundCloudSearch() {
@@ -872,6 +1035,7 @@ Panel {
 
   // ---- download --------------------------------------------------------------
   function openDownload(track) {
+    fullOpen = false
     if (!track || !Model.TRACK_KEY_RE.test(String(track.id))) return
     downloadTrack = { id: track.id, title: track.title, artist: track.artist || "" }
     if (view !== "download") viewBeforeDownload = view === "addTo" || view === "settings" ? "playlists" : view
@@ -1146,7 +1310,7 @@ Panel {
   Timer {
     interval: 1000
     repeat: true
-    running: root.connected && root.opened && !root.paused
+    running: root.connected && (root.opened || root.fullOpen) && !root.paused
     onTriggered: root.requestPosition()
   }
 
@@ -1262,6 +1426,7 @@ Panel {
   }
 
   function openSettings() {
+    fullOpen = false
     if (view !== "settings") viewBeforeSettings = view === "addTo" ? "playlists" : view
     if (view === "addTo") closeAddTo()
     view = "settings"
@@ -1348,6 +1513,7 @@ Panel {
   // "Add to playlist": the list switches to your playlists; picking one adds
   // the song and returns to where you were.
   function openAddTo(track) {
+    fullOpen = false
     if (!track || !Model.TRACK_KEY_RE.test(String(track.id))) return
     if (svc.my.items.length === 0) loadService("my", false)
     if (!Model.isYouTube(track.id)) {
@@ -1438,7 +1604,19 @@ Panel {
   function openPlaylistAt(index) {
     var p = rows[index]
     if (!p) return
-    if (p.kind === "explore") { if (p.id === "__scsearch") openSoundCloudSearch(); else openExplore(); return }
+    openList(p)
+  }
+
+  // Opens a list (or one of the special entries) wherever it came from: the
+  // panel's rows or the full-screen view.
+  function openList(p) {
+    if (!p) return
+    if (p.kind === "explore") {
+      if (p.id === "__scsearch") openSoundCloudSearch()
+      else if (p.id === "__cloudadd") openCloudForm()
+      else openExplore()
+      return
+    }
     tracksFromExplore = false
     openPlaylist = p
     tracks = []
@@ -1448,6 +1626,7 @@ Panel {
   }
 
   function backToPlaylists() {
+    if (view === "playlists" && cloudFormOpen && svc.cl.setup === "") { cloudFormOpen = false; return }
     if (view === "download") { view = viewBeforeDownload; cursorIndex = -1; return }
     if (view === "explore") {
       if (exploreMode !== "home" && exploreService === "yt") showExploreHome()
@@ -1539,6 +1718,7 @@ Panel {
     case ",": openSettings(); break
     case "d": openDownload(cursorOrCurrentTrack()); break
     case "e": openExplore(); break
+    case "F": openFull(); break
     case "/": if (view === "explore") searchField.forceActiveFocus(); else { openExplore(); searchField.forceActiveFocus() } break
     }
   }
@@ -1567,6 +1747,16 @@ Panel {
     function explore(): void { root.open(); root.openExplore() }
     function tab(name: string): void { root.open(); root.switchService(name) }
     function download(): void { root.openDownload(root.currentTrack) }
+    function fullscreen(): void { root.fullOpen ? root.closeFull() : root.openFull() }
+    // Full screen on one page: home, browse, nowplaying, or a service
+    // (yt, sp, sc, cl, my) — handy for a keybinding.
+    function full(page: string): void {
+      if (!root.fullOpen) root.openFull()
+      if (Model.SERVICES.indexOf(page) >= 0) fullView.showService(page)
+      else if (page === "browse") fullView.showBrowse()
+      else if (page === "home" || page === "nowplaying") fullView.go(page)
+    }
+    function cloud(): void { root.openCloudForm() }
   }
 
   onOpenedChanged: {
@@ -1635,7 +1825,7 @@ Panel {
     content: PanelKeyCatcher {
       anchors.fill: parent
       // Typing in the search field goes to the field, not to shortcuts.
-      blocked: searchField.activeFocus || setupField.activeFocus
+      blocked: searchField.activeFocus || setupField.activeFocus || root.cloudTyping
       implicitHeight: column.implicitHeight
       onMoveRequested: function(dx, dy) { root.moveCursor(dx, dy) }
       onActivateRequested: root.activateCursor()
@@ -1674,17 +1864,29 @@ Panel {
             }
           }
 
-          // Settings, in the panel's top right corner.
-          PanelActionButton {
+          // Full screen and settings, in the panel's top right corner.
+          Row {
             id: settingsButton
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
-            iconText: Model.GLYPH.settings
-            fontSize: Style.font.title
-            tooltipText: strings.t("settings.open")
-            foreground: root.view === "settings" ? Style.selectedStateColor(root.fg, Commons.Color.accent) : root.fg
-            fontFamily: root.fontFamily
-            onClicked: root.view === "settings" ? root.backToPlaylists() : root.openSettings()
+            spacing: Style.space(2)
+
+            PanelActionButton {
+              iconText: Model.GLYPH.fullscreen
+              fontSize: Style.font.title
+              tooltipText: strings.t("full.open")
+              foreground: root.fg
+              fontFamily: root.fontFamily
+              onClicked: root.openFull()
+            }
+            PanelActionButton {
+              iconText: Model.GLYPH.settings
+              fontSize: Style.font.title
+              tooltipText: strings.t("settings.open")
+              foreground: root.view === "settings" ? Style.selectedStateColor(root.fg, Commons.Color.accent) : root.fg
+              fontFamily: root.fontFamily
+              onClicked: root.view === "settings" ? root.backToPlaylists() : root.openSettings()
+            }
           }
         }
 
@@ -2446,7 +2648,7 @@ Panel {
         // ---------- connect Spotify / SoundCloud ----------
         BorderSurface {
           id: setupCard
-          readonly property string target: root.view === "playlists" && root.service !== "yt" && root.service !== "my"
+          readonly property string target: root.view === "playlists" && (root.service === "sp" || root.service === "sc")
             ? root.svc[root.service].setup : ""
           // Spotify with a Client ID but no login only needs the Connect button.
           readonly property bool needsField: target === "sc" || (target === "sp" && root.spClientId === "")
@@ -2544,6 +2746,169 @@ Panel {
                 bordered: true
                 onClicked: root.connectSpotify()
               }
+            }
+          }
+        }
+
+        // ---------- connect cloud storage ----------
+        BorderSurface {
+          id: cloudCard
+          visible: root.cloudFormShown
+          width: parent.width
+          implicitHeight: cloudColumn.implicitHeight + Style.space(24)
+          radius: Style.cornerRadius
+          color: Qt.rgba(Commons.Color.accent.r, Commons.Color.accent.g, Commons.Color.accent.b, 0.08)
+          borderSpec: Border.flat(Commons.Color.accent, 1)
+
+          Column {
+            id: cloudColumn
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.margins: Style.space(12)
+            spacing: Style.space(10)
+
+            PlainText {
+              width: parent.width
+              text: Model.GLYPH.cloud + "  " + strings.t("cloud.title")
+              font.pixelSize: Style.font.title
+              font.bold: true
+            }
+            PlainText {
+              width: parent.width
+              text: root.rcloneInstalled ? strings.t("cloud.body") : strings.t("cloud.noRclone")
+              color: root.dim
+              wrapMode: Text.Wrap
+              elide: Text.ElideNone
+            }
+            Button {
+              visible: !root.rcloneInstalled
+              iconText: Model.GLYPH.download
+              text: strings.t("cloud.installRclone")
+              foreground: root.fg
+              fontFamily: root.fontFamily
+              bordered: true
+              onClicked: root.installRclone()
+            }
+
+            Flow {
+              visible: root.rcloneInstalled
+              width: parent.width
+              spacing: Style.space(6)
+              Repeater {
+                model: Model.CLOUD_KINDS
+                Button {
+                  required property var modelData
+                  text: modelData.label
+                  selected: root.cloudKind === modelData.id
+                  bordered: true
+                  fontSize: Style.font.bodySmall
+                  foreground: root.fg
+                  fontFamily: root.fontFamily
+                  enabled: root.cloudBusy === ""
+                  onClicked: { root.cloudKind = modelData.id; root.cloudKindTouched = true; root.cloudError = "" }
+                }
+              }
+            }
+            PlainText {
+              visible: root.rcloneInstalled
+              width: parent.width
+              text: strings.t("cloud.hint." + root.cloudKind)
+              color: root.dim
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.Wrap
+              elide: Text.ElideNone
+            }
+
+            // A remote rclone already has (`rclone config`).
+            Flow {
+              visible: root.rcloneInstalled && root.cloudKind === "remote" && root.cloudRemotes.length > 0
+              width: parent.width
+              spacing: Style.space(6)
+              Repeater {
+                model: root.cloudRemotes
+                Button {
+                  required property var modelData
+                  text: modelData.name + "  ·  " + modelData.type
+                  selected: root.cloudRemote === modelData.name
+                  bordered: true
+                  fontSize: Style.font.bodySmall
+                  foreground: root.fg
+                  fontFamily: root.fontFamily
+                  onClicked: root.cloudRemote = modelData.name
+                }
+              }
+            }
+            PlainText {
+              visible: root.rcloneInstalled && root.cloudKind === "remote" && root.cloudRemotes.length === 0
+              width: parent.width
+              text: strings.t("cloud.noRemotes")
+              color: root.dim
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.Wrap
+              elide: Text.ElideNone
+            }
+
+            Repeater {
+              model: root.rcloneInstalled && root.cloudFormEpoch >= 0 ? root.cloudKindSpec.fields.slice() : []
+              CloudField {
+                required property var modelData
+                width: cloudColumn.width
+                label: strings.t("cloud.field." + modelData)
+                secret: Model.SECRET_FIELDS.indexOf(modelData) >= 0
+                onEdited: function(value) { root.setCloudValue(modelData, value) }
+              }
+            }
+            CloudField {
+              id: cloudPathField
+              visible: root.rcloneInstalled
+              width: parent.width
+              label: strings.t(root.cloudKind === "s3" ? "cloud.pathS3" : root.cloudKind === "smb" ? "cloud.pathSmb" : "cloud.path")
+            }
+            CloudField {
+              id: cloudTitleField
+              visible: root.rcloneInstalled
+              width: parent.width
+              label: strings.t("cloud.name")
+            }
+
+            Row {
+              visible: root.rcloneInstalled
+              spacing: Style.space(8)
+              Button {
+                iconText: root.cloudBusy !== "" ? Model.GLYPH.loading : Model.GLYPH.cloud
+                iconSpinning: root.cloudBusy !== ""
+                text: root.cloudBusy === "waiting" ? strings.t("cloud.waiting")
+                  : root.cloudBusy === "checking" ? strings.t("cloud.checking")
+                  : root.cloudKindSpec.oauth ? strings.t("cloud.signIn").arg(root.cloudKindSpec.label) : strings.t("cloud.connect")
+                enabled: root.cloudBusy === ""
+                foreground: root.fg
+                fontFamily: root.fontFamily
+                bordered: true
+                onClicked: root.connectCloud()
+              }
+              Button {
+                visible: root.svc.cl.setup === "" && root.cloudBusy === ""
+                text: strings.t("download.cancel")
+                foreground: root.fg
+                fontFamily: root.fontFamily
+                bordered: true
+                onClicked: root.cloudFormOpen = false
+              }
+            }
+            PlainText {
+              visible: root.cloudError !== ""
+              width: parent.width
+              text: root.cloudError
+              color: Commons.Color.urgent
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.Wrap
+              elide: Text.ElideNone
+            }
+            ReportButton {
+              visible: root.cloudError !== ""
+              where: strings.t("tab.cl")
+              message: root.cloudError
             }
           }
         }
@@ -2709,6 +3074,37 @@ Panel {
               }
             }
 
+            // Cloud storage: each connected source, and adding another.
+            Repeater {
+              model: root.cloudSources
+              Row {
+                required property var modelData
+                spacing: Style.space(8)
+                PlainText {
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: Model.GLYPH.cloud + "  " + modelData.title + "  ·  " + modelData.remote + ":" + modelData.path
+                }
+                Button {
+                  text: strings.t("accounts.remove")
+                  fontSize: Style.font.bodySmall
+                  foreground: root.fg
+                  fontFamily: root.fontFamily
+                  bordered: true
+                  enabled: !cloudRemoveProc.running
+                  onClicked: root.removeCloud(modelData.id)
+                }
+              }
+            }
+            Button {
+              iconText: Model.GLYPH.plus
+              text: strings.t("cloud.addEntry")
+              fontSize: Style.font.bodySmall
+              foreground: root.fg
+              fontFamily: root.fontFamily
+              bordered: true
+              onClicked: root.openCloudForm()
+            }
+
             // The browser can't be picked here: a profile path is free text.
             PlainText {
               width: parent.width
@@ -2767,7 +3163,7 @@ Panel {
               : isTrack ? (root.currentTrack !== null && root.currentTrack.id === modelData.id)
               : kind === "list" && root.isPlayingPlaylist(modelData.id)
 
-            readonly property bool hasCover: isTrack && root.showCovers && Model.trackCover(modelData, "small") !== ""
+            readonly property bool hasCover: (isTrack || !!modelData.cover) && root.showCovers && Model.trackCover(modelData, "small") !== ""
 
             width: ListView.view.width
             height: Math.max(rowLabels.implicitHeight, leading.height) + Style.spacing.controlPaddingY * 2 + Style.space(8)
@@ -2810,7 +3206,8 @@ Panel {
                 font.pixelSize: rowItem.isTrack && !rowItem.isNow && root.view === "tracks" ? Style.font.body : Style.font.title
                 text: {
                   if (rowItem.isNow) return root.paused ? Model.GLYPH.pause : Model.GLYPH.play
-                  if (rowItem.kind === "explore") return rowItem.modelData.id === "__scsearch" ? Model.GLYPH.search : Model.GLYPH.explore
+                  if (rowItem.kind === "explore") return rowItem.modelData.id === "__scsearch" ? Model.GLYPH.search
+                    : rowItem.modelData.id === "__cloudadd" ? Model.GLYPH.plus : Model.GLYPH.explore
                   if (rowItem.kind === "mood") return Model.GLYPH.mood
                   if (!rowItem.isTrack) {
                     if (rowItem.modelData.id === "LM") return Model.GLYPH.heart
@@ -2819,6 +3216,8 @@ Panel {
                     if (/^mix:/.test(rowItem.modelData.id) || rowItem.kind === "mixTarget") return Model.GLYPH.supermix
                     if (rowItem.modelData.id === "sp:liked") return Model.GLYPH.spotify
                     if (/^sc:likes:/.test(rowItem.modelData.id)) return Model.GLYPH.soundcloud
+                    if (/^cl:[a-f0-9]{8}$/.test(rowItem.modelData.id)) return Model.GLYPH.cloud
+                    if (/^cl:/.test(rowItem.modelData.id)) return Model.GLYPH.album
                     if (rowItem.modelData.id === Model.SUPERMIX_ID) return Model.GLYPH.supermix
                     return root.view === "explore" ? Model.GLYPH.album : Model.GLYPH.playlist
                   }
@@ -2853,7 +3252,7 @@ Panel {
                 visible: text !== ""
                 color: root.dim
                 font.pixelSize: Style.font.body
-                text: rowItem.modelData.artist || ""
+                text: rowItem.modelData.artist || rowItem.modelData.subtitle || ""
               }
             }
 
@@ -2975,7 +3374,7 @@ Panel {
               return root.addTargetsLive !== null ? strings.t("list.noOwnPlaylists") : strings.t("list.targetsFailed")
             }
             var other = root.view === "playlists" && root.service !== "yt"
-            if (other && root.svc[root.service].setup) return ""
+            if (other && (root.svc[root.service].setup || (root.service === "cl" && root.cloudFormOpen))) return ""
             var loading = root.view === "tracks" ? root.tracksLoading : other ? root.svc[root.service].loading : root.playlistsLoading
             var error = root.view === "tracks" ? root.tracksError : other ? root.svc[root.service].error : root.playlistsError
             if (error !== "") {
@@ -3016,6 +3415,8 @@ Panel {
       }
     }
   }
+
+  FullView { id: fullView; p: root }
 
   // Loading indicator, like Omarchy's own spinning buttons: it turns only
   // while visible, and stands still when animations are turned off.
@@ -3099,6 +3500,53 @@ Panel {
     PanelToolTip {
       visible: tabMouse.containsMouse && !tab.selected
       text: tab.label
+    }
+  }
+
+  // A labelled text field of the "Connect storage" form.
+  component CloudField: Column {
+    id: field
+    property string label: ""
+    property bool secret: false
+    property alias text: input.text
+    signal edited(string value)
+    spacing: Style.space(4)
+
+    PlainText {
+      width: field.width
+      text: field.label
+      color: root.dim
+      font.pixelSize: Style.font.caption
+      font.bold: true
+    }
+    BorderSurface {
+      width: field.width
+      implicitHeight: Style.space(34)
+      radius: Style.cornerRadius
+      color: Style.controlFill(input.activeFocus, false, root.fg, Commons.Color.accent)
+      borderSpec: Border.controlSpec(input.activeFocus ? "focus" : "normal", root.fg, Commons.Color.accent)
+      MouseArea {
+        anchors.fill: parent
+        cursorShape: Qt.IBeamCursor
+        onClicked: input.forceActiveFocus()
+      }
+      TextInput {
+        id: input
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.margins: Style.space(10)
+        anchors.verticalCenter: parent.verticalCenter
+        clip: true
+        color: root.fg
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.body
+        selectByMouse: true
+        echoMode: field.secret ? TextInput.Password : TextInput.Normal
+        onTextEdited: field.edited(text)
+        onActiveFocusChanged: root.cloudTyping = activeFocus
+        onAccepted: { focus = false; root.connectCloud() }
+        Keys.onEscapePressed: function(event) { focus = false; event.accepted = true }
+      }
     }
   }
 

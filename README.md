@@ -95,8 +95,13 @@ omarchy-shell io.github.symonbaikov.ytmusic-mpv addToPlaylist # pick a playlist 
 
 ## Settings
 
-Edit them in Omarchy's bar settings, or on the widget's entry in
-`~/.config/omarchy/shell.json`:
+Set them with `omarchy bar set`, or on the widget's entry in
+`~/.config/omarchy/shell.json` (the bar picks up changes right away):
+
+```bash
+omarchy bar set io.github.symonbaikov.ytmusic-mpv browser brave
+omarchy bar set io.github.symonbaikov.ytmusic-mpv playbackCookies On
+```
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -164,6 +169,10 @@ Edit them in Omarchy's bar settings, or on the widget's entry in
 - **Like or add-to-playlist failed**: the panel shows YouTube's own reason.
   `~/.cache/io.github.symonbaikov.ytmusic-mpv/api.log` has the endpoint, HTTP
   code and YouTube's status for each failure, and never headers or cookies.
+- **A song is skipped**: the panel says which one and YouTube's reason. If
+  it's one your account can play (members-only, sign-in or age check), the
+  notice has a **Play with my account** button: it turns `playbackCookies`
+  on and plays the song again.
 - **A track won't play**: check `~/.cache/io.github.symonbaikov.ytmusic-mpv/mpv.log`,
   and keep `yt-dlp` up to date (`omarchy update`).
 

@@ -58,6 +58,11 @@ Panel {
   property bool addTargetsLoading: false
   // The notice is a sign-in problem: offer a "Sign in" button with it.
   property bool noticeAuth: false
+  property bool noticeLong: false
+  // A skipped song that the account may be able to play (members-only …):
+  // the notice offers to turn playback cookies on and play it again.
+  property string noticeRetryId: ""
+  property string retryVideoId: ""
 
   // ---- library edits (like, add to playlist) --------------------------------
   // Liked video ids, from the local Liked Music list; updated at once when
@@ -217,6 +222,11 @@ Panel {
         addTargetsLive = msg.items
         addTargetsLoading = false
       }
+    } else if (msg.type === "cookies") {
+      if (msg.state === "applied" && retryVideoId !== "") retrySkipped()
+      else retryVideoId = ""
+    } else if (msg.type === "stopped" && source === "cookies") {
+      retryVideoId = ""
     } else if (msg.type === "signin") {
       showNotice(strings.t("notice.signinOpened").arg(msg.browser))
     } else if (msg.type === "playing") {
@@ -340,10 +350,12 @@ Panel {
   Timer {
     id: noticeTimer
     // Sign-in problems stay longer: there's a button to press.
-    interval: root.noticeAuth ? 12000 : 4000
+    interval: root.noticeAuth || root.noticeLong ? 12000 : 4000
     onTriggered: {
       root.notice = ""
       root.noticeAuth = false
+      root.noticeLong = false
+      root.noticeRetryId = ""
     }
   }
 
@@ -386,6 +398,8 @@ Panel {
         sessionFile.reload()
         for (var i = 0; i < Model.OBSERVED.length; i++)
           root.send(["observe_property", i + 1, Model.OBSERVED[i]])
+        // Errors only: why a track couldn't be opened (see showSkipped).
+        root.send(["request_log_messages", "error"])
         root.requestPosition()
       } else {
         root.resetPlayer()
@@ -437,10 +451,60 @@ Panel {
 
   function requestPosition() { send(["get_property", "time-pos"], timePosRequest) }
 
+  // mpv skips a track it can't open (members-only, removed, region-locked …)
+  // and plays the next one. Say which and why, instead of silently playing
+  // something else. For each track mpv sends "start-file", then (on failure)
+  // the ytdl hook's "ERROR: …" log line, then "end-file" with reason "error".
+  property string ytdlError: ""
+
+  function showSkipped(errorLine) {
+    var f = Model.playbackFailure(errorLine)
+    if (!f) { showNotice(strings.t("notice.skippedUnknown"), false, true); return }
+    var title = f.id
+    var queue = session && session.tracks ? session.tracks : []
+    for (var i = 0; i < queue.length; i++) {
+      if (queue[i].id === f.id) { title = queue[i].title; break }
+    }
+    var text = strings.t("notice.skipped").arg(Model.truncate(title, 60)).arg(f.reason)
+    var offer = f.account && !playbackCookies && browser !== "none"
+    if (offer) text += " " + strings.t("notice.cookiesHint")
+    showNotice(text, false, true)
+    if (offer) noticeRetryId = f.id
+  }
+
+  // The user asked to play `videoId` with their account: turn playback
+  // cookies on (saved in this widget's shell.json entry, like repeat). The
+  // settings change hands them to the running player (syncPlayerCookies);
+  // once that's done the song is played again (see the "cookies" reply).
+  function playWithAccount(videoId) {
+    var shell = bar ? bar.shell : null
+    if (!shell || typeof shell.updateEntryInline !== "function") return
+    retryVideoId = videoId
+    notice = ""
+    noticeTimer.stop()
+    noticeRetryId = ""
+    settings = Object.assign({}, settings, { playbackCookies: "On" })
+    shell.updateEntryInline(moduleName, settings)
+  }
+
+  function retrySkipped() {
+    var id = retryVideoId
+    retryVideoId = ""
+    var queue = session && session.tracks ? session.tracks : []
+    for (var i = 0; i < queue.length; i++) {
+      if (queue[i].id === id) { send(["playlist-play-index", i]); send(["set_property", "pause", false]); return }
+    }
+  }
+
   function handleMpvLine(line) {
     var m = Model.parseMpvLine(line)
     if (!m) return
     if (m.event === "property-change") applyProperty(m.name, m.data)
+    else if (m.event === "start-file") ytdlError = ""
+    else if (m.event === "log-message") {
+      if (m.prefix === "ytdl_hook" && /^ERROR: /.test(String(m.text))) ytdlError = String(m.text)
+    }
+    else if (m.event === "end-file" && m.reason === "error") showSkipped(ytdlError)
     else if (m.request_id === timePosRequest && m.error === "success") position = Number(m.data) || 0
   }
 
@@ -498,9 +562,12 @@ Panel {
     playError = ""
     starting = true
     mpvSocket.connected = false
+    var chosen = tracks[index]
     playProc.command = helper([
       "play", openPlaylist.id,
       "--index", String(Math.max(0, index)),
+      // The song itself, so the queue starts on it even if the list changed.
+      "--video-id", chosen && chosen.id ? chosen.id : "",
       "--shuffle", shuffle ? "1" : "0",
       "--browser", browser,
       "--playback-cookies", playbackCookies ? "1" : "0",
@@ -559,9 +626,11 @@ Panel {
     return currentTrack
   }
 
-  function showNotice(text, auth) {
+  function showNotice(text, auth, long) {
     notice = text
     noticeAuth = auth === true
+    noticeLong = long === true
+    noticeRetryId = ""
     noticeTimer.restart()
   }
 
@@ -1129,13 +1198,13 @@ Panel {
         Item {
           visible: root.notice !== ""
           width: parent.width
-          implicitHeight: Math.max(noticeText.implicitHeight, noticeSignIn.visible ? noticeSignIn.implicitHeight : 0)
+          implicitHeight: Math.max(noticeText.implicitHeight, noticeButton.visible ? noticeButton.implicitHeight : 0)
 
           PlainText {
             id: noticeText
             anchors.left: parent.left
-            anchors.right: noticeSignIn.visible ? noticeSignIn.left : parent.right
-            anchors.rightMargin: noticeSignIn.visible ? Style.space(8) : 0
+            anchors.right: noticeButton.visible ? noticeButton.left : parent.right
+            anchors.rightMargin: noticeButton.visible ? Style.space(8) : 0
             anchors.verticalCenter: parent.verticalCenter
             text: root.notice
             color: root.dim
@@ -1143,18 +1212,21 @@ Panel {
             elide: Text.ElideNone
             font.pixelSize: Style.font.bodySmall
           }
+          // "Sign in" for a sign-in problem; "Play with my account" for a
+          // song skipped for a reason the account may get past.
           Button {
-            id: noticeSignIn
-            visible: root.noticeAuth && root.browser !== "none"
+            id: noticeButton
+            readonly property bool retry: root.noticeRetryId !== ""
+            visible: root.browser !== "none" && (root.noticeAuth || retry)
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
-            iconText: Model.GLYPH.login
-            text: strings.t("controls.signIn")
+            iconText: retry ? Model.GLYPH.play : Model.GLYPH.login
+            text: retry ? strings.t("controls.useAccount") : strings.t("controls.signIn")
             fontSize: Style.font.bodySmall
             foreground: root.fg
             fontFamily: root.fontFamily
             bordered: true
-            onClicked: root.signIn()
+            onClicked: retry ? root.playWithAccount(root.noticeRetryId) : root.signIn()
           }
         }
 

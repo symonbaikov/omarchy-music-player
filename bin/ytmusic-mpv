@@ -9,7 +9,7 @@ cookies from disk to see the private library.
 Commands (every result is one JSON object per line on stdout):
   playlists [--browser B] [--max-age S]
   tracks <playlist-id> [--browser B] [--max-age S]
-  play <playlist-id> [--index N] [--shuffle 0|1] [--browser B]
+  play <playlist-id> [--index N] [--video-id ID] [--shuffle 0|1] [--browser B]
        [--playback-cookies 0|1] [--volume V] [--repeat off|all|one]
   radio <video-id> [--mode replace|keep|append] [--browser B] [--title T]
         [--playback-cookies 0|1] [--volume V] [--repeat off|all|one]
@@ -634,6 +634,11 @@ def cmd_play(args):
     if not tracks:
         fail("This playlist has no playable tracks")
     index = min(index, len(tracks) - 1)
+    # The panel also names the song: start on it even if the cached list
+    # changed since the panel showed it.
+    video_id = opt(args, "--video-id", "")
+    if VIDEO_ID_RE.match(video_id) and tracks[index]["id"] != video_id:
+        index = next((i for i, t in enumerate(tracks) if t["id"] == video_id), index)
 
     if shuffle:
         first = tracks[index]

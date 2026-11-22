@@ -50,5 +50,9 @@
   "list.noOwnPlaylists": "You don't have playlists of your own yet. Create one in YouTube Music.",
   "notice.alreadyIn": "Already in %1",
   "notice.signinOpened": "Opened the sign-in page in %1. Sign in there, then try again.",
-  "list.targetsFailed": "Couldn't load your playlists."
+  "list.targetsFailed": "Couldn't load your playlists.",
+  "notice.skipped": "Skipped “%1”: %2",
+  "notice.skippedUnknown": "Skipped a track that couldn't be played.",
+  "notice.cookiesHint": "It may play with your YouTube account.",
+  "controls.useAccount": "Play with my account"
 }

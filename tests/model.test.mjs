@@ -8,7 +8,7 @@ const source = readFileSync(new URL("../Model.js", import.meta.url), "utf8").rep
 const M = {}
 // QML's V4 engine lacks some newer built-ins; remove them so tests catch their use.
 const V4_MISSING = "delete String.prototype.trimEnd; delete String.prototype.trimStart; delete Array.prototype.at; delete Object.hasOwn;\n"
-vm.runInNewContext(V4_MISSING + source + "\n;Object.assign(__out, { cleanText, plain, truncate, formatTime, parseLine, parseSession, clampIndex, mpvCommand, GLYPH, normalizeRepeat, nextRepeat, repeatFromMpv, repeatCommands, coverUrl, OBSERVED, SUPERMIX_ID, isMix, radioListId, autoplaySeed, isLoading, addTargets, likedSet, withLiked })", { __out: M })
+vm.runInNewContext(V4_MISSING + source + "\n;Object.assign(__out, { cleanText, plain, truncate, formatTime, parseLine, parseSession, clampIndex, mpvCommand, GLYPH, normalizeRepeat, nextRepeat, repeatFromMpv, repeatCommands, coverUrl, OBSERVED, SUPERMIX_ID, isMix, radioListId, autoplaySeed, isLoading, addTargets, likedSet, withLiked, playbackFailure })", { __out: M })
 
 const MARKUP = '<img src="https://example.invalid/tracker">Song'
 
@@ -234,4 +234,31 @@ test("errors carry the sign-in flag only when the helper sets it", () => {
   assert.equal(M.parseLine(JSON.stringify({ type: "error", message: "m", auth: true })).auth, true)
   assert.equal(M.parseLine(JSON.stringify({ type: "error", message: "m" })).auth, false)
   assert.equal(M.parseLine(JSON.stringify({ type: "error", message: "m", auth: "yes" })).auth, false)
+})
+
+test("playbackFailure reads yt-dlp's reason from the ytdl hook's error line", () => {
+  const f = M.playbackFailure("ERROR: [youtube] Uh6Lcxacqgk: This video is available to this channel's members on level: Hero of the Skaldic Guard (or any higher level). Join this channel to get access to members-only content and other exclusive perks.\n")
+  assert.equal(f.id, "Uh6Lcxacqgk")
+  assert.ok(f.reason.startsWith("This video is available to this channel's members"))
+  assert.ok(f.reason.endsWith("level).") && !f.reason.includes("Join this channel"))
+  assert.equal(f.account, true)
+
+  const gone = M.playbackFailure("ERROR: [youtube] abcdefghijk: Video unavailable. This video has been removed by the uploader")
+  assert.deepEqual([gone.id, gone.reason, gone.account], ["abcdefghijk", "Video unavailable.", false])
+  assert.equal(M.playbackFailure("ERROR: [youtube] abcdefghijk: This video is not available on this page").account, false)
+  assert.equal(M.playbackFailure("ERROR: [youtube] abcdefghijk: Sign in to confirm your age").account, true)
+
+  assert.equal(M.playbackFailure(""), null)
+  assert.equal(M.playbackFailure(null), null)
+  assert.equal(M.playbackFailure("youtube-dl failed: unexpected error occurred"), null)
+  assert.equal(M.playbackFailure("ERROR: [youtube] bad id: nope"), null)
+  // Control characters and markup from YouTube stay inert text.
+  const odd = M.playbackFailure("ERROR: [youtube] abcdefghijk: <b>x</b>\u0007y")
+  assert.ok(!/[\u0000-\u001f]/.test(odd.reason))
+})
+
+test("parseLine accepts the cookies sync reply", () => {
+  const m = M.parseLine('{"type":"cookies","state":"applied"}')
+  assert.deepEqual([m.type, m.state], ["cookies", "applied"])
+  assert.equal(M.parseLine('{"type":"cookies","state":"bogus"}'), null)
 })

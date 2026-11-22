@@ -297,6 +297,9 @@ function parseLine(line) {
     return { type: "targets", videoId: String(msg.videoId), items: sanitizeTargets(msg.items) }
   case "signin":
     return { type: "signin", browser: cleanText(msg.browser, 60) }
+  case "cookies":
+    if (["idle", "applied"].indexOf(msg.state) < 0) return null
+    return { type: "cookies", state: msg.state }
   default:
     return null
   }
@@ -325,6 +328,27 @@ function clampIndex(index, delta, count) {
 }
 
 // mpv JSON IPC: one event or reply per line.
+// Why mpv skipped a track. mpv's ytdl hook logs yt-dlp's failure at error
+// level as "ERROR: [youtube] <id>: <reason>"; the widget receives it over IPC
+// (request_log_messages). Returns { id, reason, account } or null.
+// `account` is true for reasons a signed-in account can get past
+// (members-only, sign-in, age check, private).
+var ACCOUNT_REASON_RE = /member|sign in|log ?in|confirm your age|age[- ]restrict|private|premium|cookies/i
+function playbackFailure(text) {
+  if (typeof text !== "string") return null
+  var lines = text.split("\n")
+  for (var i = lines.length - 1; i >= 0; i--) {
+    var m = /^ERROR: \[[^\]]*\] ([A-Za-z0-9_-]{11}): (.+)$/.exec(lines[i].replace(/\s+$/, ""))
+    if (!m) continue
+    var reason = cleanText(m[2], 300)
+    // YouTube's reasons run long; the first sentence says it.
+    var cut = reason.search(/\.\s/)
+    if (cut > 0) reason = reason.slice(0, cut + 1)
+    return { id: m[1], reason: truncate(reason, 160), account: ACCOUNT_REASON_RE.test(reason) }
+  }
+  return null
+}
+
 function parseMpvLine(line) {
   var msg
   try { msg = JSON.parse(String(line || "")) } catch (e) { return null }

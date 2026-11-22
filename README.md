@@ -1,7 +1,13 @@
-# YouTube Music (mpv) for Omarchy
+
+<div align="center">
+  <h1>Omarchy Music Player</h1>
+  <img width="150" height="150" alt="enlarge-the-orange-rose" src="https://github.com/user-attachments/assets/af554851-8580-419b-b75e-3bc756cfbcd3" />
+
+
+
 
 ![YouTube Music (mpv) panel](preview.png)
-
+</div>
 An Omarchy bar widget that lists your **YouTube Music playlists** and plays them
 through a headless `mpv`. You don't need a browser window, browser extension or
 web app open while it plays.

@@ -1,10 +1,49 @@
-# YouTube Music (mpv) for Omarchy
+# Omarchy Music Player
 
-![YouTube Music (mpv) panel](preview.png)
+**The only Apple like music player on Omarchy that you need!**
 
-An Omarchy bar widget that lists your **YouTube Music playlists** and plays them
-through a headless `mpv`. You don't need a browser window, browser extension or
-web app open while it plays.
+![Omarchy Music Player panel](preview.png)
+
+An Omarchy bar widget for your music on **YouTube Music, Spotify and
+SoundCloud**, switched like tabs at the top of the panel, played through a
+headless `mpv`. You don't need a browser window, browser extension or web app
+open while it plays. Mix songs from all three in one queue.
+
+(The plugin ID stays `io.github.symonbaikov.ytmusic-mpv`: marketplace IDs are
+permanent. It started as a YouTube Music player.)
+
+## Services
+
+| Tab | What you get | Setup |
+|---|---|---|
+| YouTube Music | Your playlists, Liked Music, My Supermix, Explore, search, radio, likes, add to playlist | The browser you're signed in with (see Settings) |
+| Spotify | Your Liked Songs and the playlists you own or collaborate on | Once: your own Spotify app (below) |
+| SoundCloud | Your likes and playlists, and search across SoundCloud | Your profile name or link |
+| My Music | **My Mix** (your likes from every service, alternating), your own mixed playlists, Downloads | Nothing |
+
+**Spotify** keeps its own audio locked to Spotify's apps, so its songs play
+from their **YouTube Music match** (found by ISRC, then title, artist and
+duration). Reading your library needs a Spotify app of your own, because
+Spotify only lets personal apps read a library, and its owner needs
+**Premium** (Spotify's 2026 rules):
+
+1. Open [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard)
+   and create an app with the **Web API**.
+2. Add the redirect URI `http://127.0.0.1/callback` (any port is allowed on
+   a loopback address).
+3. Paste its **Client ID** into the Spotify tab and press **Connect Spotify**:
+   you sign in to Spotify in your browser.
+
+Only playlists you own or collaborate on can be read (Spotify doesn't give
+apps the songs of other people's playlists).
+
+**SoundCloud** is read with yt-dlp, like YouTube. Enter your profile name or
+link in the SoundCloud tab. Private likes need you signed in to SoundCloud in
+the browser the plugin reads cookies from.
+
+**Mixes**: the add button next to a song (any service) adds it to one of your
+mixes or starts a new one. In a mix, the stop-square button on a row removes
+that song. Fades, Peak mix and Downloads work across services.
 
 - `yt-dlp` reads your library (your playlists plus Liked Music) and each
   playlist's tracks. To see your private library it reads your browser's
@@ -162,6 +201,7 @@ omarchy-shell io.github.symonbaikov.ytmusic-mpv toggleLike  # like the playing s
 omarchy-shell io.github.symonbaikov.ytmusic-mpv addToPlaylist # pick a playlist for it
 omarchy-shell io.github.symonbaikov.ytmusic-mpv openSettings  # the settings screen
 omarchy-shell io.github.symonbaikov.ytmusic-mpv explore       # Explore
+omarchy-shell io.github.symonbaikov.ytmusic-mpv tab sp        # a tab: yt, sp, sc or my
 omarchy-shell io.github.symonbaikov.ytmusic-mpv download      # download the playing song
 ```
 
@@ -189,6 +229,8 @@ omarchy bar set io.github.symonbaikov.ytmusic-mpv playbackCookies On
 | `fadeOut` | `0` | Seconds each song fades out over at its end. `0` is off. |
 | `transition` | `Off` | `Peak mix` switches songs climax to climax (see above). |
 | `crossfade` | `6` | How long the two climaxes overlap in a peak mix, 2–16 seconds. |
+| `soundcloudUser` | (empty) | Your SoundCloud name or profile link (the SoundCloud tab sets it). |
+| `spotifyClientId` | (empty) | Your Spotify app's Client ID (the Spotify tab sets it). |
 | `downloadDir` | `~/Music` | Where downloads go. The download screen's folder picker sets it. |
 | `downloadFormat` | `mp3` | `mp3`, `m4a`, `opus`, `flac` or `wav`. The download screen sets it. |
 | `downloadCover` | `On` | Embed the cover in downloads (MP3, M4A, FLAC) and show it in Downloads. |
@@ -223,6 +265,16 @@ omarchy bar set io.github.symonbaikov.ytmusic-mpv playbackCookies On
 - Radio, autoplay and My Supermix are read from YouTube Music with the same
   cookies as your library, so they're personalized like in the app. Autoplay
   makes one request when the last song in the queue starts, and only then.
+- **Spotify**: the login is Spotify's Authorization Code flow with PKCE,
+  answered on a one-shot server on `127.0.0.1`. The tokens are kept owner-only
+  in `~/.local/share/io.github.symonbaikov.ytmusic-mpv/spotify.json` and sent
+  only to `accounts.spotify.com` and `api.spotify.com`. Spotify songs are
+  matched by searching YouTube Music without an account; matches are cached.
+  Disconnect in settings.
+- **SoundCloud** is read by yt-dlp with the same browser cookies as
+  YouTube. Album art comes from Spotify's (`i.scdn.co`) and SoundCloud's
+  (`sndcdn.com`) image hosts.
+- **Your mixes** are kept in `~/.local/share/io.github.symonbaikov.ytmusic-mpv/mixes.json`.
 - **Explore and search** ask YouTube Music's web API without an account:
   no cookies are read or sent, and the results are the same as for anyone
   in your region. Explore is cached for 6 hours.

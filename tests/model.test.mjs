@@ -8,7 +8,7 @@ const source = readFileSync(new URL("../Model.js", import.meta.url), "utf8").rep
 const M = {}
 // QML's V4 engine lacks some newer built-ins; remove them so tests catch their use.
 const V4_MISSING = "delete String.prototype.trimEnd; delete String.prototype.trimStart; delete Array.prototype.at; delete Object.hasOwn;\n"
-vm.runInNewContext(V4_MISSING + source + "\n;Object.assign(__out, { cleanText, plain, truncate, formatTime, parseLine, parseSession, clampIndex, mpvCommand, GLYPH, normalizeRepeat, nextRepeat, repeatFromMpv, repeatCommands, coverUrl, OBSERVED, SUPERMIX_ID, isMix, radioListId, autoplaySeed, isLoading, addTargets, likedSet, withLiked, playbackFailure, seconds, stepChoice, recentReport, mirrorOffer, parseUpdate, exploreRows, DOWNLOAD_FORMATS, trackCover })", { __out: M })
+vm.runInNewContext(V4_MISSING + source + "\n;Object.assign(__out, { cleanText, plain, truncate, formatTime, parseLine, parseSession, clampIndex, mpvCommand, GLYPH, normalizeRepeat, nextRepeat, repeatFromMpv, repeatCommands, coverUrl, OBSERVED, SUPERMIX_ID, isMix, radioListId, autoplaySeed, isLoading, addTargets, likedSet, withLiked, playbackFailure, seconds, stepChoice, recentReport, mirrorOffer, parseUpdate, exploreRows, DOWNLOAD_FORMATS, trackCover, serviceOf, isYouTube, TRACK_KEY_RE })", { __out: M })
 
 const MARKUP = '<img src="https://example.invalid/tracker">Song'
 
@@ -345,4 +345,21 @@ test("downloaded songs keep their file and their own cover", () => {
   assert.equal(M.trackCover(b, "small"), "")                       // saved without a cover
   assert.equal(c.path, undefined)
   assert.ok(M.trackCover(c, "small").startsWith("https://i.ytimg.com/vi/kJQP7kiw5Fk/"))
+})
+
+test("tracks from every service, with their own covers", () => {
+  const msg = M.parseLine(JSON.stringify({ type: "tracks", playlistId: "mix:fa9e05eb", items: [
+    { id: "dQw4w9WgXcQ", title: "YT" },
+    { id: "sc:joeypecoraro/warm", title: "SC" },
+    { id: "sp:4uLU6hMCjMI75M1A2tKUQC", title: "SP", cover: "https://i.scdn.co/image/ab67616d00001e02" },
+    { id: "sp:4uLU6hMCjMI75M1A2tKUQC", title: "bad cover", cover: "https://evil.example/x.jpg" },
+    { id: "sc:../../etc", title: "bad" } ] }))
+  assert.deepEqual(Array.from(msg.items, t => M.serviceOf(t.id)), ["yt", "sc", "sp", "sp"])
+  assert.equal(M.trackCover(msg.items[2], "small"), "https://i.scdn.co/image/ab67616d00001e02")
+  assert.equal(M.trackCover(msg.items[3], "small"), "")
+  assert.equal(M.trackCover(msg.items[1], "small"), "")
+  assert.ok(M.isYouTube("dQw4w9WgXcQ") && !M.isYouTube("sc:joeypecoraro/warm"))
+  assert.equal(M.parseLine('{"type":"playlists","service":"sc","items":[{"id":"sc:likes:forss","title":"Likes"}]}').service, "sc")
+  const err = M.parseLine('{"type":"error","message":"Connect Spotify","setup":"sp","service":"sp"}')
+  assert.deepEqual([err.setup, err.service], ["sp", "sp"])
 })

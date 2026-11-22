@@ -687,5 +687,88 @@ class Downloads(unittest.TestCase):
         self.assertEqual([t["title"] for t in h.downloaded_tracks()], ["A again", "B"])   # same file, one entry
 
 
+class Services(unittest.TestCase):
+    def test_track_keys_and_lists(self):
+        for key in ("dQw4w9WgXcQ", "sc:forss/flickermood", "sc:417474360", "sp:4uLU6hMCjMI75M1A2tKUQC"):
+            self.assertTrue(h.TRACK_KEY_RE.match(key), key)
+        for bad in ("sc:../etc", "sp:short", "sc:a/b/c", "yt:dQw4w9WgXcQ"):
+            self.assertFalse(h.TRACK_KEY_RE.match(bad), bad)
+        for lid in ("LM", "sc:likes:forss", "sc:set:forss/ecclesia", "sp:liked", "sp:pl:37i9dQZF1DXcBWIGoYBM5M", "mix:all", "mix:fa9e05eb"):
+            self.assertTrue(h.is_list_id(lid), lid)
+        self.assertFalse(h.is_list_id("sc:set:a/b/../c"))
+        self.assertEqual(h.source_of("sp:4uLU6hMCjMI75M1A2tKUQC"), "sp")
+
+    def test_soundcloud_urls(self):
+        self.assertEqual(h.sc_user("https://soundcloud.com/forss"), "forss")
+        self.assertEqual(h.sc_user("forss"), "forss")
+        self.assertEqual(h.sc_user("https://evil.example/forss"), "")
+        self.assertEqual(h.sc_track_key("https://soundcloud.com/joeypecoraro/warm"), "sc:joeypecoraro/warm")
+        self.assertEqual(h.sc_track_key("https://soundcloud.com/lordafi/sets/acid-jazz"), "")       # a set, not a track
+        self.assertEqual(h.sc_track_key("https://api.soundcloud.com/tracks/soundcloud%3Atracks%3A417474360"), "sc:417474360")
+        self.assertEqual(h.track_url({"id": "sc:417474360"}), "https://api.soundcloud.com/tracks/417474360")
+        self.assertEqual(h.track_url({"id": "sp:4uLU6hMCjMI75M1A2tKUQC"}), "ytmusic-spotify://4uLU6hMCjMI75M1A2tKUQC")
+
+    def test_spotify_track_objects(self):
+        obj = {"type": "track", "id": "4uLU6hMCjMI75M1A2tKUQC", "name": "Never Gonna Give You Up",
+               "artists": [{"name": "Rick Astley"}], "duration_ms": 213573, "external_ids": {"isrc": "GBARL9300135"},
+               "album": {"images": [{"url": "https://i.scdn.co/image/ab67616d0000b273", "width": 640},
+                                    {"url": "https://i.scdn.co/image/ab67616d00001e02", "width": 300}]}}
+        saved = h.SP_TRACKS_PATH
+        with tempfile.TemporaryDirectory() as d:
+            h.SP_TRACKS_PATH = os.path.join(d, "t.json")
+            try:
+                t = h.sp_track(obj)
+            finally:
+                h.SP_TRACKS_PATH = saved
+        self.assertEqual((t["id"], t["artist"], t["duration"], t["isrc"]), ("sp:4uLU6hMCjMI75M1A2tKUQC", "Rick Astley", 213, "GBARL9300135"))
+        self.assertEqual(t["cover"], "https://i.scdn.co/image/ab67616d00001e02")
+        self.assertIsNone(h.sp_track({"type": "episode", "id": "4uLU6hMCjMI75M1A2tKUQC"}))
+
+    def test_matching_prefers_the_same_song(self):
+        want = {"title": "Never Gonna Give You Up", "artist": "Rick Astley", "duration": 213}
+        right = {"title": "Never Gonna Give You Up", "artist": "Rick Astley", "duration": 214}
+        cover = {"title": "Never Gonna Give You Up (Cover)", "artist": "Some Band", "duration": 180}
+        live = {"title": "Never Gonna Give You Up (Live)", "artist": "Rick Astley", "duration": 290}
+        self.assertGreater(h.match_score(want, right), h.match_score(want, cover))
+        self.assertGreater(h.match_score(want, right), h.match_score(want, live))
+
+    def test_mixes_and_my_mix(self):
+        with tempfile.TemporaryDirectory() as d:
+            saved = (h.MIXES_PATH, h.DATA_DIR, h.CACHE_DIR, h.widget_settings)
+            h.MIXES_PATH, h.DATA_DIR, h.CACHE_DIR = os.path.join(d, "mixes.json"), d, d
+            h.widget_settings = lambda: {"soundcloudUser": "forss"}
+            os.makedirs(os.path.join(d, "tracks"))
+            try:
+                import io, contextlib
+                def run(fn, args):
+                    out = io.StringIO()
+                    with contextlib.redirect_stdout(out):
+                        fn(args)
+                    return json.loads(out.getvalue().strip().splitlines()[-1])
+                made = run(h.cmd_mix_add, ["new", "--title", "Road trip", "--track",
+                                           json.dumps({"id": "dQw4w9WgXcQ", "title": "A", "cover": "https://evil.example/x.jpg"})])
+                mix = made["id"]
+                self.assertTrue(h.MIX_ID_RE.match(mix))
+                run(h.cmd_mix_add, [mix, "--track", json.dumps({"id": "sc:joeypecoraro/warm", "title": "Warm"})])
+                again = run(h.cmd_mix_add, [mix, "--track", json.dumps({"id": "sc:joeypecoraro/warm", "title": "Warm"})])
+                self.assertTrue(again["already"])
+                items = h.mix_tracks(mix, "none")["items"]
+                self.assertEqual([t["id"] for t in items], ["dQw4w9WgXcQ", "sc:joeypecoraro/warm"])
+                self.assertNotIn("cover", items[0])                                  # only known cover hosts
+                run(h.cmd_mix_remove, [mix, "dQw4w9WgXcQ"])
+                self.assertEqual([t["id"] for t in h.mix_tracks(mix, "none")["items"]], ["sc:joeypecoraro/warm"])
+                with self.assertRaises(SystemExit), contextlib.redirect_stdout(io.StringIO()):
+                    h.cmd_mix_add([mix, "--track", json.dumps({"id": "../../etc"})])
+                # My Mix alternates the services and keeps its order all day.
+                h.write_json_atomic(h.tracks_cache_path("LM", "none"), {"items": [{"id": f"yt{i:09d}", "title": str(i)} for i in range(3)]})
+                h.write_json_atomic(h.tracks_cache_path("sc:likes:forss", "none"), {"items": [{"id": f"sc:u/t{i}", "title": str(i)} for i in range(3)]})
+                first = [t["id"] for t in h.liked_everywhere("none")]
+                self.assertEqual(len(first), 6)
+                self.assertEqual([h.source_of(k) for k in first], ["yt", "sc"] * 3)
+                self.assertEqual(first, [t["id"] for t in h.liked_everywhere("none")])
+            finally:
+                h.MIXES_PATH, h.DATA_DIR, h.CACHE_DIR, h.widget_settings = saved
+
+
 if __name__ == "__main__":
     unittest.main()

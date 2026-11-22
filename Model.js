@@ -7,8 +7,23 @@ var MAX_PLAYLISTS = 500
 var MAX_TRACKS = 5000
 var MAX_TEXT = 300
 
-var PLAYLIST_ID_RE = /^[A-Za-z0-9_-]{2,80}$/
+// A list: a YouTube playlist id, or one of the other services' lists
+// (sc:… SoundCloud, sp:… Spotify, mix:… your mixes).
+var PLAYLIST_ID_RE = /^(?:[A-Za-z0-9_-]{2,80}|sc:(?:likes|sets):[A-Za-z0-9_-]{1,100}|sc:set:[A-Za-z0-9_-]{1,100}\/[A-Za-z0-9_-]{1,200}|sc:search|sp:liked|sp:pl:[A-Za-z0-9]{22}|mix:all|mix:[a-f0-9]{8})$/
 var VIDEO_ID_RE = /^[A-Za-z0-9_-]{11}$/
+// A track from any service: a YouTube video id, sc:… or sp:….
+var TRACK_KEY_RE = /^(?:[A-Za-z0-9_-]{11}|sc:(?:[0-9]{1,20}|[A-Za-z0-9_-]{1,100}\/[A-Za-z0-9_-]{1,200})|sp:[A-Za-z0-9]{22})$/
+var SERVICES = ["yt", "sp", "sc", "my"]
+
+function serviceOf(key) {
+  var k = String(key || "")
+  return k.indexOf("sc:") === 0 ? "sc" : k.indexOf("sp:") === 0 ? "sp" : "yt"
+}
+
+// Liking, adding to a YouTube playlist and radio are YouTube Music's.
+function isYouTube(key) {
+  return VIDEO_ID_RE.test(String(key || ""))
+}
 var MOOD_ID_RE = /^[A-Za-z0-9_%=-]{1,400}$/
 var DOWNLOAD_FORMATS = ["mp3", "m4a", "opus", "flac", "wav"]
 
@@ -39,6 +54,9 @@ var GLYPH = {
   check: String.fromCodePoint(0xF012C),
   login: String.fromCodePoint(0xF0342),
   settings: String.fromCodePoint(0xF0493),
+  youtube: String.fromCodePoint(0xF05C3),
+  spotify: String.fromCodePoint(0xF04C7),
+  soundcloud: String.fromCodePoint(0xF04C0),
   alert: String.fromCodePoint(0xF0026),
   explore: String.fromCodePoint(0xF018B),
   search: String.fromCodePoint(0xF0349),
@@ -187,9 +205,13 @@ function repeatCommands(mode) {
 // "small"); "small" = mqdefault (320x180, always present, ~10 KB).
 // The cover to show for a track: a downloaded song's own saved cover, none
 // for a downloaded song saved without one, else YouTube's thumbnail.
+// Spotify's album images and SoundCloud's artwork, the only remote covers
+// besides YouTube's own thumbnails.
+var REMOTE_COVER_RE = /^https:\/\/(?:i\.scdn\.co\/image\/[A-Za-z0-9]{1,100}|i[0-9]?\.sndcdn\.com\/[A-Za-z0-9_.\/-]{1,300})$/
+
 function trackCover(track, size) {
   if (!track) return ""
-  if (track.cover) return "file://" + track.cover
+  if (track.cover) return REMOTE_COVER_RE.test(track.cover) ? track.cover : "file://" + track.cover
   if (track.path) return ""
   return coverUrl(track.id, size)
 }
@@ -250,7 +272,7 @@ function sanitizePlaylists(items) {
     var p = items[i]
     if (!p || typeof p !== "object") continue
     var id = String(p.id || "")
-    if (!PLAYLIST_ID_RE.test(id) || seen[id]) continue
+    if (!(PLAYLIST_ID_RE.test(id) || id === "DOWNLOADS") || seen[id]) continue
     seen[id] = true
     out.push({ id: id, title: cleanText(p.title) || id, count: validCount(p.count) })
   }
@@ -264,7 +286,7 @@ function sanitizeTracks(items) {
     var t = items[i]
     if (!t || typeof t !== "object") continue
     var id = String(t.id || "")
-    if (!VIDEO_ID_RE.test(id)) continue
+    if (!TRACK_KEY_RE.test(id)) continue
     var d = Number(t.duration)
     var track = {
       id: id,
@@ -274,7 +296,8 @@ function sanitizeTracks(items) {
     }
     // A downloaded song: its file, and the cover saved with it (if any).
     if (typeof t.path === "string" && t.path.charAt(0) === "/") track.path = t.path
-    if (typeof t.cover === "string" && /^\/[^\0]*\/covers\/[A-Za-z0-9_-]{11}\.jpg$/.test(t.cover)) track.cover = t.cover
+    if (typeof t.cover === "string" && (/^\/[^\0]*\/covers\/[A-Za-z0-9_-]{11,60}\.jpg$/.test(t.cover) || REMOTE_COVER_RE.test(t.cover)))
+      track.cover = t.cover
     out.push(track)
   }
   return out
@@ -287,9 +310,16 @@ function parseLine(line) {
   if (!msg || typeof msg !== "object") return null
   switch (msg.type) {
   case "playlists":
-    return { type: "playlists", stale: msg.stale === true, items: sanitizePlaylists(msg.items) }
+    return { type: "playlists", stale: msg.stale === true, items: sanitizePlaylists(msg.items),
+      service: SERVICES.indexOf(msg.service) >= 0 ? msg.service : "yt" }
+  case "mixAdded":
+    if (!/^mix:[a-f0-9]{8}$/.test(String(msg.id || ""))) return null
+    return { type: "mixAdded", id: String(msg.id), title: cleanText(msg.title, 80), already: msg.already === true }
+  case "spotify":
+    return { type: "spotify", state: ["waiting", "connected", "disconnected"].indexOf(msg.state) >= 0 ? msg.state : "",
+      user: cleanText(msg.user, 80) }
   case "tracks":
-    if (!PLAYLIST_ID_RE.test(String(msg.playlistId || ""))) return null
+    if (!(PLAYLIST_ID_RE.test(String(msg.playlistId || "")) || msg.playlistId === "DOWNLOADS")) return null
     return {
       type: "tracks",
       stale: msg.stale === true,
@@ -314,7 +344,10 @@ function parseLine(line) {
       ids: Array.isArray(msg.ids) ? msg.ids.slice(0, MAX_TRACKS).filter(function(id) { return VIDEO_ID_RE.test(String(id)) }) : [] }
   case "error":
     // `auth`: a sign-in problem, so the panel offers a "Sign in" button.
-    return { type: "error", message: cleanText(msg.message), auth: msg.auth === true }
+    // `setup`: a service that needs connecting first (sp, sc).
+    return { type: "error", message: cleanText(msg.message), auth: msg.auth === true,
+      setup: msg.setup === "sp" || msg.setup === "sc" ? msg.setup : "",
+      service: SERVICES.indexOf(msg.service) >= 0 ? msg.service : "" }
   case "targets":
     if (!VIDEO_ID_RE.test(String(msg.videoId || ""))) return null
     return { type: "targets", videoId: String(msg.videoId), items: sanitizeTargets(msg.items) }
@@ -326,10 +359,10 @@ function parseLine(line) {
   case "search":
     return { type: "search", query: cleanText(msg.query, 150), items: sanitizeExploreItems(msg.items) }
   case "downloading":
-    if (!VIDEO_ID_RE.test(String(msg.id || ""))) return null
+    if (!TRACK_KEY_RE.test(String(msg.id || ""))) return null
     return { type: "downloading", id: String(msg.id), stage: msg.stage === "convert" ? "convert" : "fetch" }
   case "downloaded":
-    if (!VIDEO_ID_RE.test(String(msg.id || "")) || typeof msg.path !== "string" || msg.path.charAt(0) !== "/") return null
+    if (!TRACK_KEY_RE.test(String(msg.id || "")) || typeof msg.path !== "string" || msg.path.charAt(0) !== "/") return null
     return { type: "downloaded", id: String(msg.id), path: cleanText(msg.path, 1000), folder: cleanText(msg.folder, 1000) }
   case "cookies":
     if (["idle", "applied"].indexOf(msg.state) < 0) return null
@@ -416,7 +449,7 @@ function sanitizeExploreItems(items) {
     var it = items[i]
     if (!it || typeof it !== "object") continue
     var id = String(it.id || "")
-    var ok = it.kind === "song" ? VIDEO_ID_RE.test(id) : it.kind === "list" ? PLAYLIST_ID_RE.test(id)
+    var ok = it.kind === "song" ? TRACK_KEY_RE.test(id) : it.kind === "list" ? PLAYLIST_ID_RE.test(id)
       : it.kind === "mood" ? MOOD_ID_RE.test(id) : false
     if (!ok) continue
     out.push({

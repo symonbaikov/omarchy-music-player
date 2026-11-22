@@ -87,6 +87,8 @@ PLUGIN_ID = "io.github.symonbaikov.ytmusic-mpv"
 
 HOME = os.path.expanduser("~")
 CACHE_DIR = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.join(HOME, ".cache"), PLUGIN_ID)
+# Things to keep (your mixes, the Spotify login): not a cache.
+DATA_DIR = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.join(HOME, ".local", "share"), PLUGIN_ID)
 RUNTIME_DIR = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or os.path.join("/tmp", f"{PLUGIN_ID}-{os.getuid()}"), PLUGIN_ID)
 SOCKET_PATH = os.path.join(RUNTIME_DIR, "mpv.sock")
 SESSION_PATH = os.path.join(RUNTIME_DIR, "session.json")
@@ -108,6 +110,15 @@ FETCH_TIMEOUT = 180
 
 PLAYLIST_ID_RE = re.compile(r"^[A-Za-z0-9_-]{2,80}$")
 VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+# A track from any service: a YouTube video id (as before, so old caches,
+# likes and sessions keep working), "sc:<user>/<slug>" or "sc:<number>" for
+# SoundCloud, "sp:<id>" for Spotify (played from its YouTube Music match).
+TRACK_KEY_RE = re.compile(r"^(?:[A-Za-z0-9_-]{11}|sc:(?:[0-9]{1,20}|[A-Za-z0-9_-]{1,100}/[A-Za-z0-9_-]{1,200})|sp:[A-Za-z0-9]{22})$")
+SERVICE_LIST_RE = re.compile(
+    r"^(?:sc:(?:likes|sets):[A-Za-z0-9_-]{1,100}|sc:set:[A-Za-z0-9_-]{1,100}/[A-Za-z0-9_-]{1,200}|sc:search"
+    r"|sp:liked|sp:pl:[A-Za-z0-9]{22}|mix:all|mix:[a-f0-9]{8})$")
+SC_USER_RE = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
+SPOTIFY_SCHEME = "ytmusic-spotify://"
 # browser[+keyring][:profile]; the profile may be a path (Zen, LibreWolf and
 # other Firefox forks are read as firefox:<profile dir>).
 BROWSER_RE = re.compile(r"^(none|brave|chrome|chromium|edge|firefox|opera|vivaldi|whale)(\+[A-Za-z0-9_-]{1,32})?(:[A-Za-z0-9 _.()/~+-]{1,200})?$")
@@ -148,8 +159,16 @@ def clean_text(value, limit=MAX_TEXT):
     return text[:limit]
 
 
+def is_list_id(value):
+    return bool(PLAYLIST_ID_RE.match(value or "") or SERVICE_LIST_RE.match(value or ""))
+
+
+def source_of(key):
+    return "sc" if key.startswith("sc:") else "sp" if key.startswith("sp:") else "yt"
+
+
 def check_playlist_id(value):
-    if not PLAYLIST_ID_RE.match(value or ""):
+    if not is_list_id(value):
         fail("Invalid playlist id")
     return value
 
@@ -343,6 +362,10 @@ def list_source(playlist_id):
 
 
 def fetch_tracks(playlist_id, browser):
+    if playlist_id.startswith("sc:"):
+        return fetch_sc_tracks(playlist_id, browser)
+    if playlist_id.startswith("sp:"):
+        return fetch_sp_tracks(playlist_id)
     url, limit = list_source(playlist_id)
     data = run_ytdlp(url, browser, limit)
     items = []
@@ -367,11 +390,505 @@ def fetch_tracks(playlist_id, browser):
     return {"title": clean_text(data.get("title")), "items": items}
 
 
+# ---- SoundCloud ---------------------------------------------------------------
+# Read with yt-dlp like YouTube, with the same browser's cookies (yt-dlp uses
+# SoundCloud's login cookie for private likes). Played by mpv through yt-dlp.
+
+SC_LIMIT = 500
+
+
+def sc_user(value):
+    """A SoundCloud user name from a name or a profile URL, or ""."""
+    value = str(value or "").strip()
+    m = re.match(r"^(?:https?://(?:www\.|m\.)?soundcloud\.com/)?([A-Za-z0-9_-]{1,100})/?(?:[?#].*)?$", value)
+    return m.group(1) if m else ""
+
+
+def sc_url(key):
+    rest = key[3:]
+    if rest.isdigit():
+        return f"https://api.soundcloud.com/tracks/{rest}"
+    return f"https://soundcloud.com/{rest}"
+
+
+def sc_track_key(url):
+    """The key for a SoundCloud track URL; "" for sets and anything else."""
+    url = str(url or "")
+    m = re.match(r"^https://api(?:-v2)?\.soundcloud\.com/tracks/(?:soundcloud(?:%3A|:)tracks(?:%3A|:))?([0-9]{1,20})", url)
+    if m:
+        return "sc:" + m.group(1)
+    m = re.match(r"^https://(?:www\.|m\.)?soundcloud\.com/([A-Za-z0-9_-]{1,100})/([A-Za-z0-9_-]{1,200})/?(?:[?#].*)?$", url)
+    if m and m.group(2) not in ("sets", "likes", "tracks", "albums", "reposts", "followers", "following"):
+        return f"sc:{m.group(1)}/{m.group(2)}"
+    return ""
+
+
+def sc_items(data):
+    items = []
+    for entry in data.get("entries") or []:
+        if not isinstance(entry, dict):
+            continue
+        key = sc_track_key(entry.get("url") or entry.get("webpage_url"))
+        if not key:
+            continue
+        duration = entry.get("duration")
+        artist = entry.get("uploader") or (key[3:].split("/")[0] if "/" in key else "")
+        items.append({"id": key, "title": clean_text(entry.get("title")) or key, "artist": clean_text(artist),
+                      "duration": int(duration) if isinstance(duration, (int, float)) and 0 < duration < 86400 else None})
+        if len(items) >= MAX_TRACKS:
+            break
+    return items
+
+
+def fetch_sc_tracks(list_id, browser):
+    kind, _, rest = list_id[3:].partition(":")
+    if kind == "likes":
+        url, title = f"https://soundcloud.com/{rest}/likes", "Likes"
+    elif kind == "set":
+        user, _, slug = rest.partition("/")
+        url, title = f"https://soundcloud.com/{user}/sets/{slug}", ""
+    else:
+        raise RuntimeError("search results are only kept, not fetched again")
+    data = run_ytdlp(url, browser, SC_LIMIT)
+    return {"title": clean_text(data.get("title")) or title, "items": sc_items(data)}
+
+
+def fetch_sc_playlists(user, browser):
+    data = run_ytdlp(f"https://soundcloud.com/{user}/sets", browser, 200)
+    items = [{"id": f"sc:likes:{user}", "title": "Likes", "count": None}]
+    for entry in data.get("entries") or []:
+        m = re.match(r"^https://(?:www\.)?soundcloud\.com/([A-Za-z0-9_-]{1,100})/sets/([A-Za-z0-9_-]{1,200})/?$",
+                     str((entry or {}).get("url") or ""))
+        if m:
+            items.append({"id": f"sc:set:{m.group(1)}/{m.group(2)}", "title": clean_text(entry.get("title")) or m.group(2),
+                          "count": None})
+    return {"items": items[:MAX_PLAYLISTS]}
+
+
+# ---- Spotify ------------------------------------------------------------------
+# Spotify's audio is DRM-protected, so this reads the user's library through
+# the Web API and plays each song from its YouTube Music match. The Web API
+# needs the user's own app (developer.spotify.com, Premium, Spotify's 2026
+# rules): its Client ID is the setting spotifyClientId. Login is the
+# Authorization Code flow with PKCE on a loopback redirect; tokens are kept
+# owner-only in the data directory and sent only to Spotify.
+
+SP_API = "https://api.spotify.com/v1"
+SP_AUTH = "https://accounts.spotify.com/authorize"
+SP_TOKEN = "https://accounts.spotify.com/api/token"
+SP_SCOPES = "playlist-read-private playlist-read-collaborative user-library-read"
+SP_ID_RE = re.compile(r"^[A-Za-z0-9]{22}$")
+SP_CLIENT_RE = re.compile(r"^[A-Za-z0-9]{16,64}$")
+SP_TOKEN_PATH = os.path.join(DATA_DIR, "spotify.json")
+SP_TRACKS_PATH = os.path.join(CACHE_DIR, "spotify-tracks.json")
+SP_MATCH_PATH = os.path.join(CACHE_DIR, "spotify-matches.json")
+SP_LIMIT = 2000
+
+
+def sp_client_id():
+    value = str(widget_settings().get("spotifyClientId") or "").strip()
+    return value if SP_CLIENT_RE.match(value) else ""
+
+
+def sp_tokens():
+    data = read_json(SP_TOKEN_PATH)
+    return data if isinstance(data, dict) and data.get("refresh_token") else None
+
+
+def spotify_connected():
+    return sp_tokens() is not None and sp_client_id() != ""
+
+
+def sp_save_tokens(data):
+    os.makedirs(os.path.dirname(SP_TOKEN_PATH), mode=0o700, exist_ok=True)
+    tmp = SP_TOKEN_PATH + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        json.dump(data, fh)
+    os.replace(tmp, SP_TOKEN_PATH)
+
+
+def sp_post_token(form):
+    request = urllib.request.Request(SP_TOKEN, data=urllib.parse.urlencode(form).encode(),
+                                     headers={"Content-Type": "application/x-www-form-urlencoded"})
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            return json.loads(response.read(1024 * 1024))
+    except urllib.error.HTTPError as exc:
+        try:
+            err = json.loads(exc.read(65536))
+        except ValueError:
+            err = {}
+        if err.get("error") == "invalid_grant":
+            try:
+                os.unlink(SP_TOKEN_PATH)          # expired or revoked: connect again
+            except OSError:
+                pass
+            raise RuntimeError("Spotify needs you to connect again")
+        raise RuntimeError(f"Spotify refused the login ({exc.code})")
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"Spotify didn't answer: {exc}")
+
+
+def sp_access_token():
+    tokens = sp_tokens()
+    client = sp_client_id()
+    if not tokens or not client:
+        raise RuntimeError("Connect Spotify")
+    if time.time() < float(tokens.get("expires_at") or 0) - 60:
+        return tokens["access_token"]
+    fresh = sp_post_token({"grant_type": "refresh_token", "refresh_token": tokens["refresh_token"], "client_id": client})
+    tokens["access_token"] = fresh["access_token"]
+    tokens["expires_at"] = time.time() + int(fresh.get("expires_in") or 3600)
+    if fresh.get("refresh_token"):                # it rotates only sometimes
+        tokens["refresh_token"] = fresh["refresh_token"]
+    sp_save_tokens(tokens)
+    return tokens["access_token"]
+
+
+def sp_get(path):
+    url = path if path.startswith(SP_API + "/") else SP_API + path
+    if not url.startswith(SP_API + "/"):
+        raise RuntimeError("bad Spotify URL")
+    for attempt in range(2):
+        request = urllib.request.Request(url, headers={"Authorization": f"Bearer {sp_access_token()}"})
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                return json.loads(response.read(MAX_API_RESPONSE))
+        except urllib.error.HTTPError as exc:
+            if exc.code == 401 and attempt == 0:
+                tokens = sp_tokens() or {}
+                tokens["expires_at"] = 0
+                sp_save_tokens(tokens)
+                continue
+            if exc.code == 403:
+                raise RuntimeError("Spotify refused: the app's owner needs Premium, and you must be on the app's user list")
+            if exc.code == 429:
+                raise RuntimeError("Spotify's limit for this app is used up for now; try again later")
+            raise RuntimeError(f"Spotify error {exc.code}")
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(f"Spotify didn't answer: {exc}")
+    raise RuntimeError("Spotify needs you to connect again")
+
+
+def sp_track(obj):
+    """A Spotify track object as a playlist item, remembered for matching."""
+    if not isinstance(obj, dict) or obj.get("type", "track") != "track" or not SP_ID_RE.match(str(obj.get("id") or "")):
+        return None
+    artists = ", ".join(clean_text(a.get("name"), 80) for a in obj.get("artists") or [] if isinstance(a, dict))
+    images = (obj.get("album") or {}).get("images") or []
+    cover = next((i.get("url") for i in sorted(images, key=lambda i: i.get("width") or 0)
+                  if isinstance(i, dict) and (i.get("width") or 0) >= 200), None) or (images[0].get("url") if images else None)
+    duration = obj.get("duration_ms")
+    t = {"id": "sp:" + obj["id"], "title": clean_text(obj.get("name")) or obj["id"], "artist": artists,
+         "duration": int(duration / 1000) if isinstance(duration, (int, float)) and duration > 0 else None}
+    if isinstance(cover, str) and re.match(r"^https://i\.scdn\.co/image/[A-Za-z0-9]{1,100}$", cover):
+        t["cover"] = cover
+    isrc = ((obj.get("external_ids") or {}).get("isrc") or "")
+    if re.match(r"^[A-Z0-9]{12}$", isrc):
+        t["isrc"] = isrc
+    return t
+
+
+def sp_pages(path, key_of_track):
+    items, url = [], path
+    while url and len(items) < SP_LIMIT:
+        page = sp_get(url)
+        for it in page.get("items") or []:
+            t = sp_track((it or {}).get(key_of_track) or (it or {}).get("track") or (it or {}).get("item"))
+            if t:
+                items.append(t)
+        url = page.get("next")
+    remember_sp_tracks(items)
+    return items
+
+
+def remember_sp_tracks(items):
+    data = read_json(SP_TRACKS_PATH)
+    known = data if isinstance(data, dict) else {}
+    for t in items:
+        known[t["id"]] = {k: t.get(k) for k in ("title", "artist", "duration", "isrc", "cover")}
+    write_json_atomic(SP_TRACKS_PATH, known)
+
+
+def fetch_sp_playlists():
+    me = sp_get("/me")
+    items = [{"id": "sp:liked", "title": "Liked Songs", "count": None}]
+    url = "/me/playlists?limit=50"
+    while url and len(items) < MAX_PLAYLISTS:
+        page = sp_get(url)
+        for pl in page.get("items") or []:
+            if not isinstance(pl, dict) or not SP_ID_RE.match(str(pl.get("id") or "")):
+                continue
+            # Spotify only gives an app the songs of playlists you own or
+            # collaborate on; the others would open empty.
+            if (pl.get("owner") or {}).get("id") != me.get("id") and not pl.get("collaborative"):
+                continue
+            total = ((pl.get("items") or pl.get("tracks") or {}).get("total"))
+            items.append({"id": "sp:pl:" + pl["id"], "title": clean_text(pl.get("name")) or pl["id"],
+                          "count": total if isinstance(total, int) else None})
+        url = page.get("next")
+    return {"items": items, "user": clean_text(me.get("display_name") or me.get("id"), 80)}
+
+
+def fetch_sp_tracks(list_id):
+    if list_id == "sp:liked":
+        return {"title": "Liked Songs", "items": sp_pages("/me/tracks?limit=50", "track")}
+    pl = list_id[6:]
+    return {"title": "", "items": sp_pages(f"/playlists/{pl}/items?limit=50", "item")}
+
+
+def normalize(text):
+    text = re.sub(r"\(.*?\)|\[.*?\]|feat\..*$|ft\..*$", " ", str(text or "").lower())
+    return set(re.findall(r"[\w']+", text))
+
+
+def match_score(want, cand):
+    """How well a YouTube Music song matches a Spotify one (higher is better)."""
+    score = 0.0
+    wt, ct = normalize(want.get("title")), normalize(cand.get("title"))
+    if wt and ct:
+        score += 3 * len(wt & ct) / len(wt | ct)
+    wa, ca = normalize(want.get("artist")), normalize(cand.get("artist"))
+    if wa and ca:
+        score += 2 * len(wa & ca) / len(wa | ca)
+    if want.get("duration") and cand.get("duration"):
+        diff = abs(want["duration"] - cand["duration"])
+        score += 2 if diff <= 3 else 1 if diff <= 10 else -2 if diff > 30 else 0
+    return score
+
+
+def resolve_spotify(key):
+    """The YouTube Music video id for a Spotify song, cached."""
+    sp_id = key[3:]
+    matches = read_json(SP_MATCH_PATH)
+    matches = matches if isinstance(matches, dict) else {}
+    if VIDEO_ID_RE.match(str(matches.get(sp_id) or "")):
+        return matches[sp_id]
+    known = (read_json(SP_TRACKS_PATH) or {}).get(key)
+    if not known:
+        raise RuntimeError("unknown Spotify song; open its playlist again")
+    best, best_score = None, 1.5
+    queries = ([known["isrc"]] if known.get("isrc") else []) + [f"{known.get('artist', '')} {known.get('title', '')}".strip()]
+    for q in queries:
+        data = music_public("search", {"query": q, "params": SONGS_FILTER})
+        for r in find_renderers(data, "musicResponsiveListItemRenderer", [])[:10]:
+            cand = explore_item({"musicResponsiveListItemRenderer": r})
+            if not cand:
+                continue
+            score = match_score(known, cand) + (1.0 if q == known.get("isrc") else 0)
+            if score > best_score:
+                best, best_score = cand["id"], score
+        if best and best_score >= 5:
+            break
+    if not best:
+        raise RuntimeError(f"no YouTube Music match for {known.get('title')}")
+    matches[sp_id] = best
+    write_json_atomic(SP_MATCH_PATH, matches)
+    return best
+
+
+def cmd_resolve(args):
+    """resolve <key>: what mpv should open for a song. Spotify songs become
+    their YouTube Music match (called by mpv/ytmusic.lua)."""
+    key = args[0] if args else ""
+    if not TRACK_KEY_RE.match(key):
+        fail("resolve needs a track")
+    try:
+        vid = resolve_spotify(key) if key.startswith("sp:") else None
+    except RuntimeError as exc:
+        fail(str(exc))
+    emit({"type": "resolved", "key": key, "url": f"https://music.youtube.com/watch?v={vid}" if vid else track_url({"id": key})})
+
+
+def cmd_spotify_login(_args):
+    """Connect Spotify: the PKCE flow in the browser, answered on a
+    one-shot loopback server. Register http://127.0.0.1/callback as the
+    app's redirect URI (Spotify allows any port on a loopback address)."""
+    import base64, hashlib, http.server, secrets, threading
+    client = sp_client_id()
+    if not client:
+        fail("Set your Spotify app's Client ID first", setup="sp")
+    verifier = secrets.token_urlsafe(64)[:96]
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
+    state = secrets.token_urlsafe(16)
+    result = {}
+
+    class Callback(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            if urllib.parse.urlsplit(self.path).path != "/callback":
+                self.send_error(404)
+                return
+            if q.get("state", [""])[0] == state:
+                result["code"] = q.get("code", [""])[0]
+                result["error"] = q.get("error", [""])[0]
+            ok = bool(result.get("code"))
+            body = ("<h2>Spotify is connected.</h2><p>You can close this tab.</p>" if ok
+                    else "<h2>Spotify wasn't connected.</h2><p>You can close this tab and try again.</p>").encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Callback)
+    server.timeout = 1
+    redirect = f"http://127.0.0.1:{server.server_address[1]}/callback"
+    url = SP_AUTH + "?" + urllib.parse.urlencode({
+        "client_id": client, "response_type": "code", "redirect_uri": redirect, "scope": SP_SCOPES,
+        "state": state, "code_challenge_method": "S256", "code_challenge": challenge})
+    command = browser_command(check_browser(opt(_args, "--browser", "none")))
+    subprocess.Popen(command + [url], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True)
+    emit({"type": "spotify", "state": "waiting"})
+    deadline = time.time() + 300
+    while time.time() < deadline and "code" not in result:
+        server.handle_request()
+    server.server_close()
+    if not result.get("code"):
+        fail("Spotify login didn't finish" + (f": {result['error']}" if result.get("error") else ""))
+    try:
+        tokens = sp_post_token({"grant_type": "authorization_code", "code": result["code"], "redirect_uri": redirect,
+                                "client_id": client, "code_verifier": verifier})
+    except RuntimeError as exc:
+        fail(str(exc))
+    sp_save_tokens({"access_token": tokens["access_token"], "refresh_token": tokens.get("refresh_token"),
+                    "expires_at": time.time() + int(tokens.get("expires_in") or 3600)})
+    try:
+        me = sp_get("/me")
+    except RuntimeError as exc:
+        fail(str(exc))
+    emit({"type": "spotify", "state": "connected", "user": clean_text(me.get("display_name") or me.get("id"), 80)})
+
+
+def cmd_spotify_logout(_args):
+    try:
+        os.unlink(SP_TOKEN_PATH)
+    except OSError:
+        pass
+    emit({"type": "spotify", "state": "disconnected"})
+
+
+# ---- mixes: My Mix (likes from every service) and your own mixed playlists ----
+
+MIXES_PATH = os.path.join(DATA_DIR, "mixes.json")
+MIX_ID_RE = re.compile(r"^mix:[a-f0-9]{8}$")
+
+
+def read_mixes():
+    data = read_json(MIXES_PATH)
+    mixes = data.get("mixes") if isinstance(data, dict) and isinstance(data.get("mixes"), list) else []
+    return [m for m in mixes if isinstance(m, dict) and MIX_ID_RE.match(str(m.get("id", "")))]
+
+
+def write_mixes(mixes):
+    os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
+    write_json_atomic(MIXES_PATH, {"mixes": mixes})
+
+
+def clean_track(t):
+    """A track as the panel sent it, reduced to what a mix keeps."""
+    if not isinstance(t, dict) or not TRACK_KEY_RE.match(str(t.get("id", ""))):
+        return None
+    d = t.get("duration")
+    out = {"id": t["id"], "title": clean_text(t.get("title"), 200) or t["id"], "artist": clean_text(t.get("artist"), 200),
+           "duration": int(d) if isinstance(d, (int, float)) and 0 < d < 86400 else None}
+    cover = t.get("cover")
+    if isinstance(cover, str) and re.match(r"^https://(?:i\.scdn\.co|i[0-9]?\.sndcdn\.com)/[A-Za-z0-9_./-]{1,300}$", cover):
+        out["cover"] = cover
+    return out
+
+
+def liked_everywhere(browser):
+    """My Mix: the liked songs from every connected service, each list
+    shuffled and then taken in turn, so the services alternate. The order is
+    the same all day (seeded by the date), so the list and the queue agree."""
+    lists = []
+    for list_id in ["LM", "sp:liked"] + ([f"sc:likes:{u}"] if (u := sc_user(widget_settings().get("soundcloudUser"))) else []):
+        cached = read_json(tracks_cache_path(list_id, browser))
+        items = playable(cached.get("items")) if isinstance(cached, dict) else []
+        if items:
+            lists.append(items)
+    rng = random.Random(time.strftime("%Y-%m-%d"))
+    for items in lists:
+        rng.shuffle(items)
+    out, seen = [], set()
+    for i in range(max((len(l) for l in lists), default=0)):
+        for items in lists:
+            if i < len(items) and items[i]["id"] not in seen:
+                seen.add(items[i]["id"])
+                out.append(items[i])
+    return out[:MAX_TRACKS]
+
+
+def mix_tracks(list_id, browser):
+    if list_id == "mix:all":
+        return {"title": "My Mix", "items": liked_everywhere(browser)}
+    for m in read_mixes():
+        if m["id"] == list_id:
+            return {"title": clean_text(m.get("title")) or "Mix", "items": playable(m.get("items"))}
+    return {"title": "Mix", "items": []}
+
+
+def cmd_mixes(_args):
+    emit({"type": "mixes", "items": [{"id": m["id"], "title": clean_text(m.get("title")) or "Mix",
+                                       "count": len(playable(m.get("items")))} for m in read_mixes()]})
+
+
+def cmd_mix_add(args):
+    """mix-add <mix-id|new> --track JSON [--title T]: add a song (any
+    service) to one of your mixes, or start a new mix with it."""
+    target = args[0] if args else ""
+    try:
+        track = clean_track(json.loads(opt(args, "--track", "")))
+    except ValueError:
+        track = None
+    if not track:
+        fail("mix-add needs a track")
+    mixes = read_mixes()
+    if target == "new":
+        target = "mix:" + os.urandom(4).hex()
+        title = clean_text(opt(args, "--title", ""), 80) or f"Mix {len(mixes) + 1}"
+        mixes.append({"id": target, "title": title, "items": []})
+    mix = next((m for m in mixes if m["id"] == target), None)
+    if not mix:
+        fail("No such mix")
+    items = playable(mix.get("items"))
+    already = any(t["id"] == track["id"] for t in items)
+    if not already:
+        items.append(track)
+    mix["items"] = items[:MAX_TRACKS]
+    write_mixes(mixes)
+    emit({"type": "mixAdded", "id": target, "title": clean_text(mix.get("title")), "already": already})
+
+
+def cmd_mix_remove(args):
+    if len(args) < 2 or not MIX_ID_RE.match(args[0]) or not TRACK_KEY_RE.match(args[1]):
+        fail("mix-remove needs a mix id and a track")
+    mixes = read_mixes()
+    for m in mixes:
+        if m["id"] == args[0]:
+            m["items"] = [t for t in playable(m.get("items")) if t["id"] != args[1]]
+    write_mixes(mixes)
+    emit({"type": "mixRemoved", "id": args[0], "track": args[1]})
+
+
+def cmd_mix_delete(args):
+    if not args or not MIX_ID_RE.match(args[0]):
+        fail("mix-delete needs a mix id")
+    write_mixes([m for m in read_mixes() if m["id"] != args[0]])
+    emit({"type": "mixDeleted", "id": args[0]})
+
+
 def tracks_cache_path(playlist_id, browser):
     """Mixes ("RD..." lists: song radios, My Supermix) are personalized by
     the cookies they were read with, so each browser setting gets its own
     copy; a guest Supermix must never stand in for the account's."""
-    name = playlist_id
+    name = re.sub(r"[^A-Za-z0-9_.-]", "_", playlist_id)
     if playlist_id.startswith("RD"):
         name += "." + re.sub(r"[^A-Za-z0-9_.+-]", "_", browser)
     return os.path.join(CACHE_DIR, "tracks", f"{name}.json")
@@ -404,8 +921,30 @@ def cached_then_fresh(kind, cache_path, max_age, fetch, extra=None, items_filter
 def cmd_playlists(args):
     browser = check_browser(opt(args, "--browser", "none"))
     max_age = int(opt(args, "--max-age", "3600"))
+    service = opt(args, "--service", "yt")
+    extra = {"service": service}
+    if service == "sc":
+        user = sc_user(widget_settings().get("soundcloudUser"))
+        if not user:
+            fail("Add your SoundCloud profile", kind="error", setup="sc", service="sc")
+        cache = os.path.join(CACHE_DIR, f"playlists-sc-{user}.json")
+        cached_then_fresh("playlists", cache, max_age, lambda: fetch_sc_playlists(user, browser), extra)
+        return
+    if service == "sp":
+        if not spotify_connected():
+            fail("Connect Spotify", kind="error", setup="sp", service="sp")
+        cache = os.path.join(CACHE_DIR, "playlists-sp.json")
+        cached_then_fresh("playlists", cache, max_age, fetch_sp_playlists, extra)
+        return
+    if service == "my":
+        items = [{"id": "mix:all", "title": "My Mix", "count": None}]
+        items += [{"id": m["id"], "title": clean_text(m.get("title")) or "Mix", "count": len(playable(m.get("items")))}
+                  for m in read_mixes()]
+        items.append({"id": DOWNLOADS_ID, "title": "Downloads", "count": len(downloaded_tracks())})
+        emit({"type": "playlists", "stale": False, "items": items, **extra})
+        return
     cache = os.path.join(CACHE_DIR, f"playlists-{re.sub(r'[^A-Za-z0-9_.+-]', '_', browser)}.json")
-    cached_then_fresh("playlists", cache, max_age, lambda: {"items": fetch_playlists(browser)}, items_filter=with_pinned)
+    cached_then_fresh("playlists", cache, max_age, lambda: {"items": fetch_playlists(browser)}, extra, items_filter=with_pinned)
 
 
 def cmd_tracks(args):
@@ -414,6 +953,9 @@ def cmd_tracks(args):
     playlist_id = check_playlist_id(args[0])
     if playlist_id == DOWNLOADS_ID:
         emit({"type": "tracks", "stale": False, "playlistId": DOWNLOADS_ID, "title": "Downloads", "items": downloaded_tracks()})
+        return
+    if playlist_id.startswith("mix:"):
+        emit({"type": "tracks", "stale": False, "playlistId": playlist_id, **mix_tracks(playlist_id, opt(args, "--browser", "none"))})
         return
     browser = check_browser(opt(args, "--browser", "none"))
     max_age = int(opt(args, "--max-age", "3600"))
@@ -539,6 +1081,8 @@ def load_tracks(playlist_id, browser, max_age=None, raise_errors=False):
     an old cached copy is better than nothing."""
     if playlist_id == DOWNLOADS_ID:
         return {"title": "Downloads", "items": downloaded_tracks()}
+    if playlist_id.startswith("mix:"):
+        return mix_tracks(playlist_id, browser)
     path = tracks_cache_path(playlist_id, browser)
     old = read_json(path)
     has_old = isinstance(old, dict) and bool(old.get("items"))
@@ -560,7 +1104,7 @@ def load_tracks(playlist_id, browser, max_age=None, raise_errors=False):
 
 
 def playable(items):
-    return [t for t in items or [] if isinstance(t, dict) and VIDEO_ID_RE.match(str(t.get("id", "")))]
+    return [t for t in items or [] if isinstance(t, dict) and TRACK_KEY_RE.match(str(t.get("id", "")))]
 
 
 def track_url(track):
@@ -568,7 +1112,13 @@ def track_url(track):
     path = track.get("path")
     if isinstance(path, str) and os.path.isabs(path) and os.path.isfile(path):
         return path
-    return f"https://music.youtube.com/watch?v={track['id']}"
+    key = track["id"]
+    if key.startswith("sc:"):
+        return sc_url(key)
+    if key.startswith("sp:"):
+        # mpv/ytmusic.lua resolves it to the song's YouTube Music match.
+        return SPOTIFY_SCHEME + key[3:]
+    return f"https://music.youtube.com/watch?v={key}"
 
 
 def playback_cookie_spec(options):
@@ -697,7 +1247,7 @@ def cmd_play(args):
     # The panel also names the song: start on it even if the cached list
     # changed since the panel showed it.
     video_id = opt(args, "--video-id", "")
-    if VIDEO_ID_RE.match(video_id) and tracks[index]["id"] != video_id:
+    if TRACK_KEY_RE.match(video_id) and tracks[index]["id"] != video_id:
         index = next((i for i, t in enumerate(tracks) if t["id"] == video_id), index)
 
     if shuffle:
@@ -817,7 +1367,25 @@ MIX_MAX_GAIN = 8.0        # dB a song's level may be changed to match the last
 MIX_KEEP_SEGMENTS = 4     # rendered songs kept (each is the rest of a song)
 MIX_KEEP_AUDIO = 12       # downloaded songs kept
 MIX_MAX_DURATION = 15 * 60
-SEGMENT_RE = re.compile(r"^seg-([A-Za-z0-9_-]{11})-([A-Za-z0-9_-]{11})\.flac$")
+SEGMENT_RE = re.compile(r"^seg-([A-Za-z0-9_-]{11,24})-([A-Za-z0-9_-]{11,24})\.flac$")
+AUDIO_NAME_RE = re.compile(r"^audio-[A-Za-z0-9_-]{11,24}\.[a-z0-9]{2,5}$")
+
+
+def cache_name(key):
+    """A track's name in the audio cache. A Spotify song is cached as its
+    YouTube Music match, so both share one download."""
+    if key.startswith("sc:"):
+        import hashlib
+        return "sc-" + hashlib.sha1(key.encode()).hexdigest()[:16]
+    if key.startswith("sp:"):
+        return resolve_spotify(key)
+    return key
+
+
+def download_url(key):
+    if key.startswith("sp:"):
+        return f"https://music.youtube.com/watch?v={resolve_spotify(key)}"
+    return track_url({"id": key})
 WATCH_RE = re.compile(r"^https://music\.youtube\.com/watch\?v=([A-Za-z0-9_-]{11})$")
 
 
@@ -931,6 +1499,10 @@ def mix_entry(name):
     m = WATCH_RE.match(name or "")
     if m:
         return m.group(1), None
+    if (name or "").startswith(SPOTIFY_SCHEME) and SP_ID_RE.match(name[len(SPOTIFY_SCHEME):]):
+        return "sp:" + name[len(SPOTIFY_SCHEME):], None
+    if sc_track_key(name):
+        return sc_track_key(name), None
     path = os.path.realpath(name or "")
     if os.path.dirname(path) != os.path.realpath(MIX_DIR):
         return None, None
@@ -938,9 +1510,10 @@ def mix_entry(name):
     if not m:
         return None, None
     side = read_json(path[:-5] + ".json")
-    if not isinstance(side, dict) or side.get("id") != m.group(2):
+    key = side.get("id") if isinstance(side, dict) else ""
+    if not TRACK_KEY_RE.match(str(key or "")) or (not key.startswith("sp:") and cache_name(key) != m.group(2)):
         return None, None
-    return m.group(2), side
+    return key, side
 
 
 def mix_cookie_opts(spec):
@@ -968,16 +1541,26 @@ CONTENT_ERROR_RE = re.compile(
     r"age[- ]restricted|terminated|account associated", re.I)
 
 
-def audio_meta(video_id):
+def audio_meta(key):
     """The cached download's metadata, or None when it isn't cached."""
-    meta = read_json(os.path.join(MIX_DIR, f"{video_id}.json"))
+    try:
+        name = cache_name(key)
+    except RuntimeError:
+        return None
+    meta = read_json(os.path.join(MIX_DIR, f"{name}.json"))
     audio = meta.get("audio") if isinstance(meta, dict) else None
-    if audio and re.match(r"^audio-[A-Za-z0-9_-]{11}\.[a-z0-9]{2,5}$", audio) and os.path.exists(os.path.join(MIX_DIR, audio)):
+    if audio and AUDIO_NAME_RE.match(audio) and os.path.exists(os.path.join(MIX_DIR, audio)):
         return meta
     return None
 
 
 def download_audio(video_id, cookie_opts, clients=None, deadline=AUDIO_DEADLINE):
+    # `video_id` is any track key; YouTube's other clients only apply to
+    # YouTube (a Spotify song is its YouTube Music match).
+    name = cache_name(video_id)
+    url = download_url(video_id)
+    if video_id.startswith("sc:"):
+        clients = [None]
     """Download a song's audio into the cache, trying YouTube's clients in
     turn. Returns (metadata, the client that worked); raises RuntimeError
     with YouTube's last reason when none did."""
@@ -986,7 +1569,7 @@ def download_audio(video_id, cookie_opts, clients=None, deadline=AUDIO_DEADLINE)
     started = time.time()
     last = "no client worked"
     for client in clients or AUDIO_CLIENTS:
-        opts = {"format": "bestaudio/best", "outtmpl": os.path.join(MIX_DIR, "audio-%(id)s.%(ext)s"),
+        opts = {"format": "bestaudio/best", "outtmpl": os.path.join(MIX_DIR, f"audio-{name}.%(ext)s"),
                 "quiet": True, "no_warnings": True, "noprogress": True, "logger": QuietLogger(),
                 "noplaylist": True, "socket_timeout": 20, "max_filesize": 200 * 1024 * 1024,
                 "match_filter": lambda info, *_, **__: None if (info.get("duration") or 0) <= MIX_MAX_DURATION else "too long",
@@ -995,7 +1578,7 @@ def download_audio(video_id, cookie_opts, clients=None, deadline=AUDIO_DEADLINE)
             opts["extractor_args"] = {"youtube": {"player_client": [client]}}
         try:
             with YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(track_url({"id": video_id}), download=True)
+                info = ydl.extract_info(url, download=True)
         except Exception as exc:
             last = str(exc).replace("ERROR: ", "", 1)[:300]
             if CONTENT_ERROR_RE.search(last) or time.time() - started > deadline:
@@ -1007,7 +1590,10 @@ def download_audio(video_id, cookie_opts, clients=None, deadline=AUDIO_DEADLINE)
         if path and os.path.dirname(os.path.realpath(path)) == os.path.realpath(MIX_DIR) and os.path.exists(path):
             meta = {"audio": os.path.basename(path), "heatmap": (info.get("heatmap") or [])[:1000],
                     "usedAt": int(time.time())}
-            write_json_atomic(os.path.join(MIX_DIR, f"{video_id}.json"), meta)
+            thumb = info.get("thumbnail")
+            if isinstance(thumb, str) and re.match(r"^https://i[0-9]?\.sndcdn\.com/[A-Za-z0-9_./-]{1,300}$", thumb):
+                meta["thumbnail"] = thumb
+            write_json_atomic(os.path.join(MIX_DIR, f"{name}.json"), meta)
             return meta, client or "default"
         last = "the download didn't arrive"
     raise RuntimeError(last)
@@ -1015,7 +1601,7 @@ def download_audio(video_id, cookie_opts, clients=None, deadline=AUDIO_DEADLINE)
 
 def mix_track(video_id, xfade, cookie_opts):
     """Download a song's audio (cached) and analyze it (cached)."""
-    meta_path = os.path.join(MIX_DIR, f"{video_id}.json")
+    meta_path = os.path.join(MIX_DIR, f"{cache_name(video_id)}.json")
     meta = audio_meta(video_id)
     if meta is None:
         meta, _ = download_audio(video_id, cookie_opts)
@@ -1113,7 +1699,10 @@ def cmd_mixprep(args):
         emit({"type": "mix", "ok": False, "reason": "past the climax"})
         return
     b_gain = max(-MIX_MAX_GAIN, min(MIX_MAX_GAIN, a_meta["climax"]["level"] + a_gain - b_meta["climax"]["level"]))
-    out = os.path.join(MIX_DIR, f"seg-{a_id}-{b_id}.flac")
+    try:
+        out = os.path.join(MIX_DIR, f"seg-{cache_name(a_id)}-{cache_name(b_id)}.flac")
+    except RuntimeError as exc:
+        fail(str(exc))
     try:
         render_segment(a_meta, a_gain, b_id, b_meta, b_gain, xfade, out)
     except RuntimeError as exc:
@@ -1867,10 +2456,22 @@ def cmd_mood(args):
 
 
 def cmd_search(args):
-    """Songs on YouTube Music matching a query."""
+    """Songs matching a query: on YouTube Music, or with --service sc on
+    SoundCloud (kept as the list "sc:search", so a result plays with the
+    others after it)."""
     query = clean_text(" ".join(args[:1]), 150).strip()
     if not query:
         fail("search needs a query")
+    if opt(args, "--service", "yt") == "sc":
+        try:
+            data = run_ytdlp(f"scsearch30:{query}", check_browser(opt(args, "--browser", "none")))
+        except RuntimeError as exc:
+            fail(str(exc))
+        songs = [dict(t, kind="song") for t in sc_items(data)]
+        write_json_atomic(tracks_cache_path("sc:search", "none"),
+                          {"title": f"SoundCloud: {query}", "items": songs, "fetchedAt": int(time.time())})
+        emit({"type": "search", "query": query, "service": "sc", "items": songs[:50]})
+        return
     try:
         data = music_public("search", {"query": query, "params": SONGS_FILTER})
     except RuntimeError as exc:
@@ -1894,7 +2495,7 @@ def downloaded_tracks():
     data = read_json(DOWNLOADS_PATH)
     out = []
     for t in data.get("items") if isinstance(data, dict) and isinstance(data.get("items"), list) else []:
-        if not isinstance(t, dict) or not VIDEO_ID_RE.match(str(t.get("id", ""))):
+        if not isinstance(t, dict) or not TRACK_KEY_RE.match(str(t.get("id", ""))):
             continue
         path = t.get("path")
         if not (isinstance(path, str) and os.path.isabs(path) and os.path.isfile(path)):
@@ -1943,12 +2544,30 @@ def safe_filename(text):
     return name or "song"
 
 
-def fetch_cover(video_id, path):
-    """The song's YouTube thumbnail (never with cookies), for embedding."""
-    for size in ("maxresdefault", "hqdefault"):
+def cover_urls(key):
+    """Where a song's cover comes from (never with cookies): YouTube's
+    thumbnail, Spotify's album image, SoundCloud's artwork."""
+    if key.startswith("sp:"):
+        known = (read_json(SP_TRACKS_PATH) or {}).get(key) or {}
+        urls = [known["cover"]] if isinstance(known.get("cover"), str) else []
         try:
-            body, response = http_get(f"https://i.ytimg.com/vi/{video_id}/{size}.jpg", 5 * 1024 * 1024,
-                                      timeout=15, accept="image/jpeg")
+            vid = resolve_spotify(key)
+            urls += [f"https://i.ytimg.com/vi/{vid}/{s}.jpg" for s in ("maxresdefault", "hqdefault")]
+        except RuntimeError:
+            pass
+        return urls
+    if key.startswith("sc:"):
+        meta = audio_meta(key) or {}
+        thumb = meta.get("thumbnail")
+        return [thumb.replace("-large.", "-t500x500.")] if isinstance(thumb, str) else []
+    return [f"https://i.ytimg.com/vi/{key}/{s}.jpg" for s in ("maxresdefault", "hqdefault")]
+
+
+def fetch_cover(video_id, path):
+    """The song's cover, as a JPEG file for embedding and for Downloads."""
+    for url in cover_urls(video_id):
+        try:
+            body, response = http_get(url, 5 * 1024 * 1024, timeout=15, accept="image/jpeg")
         except Exception:
             continue
         if response.headers.get_content_type() == "image/jpeg" and body[:3] == b"\xff\xd8\xff":
@@ -1963,8 +2582,8 @@ def cmd_download(args):
     download path as playback's backup sources (cache, YouTube's clients,
     mirrors if on), then converted by ffmpeg with its title, artist and
     cover embedded."""
-    if not args or not VIDEO_ID_RE.match(args[0]):
-        fail("download needs a video id")
+    if not args or not TRACK_KEY_RE.match(args[0]):
+        fail("download needs a track")
     video_id = args[0]
     fmt = opt(args, "--format", "mp3")
     if fmt not in DOWNLOAD_FORMATS:
@@ -2006,7 +2625,7 @@ def cmd_download(args):
     # With a cover: embedded where the format can carry one, and kept for
     # the Downloads list either way.
     os.makedirs(COVERS_DIR, mode=0o700, exist_ok=True)
-    cover = os.path.join(COVERS_DIR, f"{video_id}.jpg")
+    cover = os.path.join(COVERS_DIR, f"{re.sub(r'[^A-Za-z0-9_-]', '_', video_id)[:60]}.jpg")
     got_cover = want_cover and (os.path.isfile(cover) or fetch_cover(video_id, cover))
     has_cover = takes_cover and got_cover
     cmd = ["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", source]
@@ -2018,7 +2637,7 @@ def cmd_download(args):
     cmd += codec + ["-metadata", f"title={title}"]
     if artist:
         cmd += ["-metadata", f"artist={artist}"]
-    cmd += ["-metadata", f"comment=https://music.youtube.com/watch?v={video_id}"]
+    cmd += ["-metadata", f"comment={track_url({'id': video_id}) if not video_id.startswith('sp:') else 'https://open.spotify.com/track/' + video_id[3:]}"]
     tmp = os.path.join(folder, f".{base}.{ext}.part")
     cmd += ["-f", {"m4a": "mp4", "opus": "ogg"}.get(fmt, fmt), tmp]
     try:
@@ -2129,6 +2748,13 @@ def main():
         "mirrors": cmd_mirrors,
         "update-check": cmd_update_check,
         "explore": cmd_explore,
+        "mixes": cmd_mixes,
+        "resolve": cmd_resolve,
+        "spotify-login": cmd_spotify_login,
+        "spotify-logout": cmd_spotify_logout,
+        "mix-add": cmd_mix_add,
+        "mix-remove": cmd_mix_remove,
+        "mix-delete": cmd_mix_delete,
         "mood": cmd_mood,
         "search": cmd_search,
         "download": cmd_download,

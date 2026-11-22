@@ -516,3 +516,15 @@ test("Deezer songs, lists and covers", () => {
   assert.ok(M.SERVICES.includes("dz"))
   assert.equal(Array.from(M.visibleTabs("")).includes("dz"), false)
 })
+
+test("Mixcloud and Audius songs and lists", () => {
+  for (const k of ["mc:DJJazzyJeff/dj-jazzy-jeff-boiler-room", "mc:AK729/%E7%89%B9%E5%88%AB", "au:V66vyPP"]) assert.ok(M.TRACK_KEY_RE.test(k), k)
+  assert.equal(M.TRACK_KEY_RE.test("mc:a/../b c"), false)
+  assert.equal(M.serviceOf("au:V66vyPP"), "au")
+  assert.equal(M.serviceOf("mc:a/b"), "mc")
+  const lists = M.parseLine(JSON.stringify({ type: "playlists", service: "au", items: [
+    { id: "au:trending" }, { id: "au:trending:hip-hop-rap" }, { id: "mc:hot:deep-house" }, { id: "au:x" }] }))
+  assert.deepEqual(Array.from(lists.items, i => i.id), ["au:trending", "au:trending:hip-hop-rap", "mc:hot:deep-house"])
+  assert.ok(M.validCover("https://thumbnailer.mixcloud.com/unsafe/300x300/extaudio/e/c/c/e/e421-6f4e"))
+  assert.equal(Array.from(M.visibleTabs("mc,au")).join(","), "yt,mc,au,my")
+})

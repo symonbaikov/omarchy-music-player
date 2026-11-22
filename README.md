@@ -9,6 +9,8 @@
     <img src="docs/icons/spotify.svg" width="32" height="32" alt="Spotify" title="Spotify" />&nbsp;&nbsp;
     <img src="docs/icons/deezer.svg" width="32" height="32" alt="Deezer" title="Deezer" />&nbsp;&nbsp;
     <img src="docs/icons/soundcloud.svg" width="32" height="32" alt="SoundCloud" title="SoundCloud" />&nbsp;&nbsp;
+    <img src="docs/icons/mixcloud.svg" width="32" height="32" alt="Mixcloud" title="Mixcloud: DJ mixes" />&nbsp;&nbsp;
+    <img src="docs/icons/audius.svg" width="32" height="32" alt="Audius" title="Audius: independent artists" />&nbsp;&nbsp;
     <img src="docs/icons/cloud.svg" width="32" height="32" alt="Your files" title="Your files: the Music folder, Navidrome, Jellyfin, Plex, S3, Google Drive, Dropbox, OneDrive, SFTP, SMB, WebDAV, FTP" />&nbsp;&nbsp;
     <img src="docs/icons/radio.svg" width="32" height="32" alt="Radio" title="Internet radio: about 50,000 stations" />&nbsp;&nbsp;
     <img src="docs/icons/podcasts.svg" width="32" height="32" alt="Podcasts" title="Podcasts: Apple Podcasts' directory or any feed" />&nbsp;&nbsp;
@@ -19,14 +21,14 @@
 </div>
 
 All your music in one player that lives in your Omarchy bar: **YouTube
-Music, Spotify, Deezer, SoundCloud, your own files and music server, internet
+Music, Spotify, Deezer, SoundCloud, Mixcloud, Audius, your own files and music server, internet
 radio and podcasts**, played by a headless `mpv`. No browser, no web app, no
 subscription of its own.
 
 ## What makes it special
 
-- **🎧 Every service, one queue.** Tabs for YouTube Music, Spotify, Deezer, SoundCloud,
-  your files, radio and your mixes. Mix songs from all of them in one
+- **🎧 Every service, one queue.** Tabs for YouTube Music, Spotify, Deezer,
+  SoundCloud, Mixcloud, Audius, your files, radio, podcasts and your mixes. Mix songs from all of them in one
   playlist; **My Mix** alternates your likes from every service.
 - **✨ AI Mix.** The AI that already runs on your Omarchy (Claude, Codex or
   OpenCode) learns your taste from what you finish, skip and like, and picks
@@ -84,7 +86,7 @@ Everything else, the shortcuts and the commands for your own key bindings:
 
 | | |
 |---|---|
-| [Services](docs/services.md) | YouTube Music, Spotify, Deezer, SoundCloud, Files and servers, Radio, Podcasts, My Music |
+| [Services](docs/services.md) | YouTube Music, Spotify, Deezer, SoundCloud, Mixcloud, Audius, Files and servers, Radio, Podcasts, My Music |
 | [The player window](docs/player-window.md) | The window, Lyrics, Notes |
 | [AI Mix](docs/ai-mix.md) | How it learns your taste, and what it sends |
 | [Playback](docs/playback.md) | Peak mix, fades, radio and autoplay, downloads, backup sources, updates |

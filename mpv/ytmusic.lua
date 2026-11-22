@@ -302,6 +302,7 @@ local RADIO = "ytmusic-radio://"
 local SERVER = "ytmusic-server://"
 local PODCAST = "ytmusic-podcast://"
 local DEEZER = "ytmusic-deezer://"
+local AUDIUS = "ytmusic-audius://"
 
 local function watch_id(url)
     return url and url:match("^https://music%.youtube%.com/watch%?v=([%w_-]+)$")
@@ -440,6 +441,7 @@ mp.register_event("end-file", function(e)
     if not entry or not (watch_id(name) or name:sub(1, #SPOTIFY) == SPOTIFY or name:sub(1, #DEEZER) == DEEZER
         or name:sub(1, #CLOUD) == CLOUD or radio
         or name:sub(1, #SERVER) == SERVER or name:sub(1, #PODCAST) == PODCAST
+        or name:sub(1, #AUDIUS) == AUDIUS or name:match("^https://www%.mixcloud%.com/")
         or name:match("^https://[%w.]*soundcloud%.com/")) then return end
     -- A mix ending this song early, or the song simply finishing.
     if mix and mix.state == "ready" and mix.pos == index then return end
@@ -466,6 +468,7 @@ end)
 local function resolved_ok(kind, url)
     if kind == "sp" or kind == "dz" then return watch_id(url) ~= nil end
     if kind == "rd" or kind == "ms" or kind == "pc" then return url:match("^https?://[^%s]+$") ~= nil end
+    if kind == "au" then return url:match("^https://api%.audius%.co/v1/tracks/%w+/stream%?app_name=[%w%-]+$") ~= nil end
     -- A song in a local folder: its file.
     if kind == "cl" and url:sub(1, 1) == "/" then return true end
     return url:match("^http://[%w]+:[%w]+@127%.0%.0%.1:%d+/") ~= nil
@@ -480,6 +483,9 @@ mp.add_hook("on_load", 5, function(hook)
     if url:sub(1, #SPOTIFY) == SPOTIFY then
         kind, key = "sp", url:sub(#SPOTIFY + 1)
         if not key:match("^[%w]+$") then return end
+    elseif url:sub(1, #AUDIUS) == AUDIUS then
+        kind, key = "au", url:sub(#AUDIUS + 1)
+        if not key:match("^%w+$") then return end
     elseif url:sub(1, #DEEZER) == DEEZER then
         kind, key = "dz", url:sub(#DEEZER + 1)
         if not key:match("^%d+$") then return end
@@ -522,6 +528,8 @@ mp.add_hook("on_load", 5, function(hook)
             end
         elseif kind == "ms" then
             msg.error("server song " .. key .. " can't be opened: " .. tostring(out and out.message or "helper failed"))
+        elseif kind == "au" then
+            msg.error("Audius song " .. key .. " can't be opened: " .. tostring(out and out.message or "helper failed"))
         elseif kind == "pc" then
             msg.error("podcast episode " .. key .. " can't be opened: " .. tostring(out and out.message or "helper failed"))
         elseif kind == "rd" then

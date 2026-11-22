@@ -123,11 +123,12 @@ VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 # SoundCloud, "sp:<id>" for Spotify (played from its YouTube Music match),
 # "cl:<source>/<hash>" for a file in your own cloud storage (see "cloud").
 TRACK_KEY_RE = re.compile(r"^(?:[A-Za-z0-9_-]{11}|sc:(?:[0-9]{1,20}|[A-Za-z0-9_-]{1,100}/[A-Za-z0-9_-]{1,200})|sp:[A-Za-z0-9]{22}"
-                          r"|cl:[a-f0-9]{8}/[a-f0-9]{16}|ms:[a-f0-9]{8}/[A-Za-z0-9_-]{1,64}|rd:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|pc:[a-f0-9]{16}/[a-f0-9]{16}|dz:[0-9]{1,20})$")
+                          r"|cl:[a-f0-9]{8}/[a-f0-9]{16}|ms:[a-f0-9]{8}/[A-Za-z0-9_-]{1,64}|rd:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|pc:[a-f0-9]{16}/[a-f0-9]{16}|dz:[0-9]{1,20}|au:[A-Za-z0-9]{1,16}|mc:[A-Za-z0-9_-]{1,100}/[A-Za-z0-9%_.-]{1,300})$")
 SERVICE_LIST_RE = re.compile(
     r"^(?:sc:(?:likes|sets):[A-Za-z0-9_-]{1,100}|sc:set:[A-Za-z0-9_-]{1,100}/[A-Za-z0-9_-]{1,200}|sc:search"
     r"|sp:liked|sp:pl:[A-Za-z0-9]{22}|mix:all|mix:[a-f0-9]{8}|cl:[a-f0-9]{8}(?::[a-f0-9]{16})?"
     r"|rd:(?:fav|top|vote|search|country:[A-Z]{2}|tag:[a-z0-9-]{1,40})|pc:(?:new|[a-f0-9]{16})|dz:(?:fav|chart|search|pl:[0-9]{1,20})"
+    r"|au:(?:search|trending(?::[a-z0-9-]{1,40})?)|mc:(?:search|hot:[a-z0-9-]{1,40})"
     r"|ms:[a-f0-9]{8}:(?:fav|rnd|al:[A-Za-z0-9_-]{1,64}|pl:[A-Za-z0-9_-]{1,64})|ai:mix|hist:recent)$")
 SC_USER_RE = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
 SPOTIFY_SCHEME = "ytmusic-spotify://"
@@ -176,7 +177,7 @@ def is_list_id(value):
 
 
 def source_of(key):
-    return key[:2] if key[:3] in ("sc:", "sp:", "cl:", "rd:", "ms:", "pc:", "dz:") else "yt"
+    return key[:2] if key[:3] in ("sc:", "sp:", "cl:", "rd:", "ms:", "pc:", "dz:", "au:", "mc:") else "yt"
 
 
 def check_playlist_id(value):
@@ -384,6 +385,10 @@ def fetch_tracks(playlist_id, browser):
         return fetch_sp_tracks(playlist_id)
     if playlist_id.startswith("dz:"):
         return fetch_dz_tracks(playlist_id)
+    if playlist_id.startswith("mc:"):
+        return fetch_mc_tracks(playlist_id)
+    if playlist_id.startswith("au:"):
+        return fetch_au_tracks(playlist_id)
     url, limit = list_source(playlist_id)
     data = run_ytdlp(url, browser, limit)
     items = []
@@ -727,6 +732,9 @@ def cmd_resolve(args):
         if key.startswith("ms:"):
             emit({"type": "resolved", "key": key, "url": server_stream_url(key)})
             return
+        if key.startswith("au:"):
+            emit({"type": "resolved", "key": key, "url": audius_stream_url(key)})
+            return
         if key.startswith("pc:"):
             url, start = podcast_stream(key)
             emit({"type": "resolved", "key": key, "url": url, "start": start})
@@ -985,6 +993,12 @@ def cmd_playlists(args):
         return
     if service == "rd":
         emit({"type": "playlists", "stale": False, "items": radio_lists(), **extra})
+        return
+    if service == "mc":
+        emit({"type": "playlists", "stale": False, "items": mc_lists(), **extra})
+        return
+    if service == "au":
+        emit({"type": "playlists", "stale": False, "items": au_lists(), **extra})
         return
     if service == "dz":
         user = deezer_user(widget_settings().get("deezerUser"))
@@ -1245,6 +1259,11 @@ def track_url(track):
         return SPOTIFY_SCHEME + key[3:]
     if key.startswith("dz:"):
         return DEEZER_SCHEME + key[3:]
+    if key.startswith("mc:"):
+        return mc_url(key)
+    if key.startswith("au:"):
+        # mpv/ytmusic.lua resolves it to Audius' stream.
+        return AUDIUS_SCHEME + key[3:]
     if key.startswith("cl:"):
         # mpv/ytmusic.lua resolves it to the file on the local rclone server.
         return CLOUD_SCHEME + key[3:]
@@ -1521,8 +1540,8 @@ def cache_name(key):
     YouTube Music match, so both share one download."""
     # No dash in these: a rendered segment is named seg-<a>-<b>, and a dash
     # inside <a> or <b> would make that name ambiguous.
-    if key.startswith("sc:"):
-        return "sc" + hashlib.sha1(key.encode()).hexdigest()[:16]
+    if key[:3] in ("sc:", "mc:", "au:"):
+        return key[:2] + hashlib.sha1(key.encode()).hexdigest()[:16]
     if key[:3] in MATCHED:
         return resolve_spotify(key)
     if key.startswith("cl:"):
@@ -1535,6 +1554,8 @@ def cache_name(key):
 def download_url(key):
     if key[:3] in MATCHED:
         return f"https://music.youtube.com/watch?v={resolve_spotify(key)}"
+    if key.startswith("au:"):
+        return audius_stream_url(key)
     return track_url({"id": key})
 WATCH_RE = re.compile(r"^https://music\.youtube\.com/watch\?v=([A-Za-z0-9_-]{11})$")
 
@@ -1653,6 +1674,11 @@ def mix_entry(name):
         return "sp:" + name[len(SPOTIFY_SCHEME):], None
     if (name or "").startswith(DEEZER_SCHEME) and re.match(r"^[0-9]{1,20}$", name[len(DEEZER_SCHEME):]):
         return "dz:" + name[len(DEEZER_SCHEME):], None
+    if (name or "").startswith(AUDIUS_SCHEME) and re.match(r"^[A-Za-z0-9]{1,16}$", name[len(AUDIUS_SCHEME):]):
+        return "au:" + name[len(AUDIUS_SCHEME):], None
+    m = re.match(r"^https://www\.mixcloud\.com/([A-Za-z0-9_-]{1,100})/([A-Za-z0-9%_.-]{1,300})/$", name or "")
+    if m:
+        return f"mc:{m.group(1)}/{m.group(2)}", None
     if sc_track_key(name):
         return sc_track_key(name), None
     if (name or "").startswith(CLOUD_SCHEME) and CLOUD_KEY_RE.match("cl:" + name[len(CLOUD_SCHEME):]):
@@ -1721,7 +1747,7 @@ def download_audio(video_id, cookie_opts, clients=None, deadline=AUDIO_DEADLINE)
     if video_id.startswith("ms:"):
         return download_server_audio(video_id, name), "server"
     url = download_url(video_id)
-    if video_id.startswith("sc:"):
+    if video_id[:3] in ("sc:", "mc:", "au:"):
         clients = [None]
     """Download a song's audio into the cache, trying YouTube's clients in
     turn. Returns (metadata, the client that worked); raises RuntimeError
@@ -2648,6 +2674,14 @@ def cmd_search(args):
         emit({"type": "search", "query": query, "service": "pc",
               "items": [dict(podcast_list_item(s), kind="list", artist=s.get("author", "")) for s in shows[:60]]})
         return
+    if opt(args, "--service", "yt") in ("mc", "au"):
+        try:
+            found = (mixcloud_search if opt(args, "--service", "yt") == "mc" else audius_search)(query)
+        except RuntimeError as exc:
+            fail(str(exc))
+        emit({"type": "search", "query": query, "service": opt(args, "--service", "yt"),
+              "items": [dict(t, kind="song") for t in found]})
+        return
     if opt(args, "--service", "yt") == "dz":
         try:
             found = deezer_search(query)
@@ -2756,10 +2790,10 @@ def cover_urls(key):
         except RuntimeError:
             pass
         return urls
-    if key.startswith("sc:"):
+    if key[:3] in ("sc:", "mc:", "au:"):
         meta = audio_meta(key) or {}
         thumb = meta.get("thumbnail")
-        return [thumb.replace("-large.", "-t500x500.")] if isinstance(thumb, str) else []
+        return [thumb.replace("-large.", "-t500x500.")] if isinstance(thumb, str) and thumb.startswith("https://") else []
     return [f"https://i.ytimg.com/vi/{key}/{s}.jpg" for s in ("maxresdefault", "hqdefault")]
 
 
@@ -4397,6 +4431,150 @@ def deezer_search(query):
     return items
 
 
+# ---- Mixcloud and Audius ---------------------------------------------------------
+# Two open catalogs, no account or key. Mixcloud: DJ mixes and radio shows,
+# "mc:<user>/<slug>", played by yt-dlp from the mix's page like SoundCloud;
+# lists "mc:hot:<genre>" (popular in a genre) and "mc:search". Audius:
+# independent artists, "au:<id>", streamed from Audius' own API
+# (ytmusic-audius://<id>, resolved here); lists "au:trending",
+# "au:trending:<genre>", "au:search". Audius artwork lives on community
+# nodes, so the helper fetches it into the covers folder.
+
+AUDIUS_SCHEME = "ytmusic-audius://"
+AUDIUS_API = "https://api.audius.co/v1/"
+AUDIUS_APP = "omarchy-music-player"
+MC_KEY_RE = re.compile(r"^mc:([A-Za-z0-9_-]{1,100})/([A-Za-z0-9%_.-]{1,300})$")
+MC_GENRES = ["house", "techno", "deep-house", "drum-and-bass", "ambient", "jazz", "hip-hop", "electronica",
+             "chillout", "soul", "funk", "disco", "dubstep", "trance", "lo-fi"]
+AU_GENRES = ["Electronic", "Hip-Hop/Rap", "Pop", "Alternative", "Ambient", "Drum & Bass", "House", "Techno",
+             "Lo-Fi", "Rock", "R&B/Soul", "Jazz", "Experimental"]
+
+
+def mc_url(key):
+    m = MC_KEY_RE.match(key)
+    return f"https://www.mixcloud.com/{m.group(1)}/{m.group(2)}/" if m else ""
+
+
+def mc_track(c):
+    if not isinstance(c, dict):
+        return None
+    m = re.match(r"^/([A-Za-z0-9_-]{1,100})/([A-Za-z0-9%_.-]{1,300})/$", str(c.get("key") or ""))
+    if not m:
+        return None
+    t = {"id": f"mc:{m.group(1)}/{m.group(2)}", "title": clean_text(c.get("name"), 200) or m.group(2),
+         "artist": clean_text((c.get("user") or {}).get("name"), 120),
+         "duration": c.get("audio_length") if isinstance(c.get("audio_length"), int) and 0 < c["audio_length"] < 86400 else None}
+    pic = str((c.get("pictures") or {}).get("large") or (c.get("pictures") or {}).get("medium") or "")
+    if re.match(r"^https://thumbnailer\.mixcloud\.com/unsafe/[0-9x]{3,9}/[A-Za-z0-9_./-]{1,300}$", pic):
+        t["cover"] = pic
+    return t
+
+
+def mixcloud(path, params=None):
+    url = "https://api.mixcloud.com/" + path + ("?" + urllib.parse.urlencode(params) if params else "")
+    try:
+        return http_json(url, timeout=15)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("Mixcloud can't be reached") from exc
+
+
+def fetch_mc_tracks(list_id):
+    m = re.match(r"^mc:hot:([a-z0-9-]{1,40})$", list_id)
+    if not m:
+        raise RuntimeError("unknown Mixcloud list")
+    data = mixcloud(f"discover/{m.group(1)}/popular/", {"limit": 50})
+    items = [t for t in (mc_track(c) for c in data.get("data") or []) if t]
+    return {"title": m.group(1).replace("-", " ").title() + " mixes", "items": items}
+
+
+def mixcloud_search(query):
+    data = mixcloud("search/", {"q": query, "type": "cloudcast", "limit": 50})
+    items = [t for t in (mc_track(c) for c in data.get("data") or []) if t]
+    write_json_atomic(tracks_cache_path("mc:search", "none"), {"title": query, "items": items, "fetchedAt": int(time.time())})
+    return items
+
+
+def mc_lists():
+    return [{"id": f"mc:hot:{g}", "title": g.replace("-", " ").title(), "count": None, "subtitle": "Popular mixes"}
+            for g in MC_GENRES]
+
+
+def audius(path, params=None):
+    url = AUDIUS_API + path + "?" + urllib.parse.urlencode(dict(params or {}, app_name=AUDIUS_APP))
+    try:
+        return http_json(url, timeout=15)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("Audius can't be reached") from exc
+
+
+def au_cover_path(au_id):
+    return os.path.join(COVERS_DIR, f"au-{au_id}.jpg")
+
+
+def au_track(d):
+    if not isinstance(d, dict) or not re.match(r"^[A-Za-z0-9]{1,16}$", str(d.get("id") or "")):
+        return None
+    if d.get("is_streamable") is False or d.get("is_delete"):
+        return None
+    t = {"id": "au:" + d["id"], "title": clean_text(d.get("title"), 200) or d["id"],
+         "artist": clean_text((d.get("user") or {}).get("name"), 120),
+         "duration": d.get("duration") if isinstance(d.get("duration"), int) and 0 < d["duration"] < 86400 else None}
+    art = (d.get("artwork") or {}).get("150x150") if isinstance(d.get("artwork"), dict) else None
+    if isinstance(art, str) and re.match(r"^https://[A-Za-z0-9.-]{1,100}/content/[A-Za-z0-9]{10,100}/150x150\.jpg$", art):
+        t["art"] = art
+    return t
+
+
+def with_au_covers(items):
+    """Each song's artwork as a local file (fetched once, in parallel)."""
+    import concurrent.futures
+    todo = [t for t in items if t.get("art") and not os.path.isfile(au_cover_path(t["id"][3:]))]
+    with concurrent.futures.ThreadPoolExecutor(8) as pool:
+        list(pool.map(lambda t: save_remote_cover(au_cover_path(t["id"][3:]), t["art"], 150), todo[:60]))
+    out = []
+    for t in items:
+        t = {k: v for k, v in t.items() if k != "art"}
+        if os.path.isfile(au_cover_path(t["id"][3:])):
+            t["cover"] = au_cover_path(t["id"][3:])
+        out.append(t)
+    return out
+
+
+def fetch_au_tracks(list_id):
+    m = re.match(r"^au:trending(?::([A-Za-z0-9-]{1,40}))?$", list_id)
+    if not m:
+        raise RuntimeError("unknown Audius list")
+    genre = next((g for g in AU_GENRES if au_slug(g) == m.group(1)), None) if m.group(1) else None
+    params = {"limit": 50, "time": "week"}
+    if genre:
+        params["genre"] = genre
+    data = audius("tracks/trending", params)
+    items = [t for t in (au_track(d) for d in data.get("data") or []) if t]
+    return {"title": f"Trending {genre}" if genre else "Trending on Audius", "items": with_au_covers(items)}
+
+
+def au_slug(genre):
+    return re.sub(r"[^a-z0-9]+", "-", genre.lower()).strip("-")
+
+
+def audius_search(query):
+    data = audius("tracks/search", {"query": query, "limit": 50})
+    items = with_au_covers([t for t in (au_track(d) for d in data.get("data") or []) if t])
+    write_json_atomic(tracks_cache_path("au:search", "none"), {"title": query, "items": items, "fetchedAt": int(time.time())})
+    return items
+
+
+def au_lists():
+    return ([{"id": "au:trending", "title": "Trending", "count": None, "subtitle": "This week on Audius"}]
+            + [{"id": f"au:trending:{au_slug(g)}", "title": g, "count": None, "subtitle": "Trending this week"} for g in AU_GENRES])
+
+
+def audius_stream_url(key):
+    if not re.match(r"^au:[A-Za-z0-9]{1,16}$", key):
+        raise RuntimeError("not an Audius song")
+    return f"{AUDIUS_API}tracks/{key[3:]}/stream?app_name={AUDIUS_APP}"
+
+
 # ---- podcasts ---------------------------------------------------------------------
 # Apple Podcasts' public directory (search and the top shows, no account) finds
 # shows; each show is its own RSS feed, read here. Subscriptions, and where you
@@ -4476,7 +4654,11 @@ def podcast_cover(show):
 
 def save_podcast_cover(h, url):
     """A show's artwork, made a local JPEG (feed images live on any host)."""
-    path = podcast_cover_path(h)
+    save_remote_cover(podcast_cover_path(h), url, 300)
+
+
+def save_remote_cover(path, url, size):
+    """A picture from any host, made a small local JPEG for the panel."""
     if os.path.isfile(path) or not re.match(r"^https?://", url or ""):
         return
     os.makedirs(COVERS_DIR, mode=0o700, exist_ok=True)
@@ -4491,7 +4673,7 @@ def save_podcast_cover(h, url):
         with open(tmp, "wb") as fh:
             fh.write(body)
         subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", tmp, "-frames:v", "1",
-                        "-vf", "scale=300:300:force_original_aspect_ratio=decrease", path],
+                        "-vf", f"scale={size}:{size}:force_original_aspect_ratio=decrease", path],
                        capture_output=True, timeout=20, stdin=subprocess.DEVNULL)
     except (OSError, subprocess.TimeoutExpired):
         pass

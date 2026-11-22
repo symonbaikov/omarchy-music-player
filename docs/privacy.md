@@ -39,6 +39,11 @@ before use.
   from `api.deezer.com` without an account; covers come from Deezer's image
   host. Songs are matched on YouTube Music without an account; matches are
   cached.
+- **Mixcloud**: lists and search from `api.mixcloud.com`, mixes played by
+  yt-dlp from `mixcloud.com`, covers from Mixcloud's image host. No account.
+- **Audius**: lists, search and streams from `api.audius.co` (which sends
+  the audio from Audius' community nodes), identified only as
+  `omarchy-music-player`. Covers are fetched once by the helper and cached.
 - **SoundCloud**: read by yt-dlp with the same browser login as YouTube.
   Album art from Spotify's and SoundCloud's image hosts.
 - **Music servers**: only your server (and plex.tv for Plex's sign-in and to

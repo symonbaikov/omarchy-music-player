@@ -10,13 +10,16 @@ are always there.
 | <img src="icons/spotify.svg" width="20" height="20" alt="" align="center" />&nbsp;Spotify | Your Liked Songs and the playlists you own or collaborate on | Once: your own Spotify app (below) |
 | <img src="icons/deezer.svg" width="20" height="20" alt="" align="center" />&nbsp;Deezer | Your favorite tracks and playlists, Deezer's charts, search | Your profile link |
 | <img src="icons/soundcloud.svg" width="20" height="20" alt="" align="center" />&nbsp;SoundCloud | Your likes and playlists, and search across SoundCloud | Your profile name or link |
+| <img src="icons/mixcloud.svg" width="20" height="20" alt="" align="center" />&nbsp;Mixcloud | DJ mixes and radio shows: popular in 15 genres, search | Nothing |
+| <img src="icons/audius.svg" width="20" height="20" alt="" align="center" />&nbsp;Audius | Independent artists, free to stream: trending by genre, search | Nothing |
 | <img src="icons/cloud.svg" width="20" height="20" alt="" align="center" />&nbsp;Files | Your Music folder, your music server and your own storage, with covers | One click for ~/Music; a server's address and sign-in; or a storage |
 | <img src="icons/radio.svg" width="20" height="20" alt="" align="center" />&nbsp;Radio | About 50,000 stations: top, most liked, a country's, genres, search, favorites | Nothing |
 | <img src="icons/podcasts.svg" width="20" height="20" alt="" align="center" />&nbsp;Podcasts | Apple Podcasts' directory or any feed: top shows, search, subscriptions, new episodes | Nothing |
 | <img src="icons/mymusic.svg" width="20" height="20" alt="" align="center" />&nbsp;My&nbsp;Music | AI Mix, My Mix, your own mixes, Recently played, Downloads | Nothing |
 
 A search field sits under the tabs: `Enter` (or `/` to get there) searches
-YouTube Music, or Deezer, SoundCloud, radio stations or podcasts on their tabs. Back returns
+YouTube Music, or Deezer, SoundCloud, Mixcloud, Audius, radio stations or
+podcasts on their tabs. Back returns
 to where you were.
 
 ## YouTube Music
@@ -67,6 +70,21 @@ you switch it on in the `+` tab.
 Read with `yt-dlp`, like YouTube. Enter your profile name or link in the
 SoundCloud tab. Private likes need you signed in to SoundCloud in the
 browser the plugin reads.
+
+## Mixcloud and Audius
+
+Two open catalogs, no account. Switch their tabs on in the `+` tab.
+
+- **Mixcloud**: DJ mixes and radio shows, popular in 15 genres (house,
+  techno, drum & bass, ambient, jazz …) and search. Mixes play through
+  yt-dlp, like SoundCloud, with seeking.
+- **Audius**: independent artists who put their music up to stream for
+  free: what's trending this week, overall and by genre, and search. Songs
+  stream from Audius' own API.
+
+Both work with fades, Peak mix, mixes and downloads. **Bandcamp** isn't here:
+it currently answers apps with a bot check, so its music can't be played
+outside a browser. **Jamendo** would need an API key of your own.
 
 ## Files
 

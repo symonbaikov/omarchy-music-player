@@ -124,6 +124,8 @@ Panel {
     { id: "sp", glyph: Model.GLYPH.spotify, color: "#1ED760", label: strings.t("tab.sp") },
     { id: "dz", glyph: Model.GLYPH.deezer, color: "#A238FF", label: strings.t("tab.dz") },
     { id: "sc", glyph: Model.GLYPH.soundcloud, color: "#FF5500", label: strings.t("tab.sc") },
+    { id: "mc", glyph: Model.GLYPH.mixcloud, color: "#5B6CFF", label: strings.t("tab.mc") },
+    { id: "au", glyph: Model.GLYPH.audius, color: "#CC0FE0", label: strings.t("tab.au") },
     { id: "cl", glyph: Model.GLYPH.cloud, color: "#4FA3FF", label: strings.t("tab.cl") },
     { id: "rd", glyph: Model.GLYPH.radioService, color: "#B388FF", label: strings.t("tab.rd") },
     { id: "pc", glyph: Model.GLYPH.podcast, color: "#D56DFB", label: strings.t("tab.pc") },
@@ -132,6 +134,8 @@ Panel {
   // Per service: { items, loading, error, setup } ("setup": needs connecting).
   property var svc: ({ sp: { items: [], loading: false, error: "", setup: "" },
                        dz: { items: [], loading: false, error: "", setup: "" },
+                       mc: { items: [], loading: false, error: "", setup: "" },
+                       au: { items: [], loading: false, error: "", setup: "" },
                        sc: { items: [], loading: false, error: "", setup: "" },
                        cl: { items: [], loading: false, error: "", setup: "" },
                        rd: { items: [], loading: false, error: "", setup: "" },
@@ -1268,7 +1272,7 @@ Panel {
     if (view !== "explore") {
       if (view === "addTo") closeAddTo()
       searchReturnView = view === "settings" || view === "download" ? "playlists" : view
-      exploreService = service === "sc" || service === "rd" || service === "pc" || service === "dz" ? service : "yt"
+      exploreService = ["sc", "rd", "pc", "dz", "mc", "au"].indexOf(service) >= 0 ? service : "yt"
     }
     view = "explore"
     runSearch(q)
@@ -1329,7 +1333,7 @@ Panel {
     // A SoundCloud result plays with the other results after it.
     if (item.kind === "song" && !Model.isYouTube(item.id)) {
       var at = exploreRowsData.indexOf(item)
-      openPlaylist = { id: exploreService === "rd" || exploreService === "dz" ? exploreService + ":search" : "sc:search", title: exploreTitle, count: null }
+      openPlaylist = { id: exploreService + ":search", title: exploreTitle, count: null }
       tracks = exploreRowsData
       tracksFromExplore = true
       play(at >= 0 ? at : Math.max(0, cursorIndex), false)
@@ -2395,7 +2399,7 @@ Panel {
             readonly property string where: root.view === "explore" ? root.exploreService : root.service
             text: root.view === "countries" ? strings.t("rd.countryField")
               : where === "sc" ? strings.t("sc.searchField") : where === "rd" ? strings.t("rd.searchField")
-              : where === "pc" ? strings.t("pc.searchField") : where === "dz" ? strings.t("dz.searchField") : strings.t("explore.search")
+              : ["pc", "dz", "mc", "au"].indexOf(where) >= 0 ? strings.t(where + ".searchField") : strings.t("explore.search")
             color: root.dim
             font.pixelSize: Style.font.subtitle
           }
@@ -3807,6 +3811,8 @@ Panel {
                     if (rowItem.modelData.id === "sp:liked") return Model.GLYPH.spotify
                     if (rowItem.modelData.id === "dz:fav") return Model.GLYPH.heart
                     if (rowItem.modelData.id === "dz:chart") return Model.GLYPH.deezer
+                    if (/^mc:/.test(rowItem.modelData.id)) return Model.GLYPH.mixcloud
+                    if (/^au:/.test(rowItem.modelData.id)) return Model.GLYPH.audius
                     if (/^sc:likes:/.test(rowItem.modelData.id)) return Model.GLYPH.soundcloud
                     if (/^cl:[a-f0-9]{8}$/.test(rowItem.modelData.id)) return Model.GLYPH.cloud
                     if (rowItem.modelData.id === "rd:fav") return Model.GLYPH.heart

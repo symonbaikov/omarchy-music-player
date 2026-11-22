@@ -1057,6 +1057,34 @@ class Deezer(unittest.TestCase):
                 h.DZ_MATCH_PATH = saved
 
 
+class MixcloudAudius(unittest.TestCase):
+    def test_mixcloud(self):
+        t = h.mc_track({"key": "/DJJazzyJeff/dj-jazzy-jeff-boiler-room/", "name": "Boiler Room", "audio_length": 3600,
+                        "user": {"name": "DJ Jazzy Jeff"},
+                        "pictures": {"large": "https://thumbnailer.mixcloud.com/unsafe/300x300/extaudio/a/b/c"}})
+        self.assertEqual(t["id"], "mc:DJJazzyJeff/dj-jazzy-jeff-boiler-room")
+        self.assertTrue(h.TRACK_KEY_RE.match(t["id"]))
+        self.assertEqual(h.track_url(t), "https://www.mixcloud.com/DJJazzyJeff/dj-jazzy-jeff-boiler-room/")
+        self.assertEqual(h.mix_entry(h.track_url(t))[0], t["id"])
+        self.assertIsNone(h.mc_track({"key": "/../x/"}))
+        self.assertTrue(h.is_list_id("mc:hot:deep-house") and h.is_list_id("mc:search"))
+
+    def test_audius(self):
+        t = h.au_track({"id": "V66vyPP", "title": "Fragments", "duration": 212, "user": {"name": "Xsetra"},
+                        "artwork": {"150x150": "https://v.example.org/content/baeaaaiqse1234567890/150x150.jpg"}})
+        self.assertEqual(t["id"], "au:V66vyPP")
+        self.assertEqual(t["art"], "https://v.example.org/content/baeaaaiqse1234567890/150x150.jpg")
+        self.assertIsNone(h.au_track({"id": "bad id"}))
+        self.assertIsNone(h.au_track({"id": "abc", "is_streamable": False}))
+        self.assertEqual(h.track_url({"id": "au:V66vyPP"}), "ytmusic-audius://V66vyPP")
+        self.assertEqual(h.mix_entry("ytmusic-audius://V66vyPP")[0], "au:V66vyPP")
+        self.assertEqual(h.audius_stream_url("au:V66vyPP"),
+                         "https://api.audius.co/v1/tracks/V66vyPP/stream?app_name=omarchy-music-player")
+        self.assertTrue(h.is_list_id("au:trending") and h.is_list_id("au:trending:hip-hop-rap"))
+        self.assertEqual(h.au_slug("Hip-Hop/Rap"), "hip-hop-rap")
+        self.assertTrue(h.cache_name("au:V66vyPP").startswith("au") and "-" not in h.cache_name("au:V66vyPP"))
+
+
 class Podcasts(unittest.TestCase):
     FEED = b"""<?xml version="1.0"?>
 <rss xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel>

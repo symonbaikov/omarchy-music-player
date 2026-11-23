@@ -30,8 +30,13 @@ The repository looks after itself, with a human approving every change.
 
 Secrets: `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) for fixes,
 `MARKETPLACE_TOKEN` (a classic GitHub token with `public_repo`) for the
-marketplace requests. Without them the watchdog still opens issues and
-releases still happen.
+marketplace requests. Without them the watchdog still opens issues (the
+fix job then skips its steps instead of failing) and releases still happen.
+
+A run where YouTube refuses the runner itself (a bot check, 429, "This
+content isn't available" for every client, a 403 on its API pages) ends
+`inconclusive`, not `broken`: data-center IPs get throttled for an hour or
+so while the same songs play on a home connection.
 
 Run the watchdog locally: `python3 tools/watchdog.py`. It uses throwaway
 directories and a silent mpv, so it doesn't touch a running player.

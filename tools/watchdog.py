@@ -30,7 +30,8 @@ helper's own commands: its lists (with covers) and a stream that opens.
 your own setup; the unit tests cover them.)
 
 Each check ends as ok, fail, or blocked. "blocked" means YouTube refused
-this machine itself (a bot check, rate limiting), which happens to
+this machine itself (a bot check, rate limiting, "This content isn't
+available" for every client, a 403 on its API pages), which happens to
 data-center IPs such as CI runners and says nothing about users; it must
 not raise an alarm. The overall status is:
 
@@ -66,7 +67,11 @@ PLUGIN_ID = "io.github.symonbaikov.ytmusic-mpv"
 SONG_A = "dQw4w9WgXcQ"
 SONG_B = "kJQP7kiw5Fk"
 CORE = ("lists", "playback", "clients")
-BLOCKED_RE = re.compile(r"confirm you.?re not a bot|too many requests|http error 429|rate.?limit", re.I)
+# How YouTube refuses a data-center IP. "This content isn't available" for
+# every client (on songs that are up) and a 403 on its API pages are how it
+# throttles a runner for an hour or so; on a home connection they still play.
+BLOCKED_RE = re.compile(r"confirm you.?re not a bot|too many requests|http error 429|rate.?limit"
+                        r"|this content isn.?t available|api page: http error 403", re.I)
 
 
 class Env:

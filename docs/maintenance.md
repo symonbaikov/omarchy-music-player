@@ -11,7 +11,8 @@ The repository looks after itself, with a human approving every change.
   (likes with covers, search, a stream), Mixcloud, Audius, radio and
   podcasts (a list and a stream that opens), Explore, lyrics and tabs.
   When YouTube playback is broken it opens a `watchdog` issue; when a
-  service is, a `watchdog-services` issue naming the broken ones. Each is
+  service is (it failed twice, a minute apart), a `watchdog-services` issue
+  naming the broken ones. Each is
   closed once things work again. When a service only refuses the CI runner
   itself (a bot check on a data-center IP), the run is *inconclusive* and
   raises no alarm. Run part of it locally with

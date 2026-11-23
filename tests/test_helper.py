@@ -1159,6 +1159,32 @@ class AppleMusic(unittest.TestCase):
         for bad in ("https://evil.example/us/playlist/x/pl.f4d106fed2bd4114", "https://music.apple.com/us/artist/x/123"):
             self.assertIsNone(h.AM_LINK_RE.match(bad), bad)
 
+    def test_chart_feed_tries_twice(self):
+        calls = []
+        feed = {"feed": {"results": [{"id": "1460471576", "name": "Ghost Love Score"}]}}
+
+        def flaky(url, max_bytes=0, timeout=15):
+            calls.append(url)
+            if len(calls) == 1:
+                raise urllib.error.URLError("timed out")
+            return feed
+        saved = (h.http_json, h.time.sleep)
+        h.http_json, h.time.sleep = flaky, lambda s: None
+        try:
+            self.assertEqual([r["id"] for r in h.apple_feed("songs", 10)], ["1460471576"])
+            self.assertEqual(len(calls), 2)
+            calls.clear()
+
+            def gone(url, max_bytes=0, timeout=15):
+                calls.append(url)
+                raise urllib.error.HTTPError(url, 404, "Not Found", None, None)
+            h.http_json = gone              # a 404 won't get better: no second try
+            with self.assertRaisesRegex(RuntimeError, "can't be reached.*404"):
+                h.apple_feed("songs", 10)
+            self.assertEqual(len(calls), 1)
+        finally:
+            h.http_json, h.time.sleep = saved
+
     def test_playlist_page(self):
         page = json.dumps({"data": [{"data": {"sections": [{"items": [
             {"title": "stupid song", "artistName": "Olivia Rodrigo", "duration": 209680,

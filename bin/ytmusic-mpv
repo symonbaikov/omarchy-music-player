@@ -5010,10 +5010,16 @@ def itunes_songs(results):
 
 
 def apple_feed(kind, limit):
-    try:
-        data = http_json(f"https://rss.marketingtools.apple.com/api/v2/{am_country()}/music/most-played/{limit}/{kind}.json")
-    except (OSError, ValueError) as exc:
-        raise RuntimeError("Apple Music's charts can't be reached") from exc
+    url = f"https://rss.marketingtools.apple.com/api/v2/{am_country()}/music/most-played/{limit}/{kind}.json"
+    for attempt in (1, 2):              # the feed drops a request now and then; once more before giving up
+        try:
+            data = http_json(url)
+            break
+        except (OSError, ValueError) as exc:
+            client_error = isinstance(exc, urllib.error.HTTPError) and 400 <= exc.code < 500
+            if attempt == 2 or client_error:
+                raise RuntimeError(f"Apple Music's charts can't be reached ({type(exc).__name__}: {exc})") from exc
+            time.sleep(1.5)
     return [r for r in (data.get("feed") or {}).get("results") or [] if isinstance(r, dict) and str(r.get("id", "")).isdigit()]
 
 

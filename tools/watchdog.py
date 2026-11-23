@@ -41,7 +41,9 @@ not raise an alarm. The overall status is:
 
 The services get a status of their own the same way (broken if one of
 them failed for real), so a service that breaks is reported without
-calling YouTube playback broken.
+calling YouTube playback broken. A service check that fails runs once
+more a minute later; only a second failure counts, since public APIs
+drop a request now and then.
 
 Usage: watchdog.py [--json FILE] [--report FILE] [--only NAME,NAME]
 Prints the status; writes `status=`, `services=` and `broken=` (the broken
@@ -400,6 +402,16 @@ def check_scores(env):
     return outcome(False, last_error(lines, proc) if not msg else "no tabs found")
 
 
+RETRY_PAUSE = 60
+
+
+def run_check(fn, env):
+    try:
+        return fn(env)
+    except Exception as exc:              # a crash in a check is a failure of that check
+        return outcome(False, f"{type(exc).__name__}: {exc}")
+
+
 CHECKS = [("lists", check_lists), ("playback", check_playback), ("clients", check_clients),
           ("backup", check_backup), ("peakmix", check_peakmix), ("mirrors", check_mirrors)]
 SERVICE_CHECKS = [("apple", check_apple), ("deezer", check_deezer), ("soundcloud", check_soundcloud),
@@ -457,10 +469,15 @@ def main():
         for name, fn in CHECKS + SERVICE_CHECKS:
             if only and name not in only:
                 continue
-            try:
-                results[name] = fn(env)
-            except Exception as exc:          # a crash in a check is a failure of that check
-                results[name] = outcome(False, f"{type(exc).__name__}: {exc}")
+            results[name] = run_check(fn, env)
+            if name in SERVICES and results[name]["result"] == "fail":
+                # A public API drops a request now and then: a service is broken
+                # only if it fails again a little later.
+                time.sleep(RETRY_PAUSE)
+                again = run_check(fn, env)
+                if again["result"] == "fail":
+                    again["detail"] = f"{again['detail']} (failed twice)"
+                results[name] = again
             if name == "playback":
                 env.helper("stop", timeout=30)
     finally:

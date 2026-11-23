@@ -143,6 +143,9 @@ jobs:
       pull-requests: write
       issues: write
       id-token: write
+    env:
+      # Without the token there's nothing to run the fix with: skip, don't fail.
+      HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -168,7 +171,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: echo "count=$(gh pr list --label auto-fix --state open --json number --jq length)" >> "$GITHUB_OUTPUT"
       - uses: anthropics/claude-code-action@acfe7992852970efb4fee683d63d628e3e52df67 # v1
-        if: steps.pending.outputs.count == '0'
+        if: steps.pending.outputs.count == '0' && env.HAS_TOKEN == 'true'
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ github.token }}

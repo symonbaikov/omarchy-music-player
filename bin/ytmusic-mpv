@@ -6356,7 +6356,7 @@ def cmd_taste(_args):
 # Submit. Nothing is sent before that. The issue is public, so the report
 # carries no paths, user names, browser profiles, song ids or tokens.
 
-REPO_URL = "https://github.com/symonbaikov/omarchy-ytmusic-mpv"
+REPO_URL = "https://github.com/symonbaikov/omarchy-music-player"
 REPORT_TEST_SONG = "dQw4w9WgXcQ"
 REPORT_MAX_URL = 7500
 

@@ -214,7 +214,7 @@
   "cloud.field.user": "USER",
   "cloud.field.pass": "PASSWORD",
   "cloud.field.domain": "DOMAIN",
-  "cloud.field.url": "SERVER ADDRESS (http://nas:4533)",
+  "cloud.field.url": "SERVER ADDRESS (nas:4533 or https://music.example.com)",
   "cloud.path": "FOLDER (EMPTY FOR EVERYTHING)",
   "cloud.pathS3": "BUCKET AND FOLDER (bucket/Music)",
   "cloud.pathSmb": "SHARE AND FOLDER (share/Music)",

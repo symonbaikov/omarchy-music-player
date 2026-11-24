@@ -77,6 +77,7 @@ import array
 import base64
 import fcntl
 import hashlib
+import ipaddress
 import json
 import math
 import operator
@@ -1823,6 +1824,27 @@ def mix_entry(name):
     return key, side
 
 
+def live_cookie_opts(cookie_opts):
+    """The cookies a new yt-dlp download may still use. A job (Peak mix, a
+    backup source, chords) gets the player's cookies when it starts; if
+    playback cookies were turned off or the browser changed since, its next
+    download goes without them (the settings as they are now win)."""
+    if not (cookie_opts or {}).get("cookiesfrombrowser"):
+        return {}
+    now = widget_settings()
+    if "playbackCookies" in now and now.get("playbackCookies") != "On":
+        return {}
+    if "browser" in now:
+        browser = str(now.get("browser") or "")
+        try:
+            same = browser != "none" and browser_spec_tuple(browser) == tuple(cookie_opts["cookiesfrombrowser"])
+        except (ValueError, TypeError, OSError):
+            same = False
+        if not same:
+            return {}
+    return cookie_opts
+
+
 def mix_cookie_opts(spec):
     """yt-dlp options for the cookies the player itself uses: mpv's
     ytdl-raw-options, which follow the playback-cookies setting."""
@@ -1880,6 +1902,7 @@ def download_audio(video_id, cookie_opts, clients=None, deadline=AUDIO_DEADLINE)
     started = time.time()
     last = "no client worked"
     for client in clients or AUDIO_CLIENTS:
+        cookie_opts = live_cookie_opts(cookie_opts)
         opts = {"format": "bestaudio/best", "outtmpl": os.path.join(MIX_DIR, f"audio-{name}.%(ext)s"),
                 "quiet": True, "no_warnings": True, "noprogress": True, "logger": QuietLogger(),
                 "noplaylist": True, "socket_timeout": 20, "max_filesize": 200 * 1024 * 1024,
@@ -5579,10 +5602,29 @@ def server_request(url, headers=None, method="GET", body=None, timeout=15):
         raise RuntimeError("the server's answer wasn't JSON (is this the right address?)")
 
 
+LOCAL_SUFFIXES = (".local", ".lan", ".home", ".home.arpa", ".internal", ".localdomain", ".ts.net")
+
+
+def local_host(host):
+    """A host on your own network (or your tailnet, which is encrypted
+    anyway): an address nobody else's network carries in the clear."""
+    host = host.strip("[]").lower().rstrip(".")
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return "." not in host or host == "localhost" or host.endswith(LOCAL_SUFFIXES)
+    return not ip.is_global              # private, loopback, link-local, Tailscale's 100.64/10
+
+
 def server_base(raw):
+    """The server's address as typed. Without a scheme it's https://, so a
+    password or a reusable token never goes out in the clear by accident;
+    only a host on your own network (http://nas:4533) gets http:// by
+    itself. Typing http:// yourself is respected."""
     url = str(raw or "").strip().rstrip("/")
     if url and "://" not in url:
-        url = "http://" + url
+        host = re.sub(r":[0-9]{1,5}$", "", url.split("/", 1)[0]) if not url.startswith("[") else url[1:].split("]", 1)[0]
+        url = ("http://" if local_host(host) else "https://") + url
     if not SERVER_URL_RE.match(url):
         raise RuntimeError("That server address doesn't look right")
     return url

@@ -56,7 +56,8 @@ before use.
 - **Music servers**: only your server (and plex.tv for Plex's sign-in and to
   find your server). Never the password: Subsonic keeps a salted token,
   Jellyfin and Plex the token they hand out, owner-only in `servers.json`,
-  deleted with the server.
+  deleted with the server. The sign-in goes over https unless you typed
+  `http://` or the server is on your own network (see services.md).
 - **Cloud storage**: only through rclone, only the storage you connected. A
   new storage's settings go into rclone's own config (passwords obscured as
   rclone stores them), passed to the helper over stdin, never on a command
@@ -103,8 +104,10 @@ before use.
   `piped-instances.kavin.rocks` are read once a day, unless you list your
   own.
 - **Peak mix** downloads the playing and the next song's audio (with the
-  same login as playback, so none unless `playbackCookies` is on) to the
-  cache and renders the transition with ffmpeg. It keeps the 12 newest
+  same login as playback, so none unless `playbackCookies` is on; each
+  download checks the setting as it is then, so turning it off or changing
+  the browser applies to a mix already being prepared) to the cache and
+  renders the transition with ffmpeg. It keeps the 12 newest
   downloads and 4 newest renders. Nothing while it's off.
 - **Updates**: a `git fetch` of the plugin's own checkout; nothing about you.
 - **Problem reports** are opened in your browser for you to read and submit.

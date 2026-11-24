@@ -117,6 +117,11 @@ computer. Played straight from its files, offline.
 - **Navidrome**, or any server with the Subsonic API (Airsonic, Gonic …): its
   address, your user name and password.
 - **Jellyfin**: its address, your user name and password.
+
+An address without `http://` or `https://` means https, unless it's on your
+own network (a name without dots like `nas`, `.local`/`.lan`/`.home.arpa`,
+a private or Tailscale IP), which gets http. Type `http://` yourself for a
+server elsewhere that has no https.
 - **Plex**: your browser opens Plex's sign-in; allow it, and the server with
   your music is found by itself.
 

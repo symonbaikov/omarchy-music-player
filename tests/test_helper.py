@@ -418,6 +418,46 @@ class BackupSources(unittest.TestCase):
         self.assertEqual(self.tried, [None, "mweb", "tv", "web_safari"])
         self.assertIsNotNone(h.audio_meta("dQw4w9WgXcQ"))       # cached for next time
 
+    def test_cookies_turned_off_mid_job_drop_from_the_next_download(self):
+        """Peak mix / backup / chords got the player's cookies when the job
+        started; a download after they were turned off goes without them."""
+        settings = {"playbackCookies": "On", "browser": "firefox"}
+        seen = []
+        saved = h.widget_settings
+        h.widget_settings = lambda: settings
+        test = self
+
+        class FakeYDL:
+            def __init__(self, opts):
+                seen.append(opts.get("cookiesfrombrowser"))
+                self.opts = opts
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+            def extract_info(self, url, download):
+                settings["playbackCookies"] = "Off"        # turned off while this one loads
+                raise Exception("ERROR: [youtube] x: Sign in to confirm you're not a bot")
+        from_mpv = h.mix_cookie_opts(h.cookie_spec("firefox"))
+        self.yt_dlp.YoutubeDL = FakeYDL
+        try:
+            opts = {"cookiesfrombrowser": h.browser_spec_tuple("firefox")}
+            self.assertEqual(h.live_cookie_opts(opts), opts)
+            with self.assertRaises(RuntimeError):
+                h.download_audio("dQw4w9WgXcQ", opts)
+            self.assertEqual(seen[0][0], "firefox")
+            self.assertTrue(seen[1:] and all(c is None for c in seen[1:]), seen)
+            settings.update(playbackCookies="On", browser="none")
+            self.assertEqual(h.live_cookie_opts(opts), {})
+            settings["browser"] = "chromium"
+            self.assertEqual(h.live_cookie_opts(opts), {})
+            settings["browser"] = "firefox"
+            self.assertEqual(h.live_cookie_opts(opts), opts)
+            # What mpv's ytdl-raw-options carry, parsed by yt-dlp, matches too.
+            self.assertEqual(h.live_cookie_opts(from_mpv), from_mpv)
+        finally:
+            h.widget_settings = saved
+
     def test_a_reason_about_the_song_stops_at_once(self):
         self.fake_ydl(works_for="ios", error="This video is available to this channel's members on level: X")
         with self.assertRaises(RuntimeError) as ctx:
@@ -1139,6 +1179,28 @@ class CoversEverywhere(unittest.TestCase):
         src = {"id": "0a1b2c3d", "kind": "local", "remote": "", "path": os.path.join(self.tmp.name, "music")}
         idx = h.index_entries(src, h.local_entries(src["path"]))
         self.assertTrue(os.path.isfile(idx["covers"]["Band/Album"]))
+
+
+class ServerAddress(unittest.TestCase):
+    def test_bare_address_is_https_unless_on_your_own_network(self):
+        cases = {
+            "music.example.com": "https://music.example.com",
+            "music.example.com:4533/navidrome": "https://music.example.com:4533/navidrome",
+            "1.1.1.1:8096": "https://1.1.1.1:8096",
+            "nas:4533": "http://nas:4533",
+            "localhost:8096": "http://localhost:8096",
+            "jellyfin.local": "http://jellyfin.local",
+            "media.home.arpa:8096": "http://media.home.arpa:8096",
+            "192.168.1.20:4533": "http://192.168.1.20:4533",
+            "100.101.102.103:4533": "http://100.101.102.103:4533",
+            "[fd00::5]:8096": "http://[fd00::5]:8096",
+            "http://music.example.com": "http://music.example.com",     # typed it: respected
+            "https://nas:4533/": "https://nas:4533",
+        }
+        for raw, want in cases.items():
+            self.assertEqual(h.server_base(raw), want, raw)
+        with self.assertRaises(RuntimeError):
+            h.server_base("ftp://nas")
 
 
 class AppleMusic(unittest.TestCase):

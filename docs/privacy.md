@@ -21,6 +21,8 @@ before use.
 - With `playbackCookies` on, the player passes the login to yt-dlp for each
   song it opens. Turning it off (or `browser: none`) takes it away from the
   running player too; if that can't be confirmed, the player stops.
+  When a song won't open with the login, its backup download tries once
+  without it (less access, never more).
 - Radio, autoplay and My Supermix use the same login, so they're
   personalized. Autoplay makes one request, when the last song starts.
 - Explore and search use YouTube Music's web API without an account: no

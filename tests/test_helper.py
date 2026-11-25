@@ -458,6 +458,39 @@ class BackupSources(unittest.TestCase):
         finally:
             h.widget_settings = saved
 
+    def test_with_a_login_that_fails_it_tries_once_without(self):
+        """yt-dlp uses other clients with a login; when YouTube breaks those,
+        the song still comes through yt-dlp's choice without the login."""
+        settings = {"playbackCookies": "On", "browser": "firefox"}
+        saved = h.widget_settings
+        h.widget_settings = lambda: settings
+        tried = []
+
+        class FakeYDL:
+            def __init__(self, opts):
+                self.opts = opts
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+            def extract_info(self, url, download):
+                client = (self.opts.get("extractor_args") or {}).get("youtube", {}).get("player_client", [None])[0]
+                login = bool(self.opts.get("cookiesfrombrowser"))
+                tried.append((client, login))
+                if login:
+                    raise Exception("ERROR: [youtube] x: The page needs to be reloaded.")
+                path = self.opts["outtmpl"].replace("%(ext)s", "webm")
+                pathlib.Path(path).write_bytes(b"audio")
+                return {"requested_downloads": [{"filepath": path}], "heatmap": []}
+        self.yt_dlp.YoutubeDL = FakeYDL
+        try:
+            meta, via = h.download_audio("dQw4w9WgXcQ", {"cookiesfrombrowser": h.browser_spec_tuple("firefox")})
+        finally:
+            h.widget_settings = saved
+        self.assertEqual(tried, [(None, True), (None, False)])
+        self.assertEqual(via, "default (without login)")
+        self.assertIsNotNone(h.audio_meta("dQw4w9WgXcQ"))
+
     def test_a_reason_about_the_song_stops_at_once(self):
         self.fake_ydl(works_for="ios", error="This video is available to this channel's members on level: X")
         with self.assertRaises(RuntimeError) as ctx:
@@ -1179,6 +1212,68 @@ class CoversEverywhere(unittest.TestCase):
         src = {"id": "0a1b2c3d", "kind": "local", "remote": "", "path": os.path.join(self.tmp.name, "music")}
         idx = h.index_entries(src, h.local_entries(src["path"]))
         self.assertTrue(os.path.isfile(idx["covers"]["Band/Album"]))
+
+
+class UnreadableLogin(unittest.TestCase):
+    """The browser's login can't be read (not installed, a keyring yt-dlp
+    can't open): what's public still plays, the library says why."""
+
+    def setUp(self):
+        self.saved = h.run_ytdlp_once
+        self.calls = []
+
+    def tearDown(self):
+        h.run_ytdlp_once = self.saved
+
+    def stub(self, error):
+        def once(url, browser, limit=None):
+            self.calls.append(browser)
+            if browser != "none":
+                raise RuntimeError(error)
+            return {"entries": [{"id": "dQw4w9WgXcQ"}]}
+        h.run_ytdlp_once = once
+
+    def test_public_lists_play_without_it(self):
+        self.stub('ERROR: could not find chromium cookies database in "~/.config/chromium"')
+        self.assertEqual(h.run_ytdlp("https://music.youtube.com/watch?v=x&list=RDAMVMx", "chromium")["entries"][0]["id"],
+                         "dQw4w9WgXcQ")
+        self.assertEqual(self.calls, ["chromium", "none"])
+
+    def test_the_library_says_what_to_do(self):
+        self.stub("ERROR: secretstorage not available as the `secretstorage` module is not installed.")
+        with self.assertRaisesRegex(RuntimeError, "Chromium keeps its login in the keyring.*python-secretstorage"):
+            h.run_ytdlp("https://www.youtube.com/feed/playlists", "chromium", public=False)
+        self.assertEqual(self.calls, ["chromium"])
+        self.stub('ERROR: could not find chromium cookies database in "~/.config/chromium"')
+        with self.assertRaisesRegex(RuntimeError, "No Chromium login found.*set the browser"):
+            h.run_ytdlp("https://www.youtube.com/feed/playlists", "chromium+gnomekeyring", public=False)
+
+    def test_youtube_refusing_is_not_a_login_problem(self):
+        self.stub("ERROR: [youtube:tab] x: The playlist does not exist.")
+        with self.assertRaisesRegex(RuntimeError, "does not exist"):
+            h.run_ytdlp("https://music.youtube.com/playlist?list=PLx", "firefox")
+        self.assertEqual(self.calls, ["firefox"])
+
+    def test_a_python_without_yt_dlp_hands_over_to_the_systems(self):
+        """mise/pyenv/uv python first in PATH: the helper runs under
+        /usr/bin/python3 instead, once."""
+        import importlib.util
+        saved = (importlib.util.find_spec, h.os.execv, h.SYSTEM_PYTHON, h.sys.executable)
+        execs = []
+        os.environ.pop("YTMUSIC_SYSTEM_PYTHON", None)
+        try:
+            importlib.util.find_spec = lambda name: None
+            h.os.execv = lambda path, argv: execs.append(argv)
+            system = saved[3]
+            h.SYSTEM_PYTHON = system
+            h.sys.executable = "/home/x/.local/share/mise/installs/python/3.15/bin/python3"
+            h.use_system_python()
+            self.assertEqual(execs[0][:2], [system, "-I"])
+            h.use_system_python()                   # already handed over: never loops
+            self.assertEqual(len(execs), 1)
+        finally:
+            importlib.util.find_spec, h.os.execv, h.SYSTEM_PYTHON, h.sys.executable = saved
+            os.environ.pop("YTMUSIC_SYSTEM_PYTHON", None)
 
 
 class ServerAddress(unittest.TestCase):

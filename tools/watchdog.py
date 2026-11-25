@@ -76,6 +76,27 @@ BLOCKED_RE = re.compile(r"confirm you.?re not a bot|too many requests|http error
                         r"|this content isn.?t available|api page: http error 403", re.I)
 
 
+# Says nothing by itself (a real yt-dlp break looks the same), but in a run
+# where YouTube already refused this machine it's that refusal again.
+SOFT_BLOCKED_RE = re.compile(r"failed to extract any player response|requested format is not available|"
+                             r"the page needs to be reloaded", re.I)
+
+
+def soften(results):
+    """Once a check was plainly blocked, failures that only look broken count
+    as blocked too: a throttled runner fails every client at once."""
+    if not any(r.get("result") == "blocked" for r in results.values()):
+        return results
+    for name, r in results.items():
+        if name in CORE + ("backup", "peakmix") and r.get("result") == "fail":
+            detail = r.get("detail") or ""
+            clients = r.get("clients") or {}
+            if SOFT_BLOCKED_RE.search(detail) or (clients and all(v != "ok" for v in clients.values())
+                                                     and SOFT_BLOCKED_RE.search(json.dumps(r))):
+                r["result"] = "blocked"
+    return results
+
+
 class Env:
     """Throwaway cache, runtime and PATH, so nothing touches a real player."""
 
@@ -482,6 +503,7 @@ def main():
                 env.helper("stop", timeout=30)
     finally:
         env.cleanup()
+    soften(results)
     status = overall(results)
     services = overall(results, SERVICES)
     broken = [name for name in SERVICES if results.get(name, {}).get("result") == "fail"]

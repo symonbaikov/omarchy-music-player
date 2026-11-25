@@ -41,6 +41,10 @@ Commands: `playlists`, `tracks`, `play`, `radio`, `search`, `explore`,
 `radio-*`, `mix-*`, `history-add`, `taste`, `ai-mix`, `report`, … (the
 `handlers` table in `main()`, and the docstring at the top).
 
+When the `python3` first in PATH can't import `yt_dlp` (mise, pyenv or uv
+installs its own), the helper runs itself again under `/usr/bin/python3`,
+where pacman put yt-dlp, numpy and secretstorage (`use_system_python`).
+
 - **Paths**: `CACHE_DIR` (`~/.cache/<id>`: lists, covers, mix audio,
   lyrics, chords), `DATA_DIR` (`~/.local/share/<id>`, owner-only: tokens,
   `mixes.json`, `cloud.json`, `servers.json`, `radio.json`,

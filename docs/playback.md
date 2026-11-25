@@ -59,7 +59,10 @@ downloaded.
 
 - **A song's stream won't open**: mpv asks the helper for a backup source:
   the song's cached audio, or a download through YouTube's other clients
-  (mobile web, TV, Safari, iOS). The panel says when a song came from one.
+  (mobile web, TV, Safari, iOS). With playback cookies on, the second try is
+  yt-dlp's own choice without the login: YouTube breaks the clients yt-dlp
+  uses with a login separately, and a public song doesn't need it. The
+  panel says when a song came from one.
   Songs that can't play for a reason about the song (members-only, private,
   removed) are skipped at once, with the reason; if your account can play
   it, **Play with my account** turns playback cookies on and plays it again.

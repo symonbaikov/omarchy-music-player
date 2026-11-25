@@ -275,11 +275,53 @@ def cookie_spec(browser):
     return f"{spec}:{profile}" if profile else spec
 
 
+BROWSER_NAMES = {"chromium": "Chromium", "chrome": "Chrome", "brave": "Brave", "firefox": "Firefox",
+                 "vivaldi": "Vivaldi", "edge": "Edge", "opera": "Opera", "safari": "Safari", "whale": "Whale"}
+# Lists that are yours only: read without your login they'd be wrong or empty.
+PRIVATE_LISTS = {"LM", "LL"}
+
+
 def cookie_args(browser):
     return [] if browser == "none" else ["--cookies-from-browser", cookie_spec(browser)]
 
 
-def run_ytdlp(url, browser, limit=None):
+# yt-dlp couldn't read the browser's login at all (no such browser here, a
+# keyring it can't open), as opposed to YouTube refusing the request.
+COOKIE_READ_RE = re.compile(
+    r"cookies database|secretstorage|decrypt|keyring|could not copy .{0,40}cookie|"
+    r"unsupported browser specified for cookies|failed to load cookies|cookies from browser", re.I)
+
+
+def cookie_problem(error, browser):
+    """What to tell the user when the login can't be read."""
+    name = BROWSER_NAMES.get(browser.partition(":")[0].partition("+")[0], browser.partition(":")[0])
+    if re.search(r"cookies database", error, re.I):
+        return (f"No {name} login found on this computer. In settings, set the browser you use "
+                "YouTube Music in (or none for public music only)")
+    if re.search(r"secretstorage", error, re.I):
+        return (f"{name} keeps its login in the keyring, and reading it needs python-secretstorage: "
+                "omarchy pkg add python-secretstorage")
+    return f"Couldn't read the {name} login: {error.replace('ERROR: ', '', 1)}"
+
+
+def run_ytdlp(url, browser, limit=None, public=True):
+    try:
+        return run_ytdlp_once(url, browser, limit)
+    except RuntimeError as exc:
+        if browser == "none" or not COOKIE_READ_RE.search(str(exc)):
+            raise
+        if not public:          # your library: without the login it's someone else's, or nothing
+            raise RuntimeError(cookie_problem(str(exc), browser)) from None
+        problem = cookie_problem(str(exc), browser)
+    # Radio, charts, public playlists and SoundCloud don't need the login:
+    # play them without it rather than not at all.
+    try:
+        return run_ytdlp_once(url, "none", limit)
+    except RuntimeError:
+        raise RuntimeError(problem) from None
+
+
+def run_ytdlp_once(url, browser, limit=None):
     cmd = [
         "yt-dlp", "--ignore-config", "--flat-playlist", "--dump-single-json",
         "--no-warnings", "--no-progress", "--socket-timeout", "20",
@@ -322,7 +364,7 @@ def fetch_playlists(browser):
     last_error = None
     for url in LIBRARY_URLS:
         try:
-            data = run_ytdlp(url, browser)
+            data = run_ytdlp(url, browser, public=False)
         except RuntimeError as exc:
             last_error = exc
             continue
@@ -396,7 +438,7 @@ def fetch_tracks(playlist_id, browser):
     if playlist_id.startswith("au:"):
         return fetch_au_tracks(playlist_id)
     url, limit = list_source(playlist_id)
-    data = run_ytdlp(url, browser, limit)
+    data = run_ytdlp(url, browser, limit, public=playlist_id not in PRIVATE_LISTS)
     items = []
     for entry in data.get("entries") or []:
         if not isinstance(entry, dict):
@@ -1901,13 +1943,21 @@ def download_audio(video_id, cookie_opts, clients=None, deadline=AUDIO_DEADLINE)
     os.makedirs(MIX_DIR, mode=0o700, exist_ok=True)
     started = time.time()
     last = "no client worked"
-    for client in clients or AUDIO_CLIENTS:
+    attempts = [(client, True) for client in clients or AUDIO_CLIENTS]
+    if cookie_opts and video_id[:3] not in ("sc:", "mc:", "au:"):
+        # With your login yt-dlp picks other YouTube clients than without
+        # it, and YouTube breaks those separately (late 2026: every client
+        # an older yt-dlp uses with a login failed, while the one it uses
+        # without played). Right after yt-dlp's own choice, try that once
+        # without the login.
+        attempts.insert(1, (None, False))
+    for client, with_login in attempts:
         cookie_opts = live_cookie_opts(cookie_opts)
         opts = {"format": "bestaudio/best", "outtmpl": os.path.join(MIX_DIR, f"audio-{name}.%(ext)s"),
                 "quiet": True, "no_warnings": True, "noprogress": True, "logger": QuietLogger(),
                 "noplaylist": True, "socket_timeout": 20, "max_filesize": 200 * 1024 * 1024,
                 "match_filter": lambda info, *_, **__: None if (info.get("duration") or 0) <= MIX_MAX_DURATION else "too long",
-                **cookie_opts}
+                **(cookie_opts if with_login else {})}
         if client:
             opts["extractor_args"] = {"youtube": {"player_client": [client]}}
         try:
@@ -1928,7 +1978,7 @@ def download_audio(video_id, cookie_opts, clients=None, deadline=AUDIO_DEADLINE)
             if isinstance(thumb, str) and re.match(r"^https://i[0-9]?\.sndcdn\.com/[A-Za-z0-9_./-]{1,300}$", thumb):
                 meta["thumbnail"] = thumb
             write_json_atomic(os.path.join(MIX_DIR, f"{name}.json"), meta)
-            return meta, client or "default"
+            return meta, (client or "default") + ("" if with_login or not cookie_opts else " (without login)")
         last = "the download didn't arrive"
     raise RuntimeError(last)
 
@@ -2368,7 +2418,7 @@ def music_session(browser):
             cookie_header = jar.get_cookie_header(MUSIC_ORIGIN + "/")
             cookies = {c.name: c.value for c in jar.get_cookies_for_url(MUSIC_ORIGIN + "/")}
     except Exception as exc:
-        fail(f"Couldn't read {browser.partition(':')[0]} cookies: {exc}", auth=True)
+        fail(cookie_problem(str(exc), browser), auth=True)
     authorization = sid_authorization(cookies)
     if not authorization or "LOGIN_INFO" not in cookies:
         fail(f"Not signed in to YouTube Music in {browser.partition(':')[0]}", auth=True)
@@ -6629,5 +6679,25 @@ def main():
         fail(f"Bad argument: {exc}")
 
 
+SYSTEM_PYTHON = "/usr/bin/python3"
+
+
+def use_system_python():
+    """mise, pyenv or uv often put their own python3 first in PATH. It has
+    none of the packages pacman installed (yt-dlp, numpy, secretstorage), so
+    the library, Peak mix, downloads and chords would all fail. Run under
+    the system's python instead, once."""
+    import importlib.util
+    if importlib.util.find_spec("yt_dlp") or os.environ.get("YTMUSIC_SYSTEM_PYTHON"):
+        return
+    # A venv's python is the system's binary with other packages: compare
+    # the interpreter as started and its prefix, not the file it links to.
+    if not os.path.exists(SYSTEM_PYTHON) or (sys.executable == SYSTEM_PYTHON and sys.prefix == sys.base_prefix):
+        return
+    os.environ["YTMUSIC_SYSTEM_PYTHON"] = "1"
+    os.execv(SYSTEM_PYTHON, [SYSTEM_PYTHON, "-I", os.path.realpath(__file__), *sys.argv[1:]])
+
+
 if __name__ == "__main__":
+    use_system_python()
     main()

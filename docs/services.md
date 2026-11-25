@@ -28,7 +28,10 @@ to where you were.
 - `yt-dlp` reads your library (your playlists plus Liked Music) and each
   playlist's songs. To see your private library it reads your browser's
   saved YouTube login from disk; the browser doesn't have to run. Public
-  playlists work without it (`browser: none`).
+  playlists work without it (`browser: none`). If the login can't be read
+  (that browser isn't installed, or Chromium's keyring needs
+  `python-secretstorage`), radio, charts and public playlists still load
+  without it, and your library says what to change.
 - **Like** songs (the heart adds them to Liked Music) and **add them to
   your playlists**, like in YouTube Music. The add-to-playlist list is
   YouTube Music's own: only playlists you created, with a ✓ where the song

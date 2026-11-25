@@ -37,7 +37,10 @@ fix job then skips its steps instead of failing) and releases still happen.
 A run where YouTube refuses the runner itself (a bot check, 429, "This
 content isn't available" for every client, a 403 on its API pages) ends
 `inconclusive`, not `broken`: data-center IPs get throttled for an hour or
-so while the same songs play on a home connection.
+so while the same songs play on a home connection. Once one check in a run is
+blocked that way, YouTube failures that only look broken ("Failed to
+extract any player response", "The page needs to be reloaded") count as
+blocked too.
 
 Run the watchdog locally: `python3 tools/watchdog.py`. It uses throwaway
 directories and a silent mpv, so it doesn't touch a running player.

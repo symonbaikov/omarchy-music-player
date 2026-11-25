@@ -11,7 +11,7 @@ omarchy bar set io.github.symonbaikov.ytmusic-mpv playbackCookies On
 
 | Key | Default | Meaning |
 |---|---|---|
-| `browser` | `chromium` | Where your YouTube login is read from: `chromium`, `brave`, `chrome`, `firefox`, `vivaldi`, `edge`, `opera`, a profile such as `brave:Profile 1`, or a Firefox-fork profile folder such as `firefox:~/.config/zen/<profile>`. Chromium-based browsers' keyring comes from their `--password-store` flag; add `+gnomekeyring` or `+kwallet6` to name it. `none`: public playlists only. |
+| `browser` | `chromium` | Where your YouTube login is read from: `chromium`, `brave`, `chrome`, `firefox`, `vivaldi`, `edge`, `opera`, a profile such as `brave:Profile 1`, or a Firefox-fork profile folder such as `firefox:~/.config/zen/<profile>`. Chromium-based browsers' keyring comes from their `--password-store` flag; add `+gnomekeyring` or `+kwallet6` to name it. `none`: public playlists only. If the browser's login can't be read, public music still plays and the library says why. |
 | `playbackCookies` | `Off` | Also use the login when playing. Only if private uploads or members-only songs fail. Turning it off applies to a playing song from the next one on. |
 | `showTitle` | `On` | The song's title next to the bar icon. |
 | `defaultVolume` | `60` | Starting volume (0–100). |
